@@ -1,6 +1,9 @@
 package srv
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -21,6 +24,24 @@ type Anchor struct {
 	CPS     float64 `json:"cps"`
 }
 
+// ErrUnknownVersion is returned by RecordEvalResult when the report names a
+// version that has never been published (including version 0, the empty
+// document, and any version from the future).
+var ErrUnknownVersion = errors.New("unknown version")
+
+// EvalResult is a browser's report on whether one published version actually
+// evaluated in its sandbox repl. The Go server never evaluates JavaScript; it
+// only stores and forwards these reports so the external agent can close its
+// feedback loop. Stats are opaque client-supplied JSON (e.g. hap counts) and
+// are echoed back to /api/state verbatim.
+type EvalResult struct {
+	Version int64           `json:"version"`
+	OK      bool            `json:"ok"`
+	Error   string          `json:"error,omitempty"`
+	Stats   json.RawMessage `json:"stats,omitempty"`
+	EpochMS int64           `json:"epochMs"`
+}
+
 // Version is a single published revision of the live code document.
 type Version struct {
 	Version int64  `json:"version"`
@@ -31,11 +52,14 @@ type Version struct {
 
 // Snapshot is a copy of the Conductor's state at one instant.
 type Snapshot struct {
-	Version          int64     `json:"version"`
-	Code             string    `json:"code"`
-	LastAgentMessage string    `json:"lastAgentMessage"`
-	Anchor           Anchor    `json:"anchor"`
-	History          []Version `json:"history"`
+	Version          int64       `json:"version"`
+	Code             string      `json:"code"`
+	LastAgentMessage string      `json:"lastAgentMessage"`
+	Anchor           Anchor      `json:"anchor"`
+	History          []Version   `json:"history"`
+	Playing          bool        `json:"playing"`
+	ListenerCount    int         `json:"listenerCount"`
+	LastEvalResult   *EvalResult `json:"lastEvalResult"`
 }
 
 // Conductor owns the single live performance. It is safe for concurrent use:
@@ -47,6 +71,16 @@ type Conductor struct {
 	code    string
 	message string
 	anchor  Anchor
+
+	// playing is transport intent, not audio: the server only records and
+	// broadcasts whether the performance is running or hushed.
+	playing bool
+
+	// listeners is pushed in by the WebSocket hub (issue .3). It stays 0
+	// until a hub exists and is always serialised.
+	listeners int
+
+	lastEval *EvalResult
 
 	history  []Version
 	histLen  int
@@ -61,6 +95,9 @@ func NewConductor(historyLimit int) *Conductor {
 	return &Conductor{
 		history: make([]Version, historyLimit),
 		anchor:  Anchor{EpochMS: time.Now().UnixMilli(), CPS: DefaultCPS},
+		// A fresh conductor is un-hushed: nothing has been sounded yet, but the
+		// transport is not muted either.
+		playing: true,
 	}
 }
 
@@ -104,6 +141,55 @@ func (c *Conductor) SetAnchor(epochMS int64, cps float64) {
 	c.anchor = Anchor{EpochMS: epochMS, CPS: cps}
 }
 
+// SetPlaying records transport intent (POST /api/hush and POST /api/play)
+// without touching the code document or the version counter. The Go server has
+// no audio and never evaluates JavaScript: this flag is broadcast so browsers
+// know whether to hush or resume their own repl.
+func (c *Conductor) SetPlaying(playing bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.playing = playing
+}
+
+// SetListenerCount records how many clients are currently subscribed. It exists
+// so the future WebSocket hub (issue .3) has one place to publish its
+// subscriber count; it deliberately does not bump the version. The count always
+// serialises (0 until a hub reports otherwise) and negative values are clamped
+// to 0.
+func (c *Conductor) SetListenerCount(n int) {
+	if n < 0 {
+		n = 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.listeners = n
+}
+
+// RecordEvalResult stores the most recent browser verdict on a published
+// version and returns ErrUnknownVersion if no such version exists. Reports that
+// name an older version than the stored one are accepted but ignored, so a
+// straggling client cannot regress the agent's view of the newest version.
+func (c *Conductor) RecordEvalResult(res EvalResult) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if res.Version <= 0 || res.Version > c.version {
+		return fmt.Errorf("%w: %d (latest is %d)", ErrUnknownVersion, res.Version, c.version)
+	}
+	if c.lastEval != nil && res.Version < c.lastEval.Version {
+		return nil
+	}
+	stored := EvalResult{
+		Version: res.Version,
+		OK:      res.OK,
+		Error:   res.Error,
+		Stats:   cloneRawMessage(res.Stats),
+		EpochMS: time.Now().UnixMilli(),
+	}
+	c.lastEval = &stored
+	return nil
+}
+
 // Snapshot returns a copy of the current state.
 func (c *Conductor) Snapshot() Snapshot {
 	c.mu.RLock()
@@ -130,5 +216,30 @@ func (c *Conductor) snapshotLocked() Snapshot {
 		LastAgentMessage: c.message,
 		Anchor:           c.anchor,
 		History:          hist,
+		Playing:          c.playing,
+		ListenerCount:    c.listeners,
+		LastEvalResult:   cloneEvalResult(c.lastEval),
 	}
+}
+
+// cloneEvalResult deep-copies a stored eval result so callers holding a
+// snapshot can never mutate (or corrupt the bytes of) Conductor internals.
+func cloneEvalResult(res *EvalResult) *EvalResult {
+	if res == nil {
+		return nil
+	}
+	cp := *res
+	cp.Stats = cloneRawMessage(res.Stats)
+	return &cp
+}
+
+// cloneRawMessage copies opaque JSON so returned bytes never alias the stored
+// backing array.
+func cloneRawMessage(raw json.RawMessage) json.RawMessage {
+	if raw == nil {
+		return nil
+	}
+	cp := make(json.RawMessage, len(raw))
+	copy(cp, raw)
+	return cp
 }

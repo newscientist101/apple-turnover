@@ -117,13 +117,11 @@ func mainDomainFromHost(h string) string {
 	return host
 }
 
-// Serve starts the HTTP server with the configured routes
+// Serve starts the HTTP server with the configured routes. All routing lives in
+// routes() so tests can drive the exact same handler tree over httptest.
 func (s *Server) Serve(addr string) error {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", s.HandleRoot)
-	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(s.StaticDir))))
 	slog.Info("starting server", "addr", addr)
-	return http.ListenAndServe(addr, mux)
+	return http.ListenAndServe(addr, s.routes())
 }
 
 func buildHeaderEntries(r *http.Request) []headerEntry {

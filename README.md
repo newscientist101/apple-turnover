@@ -57,6 +57,14 @@ same one `Server.Serve` mounts) and drives it the way the external agent does:
   `/ws` matches exactly one path (`/ws/`, `/ws/extra` and `/api/ws` keep their
   pre-existing 404 shapes). Every dial and read carries an explicit deadline, so
   a wedged handler fails the test instead of hanging it;
+* the hub core (`srv/hub_test.go`, issue `.3.3`): one broadcast reaches every
+  subscriber with byte-identical payloads, an unsubscribed (or dropped)
+  subscriber stops receiving and has its channel closed exactly once (a double
+  close panics, so the mutation `28-hub-double-close-allowed` is caught that
+  way), concurrent subscribe/unsubscribe/broadcast churn is clean under `-race`
+  including concurrent `SubscriberCount` polling, and a non-reading subscriber
+  cannot block the fan-out (`30-hub-slow-client-blocks` wedges the hub and is
+  reported as a failure after a 10s watchdog instead of hanging);
 * the shipped binary: `cmd/srv` is built and run on a loopback port and the loop
   is re-driven through the real process.
 
@@ -161,10 +169,22 @@ queries, and the `modernc.org/sqlite` dependency) are gone.
 - `srv/api.go`: the agent HTTP API and the whole routing tree (`routes()`)
 - `srv/ws.go`: the listener WebSocket endpoint. Currently only the upgrade
   slice (issue `.3.2`): `GET /ws` accepts the handshake and closes cleanly.
-  There is no hub, no fan-out, no snapshot on connect, no ping/pong and no
-  listener counting yet — a listener that connects receives nothing but a close
-  frame until the later hub subtasks land.
+  It is not wired to the hub yet, so a listener that connects still receives
+  nothing but a close frame until the later hub subtasks (`/api` fan-out,
+  snapshot on connect, listener count, ping/pong) land.
+- `srv/hub.go`: the listener hub core (issue `.3.3`), decoupled from the
+  Conductor and from the wire format: it fans one encoded `[]byte` message out
+  to every subscriber. One goroutine owns the subscriber set, so all of
+  subscribe/unsubscribe/broadcast are safe concurrently; each subscriber has a
+  small buffered send channel and a subscriber that cannot keep up is dropped
+  and its channel closed exactly once rather than allowed to block the fan-out.
+  No Conductor wiring, no snapshot on connect, no listener count, no ping/pong
+  and no encoding yet — those are issues `.3.4`–`.3.6`.
 - `srv/integration_test.go`: the end-to-end verification harness (see above)
 - `srv/ws_test.go`: the WebSocket slice of that harness
+- `srv/hub_test.go`: the hub slice of that harness: fan-out to N subscribers
+  with identical bytes, unsubscribe closing exactly once, concurrent churn
+  under `-race`, and the slow/non-reading subscriber that must not block anyone
+  (bounded by watchdogs so a wedged hub fails instead of hanging)
 - `srv/templates`: Go HTML templates
 - `scripts/mutation-check.sh`: sabotage check proving the tests are non-vacuous

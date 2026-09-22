@@ -1,0 +1,3 @@
+srv/srv
+db.sqlite3
+*.sqlite3

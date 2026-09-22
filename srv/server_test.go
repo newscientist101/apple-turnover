@@ -60,6 +60,39 @@ func TestServerSetupAndHandlers(t *testing.T) {
 
 }
 
+// TestRootRendersToCompletion guards against template/struct drift: the visitor
+// counter was removed along with the db machinery, and if the template keeps
+// referencing a field that no longer exists on pageData, html/template aborts
+// mid-render. HandleRoot only logs that as a warning and still returns 200, so
+// the failure is invisible without asserting on the body. "Copied to clipboard!"
+// and the Shelley ribbon sit at the very end of the document, so their presence
+// proves the whole template executed.
+func TestRootRendersToCompletion(t *testing.T) {
+	server := New("render-hostname")
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	server.HandleRoot(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	body := w.Body.String()
+	for _, want := range []string{
+		"Copied to clipboard!",
+		"Edit with Shelley",
+		"</html>",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("template did not render to completion: body is missing %q (len=%d)", want, len(body))
+		}
+	}
+	if strings.Contains(body, "VisitCount") {
+		t.Error("body still references removed VisitCount field")
+	}
+}
+
 func TestUtilityFunctions(t *testing.T) {
 	t.Run("mainDomainFromHost function", func(t *testing.T) {
 		tests := []struct {

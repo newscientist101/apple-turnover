@@ -394,17 +394,6 @@ hr::after {
   font-style: italic;
 }
 
-/* Counter section */
-.counter {
-  margin: 20px auto;
-  font-size: 16px;
-  color: #666;
-}
-
-.counter strong {
-  color: #000;
-}
-
 /* Mobile responsive */
 @media (max-width: 600px) {
   body {

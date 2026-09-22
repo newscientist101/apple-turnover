@@ -1,8 +1,9 @@
 # Go Shelley Template
 
-This is a starter template for building Go web applications on exe.dev. It demonstrates end-to-end usage including HTTP handlers, authentication, database integration, and deployment.
-
-Use this as a foundation to build your own service.
+This app is a live, multi-user algorithmic music performance. A Go server acts
+as the conductor holding the single live performance state, and an external AI
+agent drives it by pushing strudel code over HTTP; browsers subscribe over
+WebSocket and hot-swap the audio.
 
 ## Building and Running
 
@@ -45,13 +46,21 @@ that this template uses.
 When proxied through exed, requests will include `X-ExeDev-UserID` and
 `X-ExeDev-Email` if the user is authenticated via exe.dev.
 
-## Database
+## State
 
-This template uses sqlite (`db.sqlite3`). SQL queries are managed with sqlc.
+There is no database. The performance is live and ephemeral: one in-memory
+`Conductor` (`srv/conductor.go`) owns the current strudel code document, a
+monotonically increasing version, the shared timeline anchor (epoch ms + cps),
+the last agent message, and a bounded history of recent code versions. Nothing
+is persisted, and there is no set saving.
+
+The template's SQLite/visitors machinery was replaced by this in-memory core:
+the visitors view counter and the `db` package (sqlc generated code, migrations,
+queries, and the `modernc.org/sqlite` dependency) are gone.
 
 ## Code layout
 
 - `cmd/srv`: main package (binary entrypoint)
 - `srv`: HTTP server logic (handlers)
+- `srv/conductor.go`: the in-memory Conductor session core
 - `srv/templates`: Go HTML templates
-- `db`: SQLite open + migrations (001-base.sql)

@@ -3,20 +3,12 @@ package srv
 import (
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestServerSetupAndHandlers(t *testing.T) {
-	tempDB := filepath.Join(t.TempDir(), "test_server.sqlite3")
-	t.Cleanup(func() { os.Remove(tempDB) })
-
-	server, err := New(tempDB, "test-hostname")
-	if err != nil {
-		t.Fatalf("failed to create server: %v", err)
-	}
+	server := New("test-hostname")
 
 	// Test root endpoint without auth
 	t.Run("root endpoint unauthenticated", func(t *testing.T) {
@@ -66,34 +58,6 @@ func TestServerSetupAndHandlers(t *testing.T) {
 		}
 	})
 
-	// Test view counter functionality
-	t.Run("view counter increments", func(t *testing.T) {
-		// Make first request
-		req1 := httptest.NewRequest(http.MethodGet, "/", nil)
-		req1.Header.Set("X-ExeDev-UserID", "counter-test")
-		req1.RemoteAddr = "192.168.1.100:12345"
-		w1 := httptest.NewRecorder()
-		server.HandleRoot(w1, req1)
-
-		// Should show "1 times" or similar
-		body1 := w1.Body.String()
-		if !strings.Contains(body1, "1</strong> times") {
-			t.Error("expected first visit to show 1 time")
-		}
-
-		// Make second request with same user
-		req2 := httptest.NewRequest(http.MethodGet, "/", nil)
-		req2.Header.Set("X-ExeDev-UserID", "counter-test")
-		req2.RemoteAddr = "192.168.1.100:12345"
-		w2 := httptest.NewRecorder()
-		server.HandleRoot(w2, req2)
-
-		// Should show "2 times" or similar
-		body2 := w2.Body.String()
-		if !strings.Contains(body2, "2</strong> times") {
-			t.Error("expected second visit to show 2 times")
-		}
-	})
 }
 
 func TestUtilityFunctions(t *testing.T) {

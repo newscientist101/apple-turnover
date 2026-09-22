@@ -1,7 +1,6 @@
 package srv
 
 import (
-	"database/sql"
 	"fmt"
 	"html/template"
 	"log/slog"
@@ -13,26 +12,28 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"srv.exe.dev/db"
-	"srv.exe.dev/db/dbgen"
 )
 
+// HistoryLimit is how many recent code versions the Conductor retains for the
+// external agent to read back.
+const HistoryLimit = 32
+
+// Server is the HTTP front end. It owns the single in-memory Conductor for the
+// live performance; there is no persistence.
 type Server struct {
-	DB           *sql.DB
+	Conductor    *Conductor
 	Hostname     string
 	TemplatesDir string
 	StaticDir    string
 }
 
 type pageData struct {
-	Hostname   string
-	Now        string
-	UserEmail  string
-	VisitCount int64
-	LoginURL   string
-	LogoutURL  string
-	Headers    []headerEntry
+	Hostname  string
+	Now       string
+	UserEmail string
+	LoginURL  string
+	LogoutURL string
+	Headers   []headerEntry
 }
 
 type headerEntry struct {
@@ -41,55 +42,30 @@ type headerEntry struct {
 	AddedByExe bool
 }
 
-func New(dbPath, hostname string) (*Server, error) {
+func New(hostname string) *Server {
 	_, thisFile, _, _ := runtime.Caller(0)
 	baseDir := filepath.Dir(thisFile)
-	srv := &Server{
+	return &Server{
+		Conductor:    NewConductor(HistoryLimit),
 		Hostname:     hostname,
 		TemplatesDir: filepath.Join(baseDir, "templates"),
 		StaticDir:    filepath.Join(baseDir, "static"),
 	}
-	if err := srv.setUpDatabase(dbPath); err != nil {
-		return nil, err
-	}
-	return srv, nil
 }
 
 func (s *Server) HandleRoot(w http.ResponseWriter, r *http.Request) {
-	// Identity from proxy headers (if present)
-	// UserID is stable; email is useful.
-	userID := strings.TrimSpace(r.Header.Get("X-ExeDev-UserID"))
+	// Identity from proxy headers (if present). The live performance is
+	// shared and anonymous; identity is only used to greet the viewer.
 	userEmail := strings.TrimSpace(r.Header.Get("X-ExeDev-Email"))
 	now := time.Now()
 
-	var count int64
-	if userID != "" && s.DB != nil {
-		q := dbgen.New(s.DB)
-		shouldRecordView := r.Method == http.MethodGet
-		if shouldRecordView {
-			// Best effort
-			err := q.UpsertVisitor(r.Context(), dbgen.UpsertVisitorParams{
-				ID:        userID,
-				CreatedAt: now,
-				LastSeen:  now,
-			})
-			if err != nil {
-				slog.Warn("upsert visitor", "error", err, "user_id", userID)
-			}
-		}
-		if v, err := q.VisitorWithID(r.Context(), userID); err == nil {
-			count = v.ViewCount
-		}
-	}
-
 	data := pageData{
-		Hostname:   s.Hostname,
-		Now:        now.Format(time.RFC3339),
-		UserEmail:  userEmail,
-		VisitCount: count,
-		LoginURL:   loginURLForRequest(r),
-		LogoutURL:  "/__exe.dev/logout",
-		Headers:    buildHeaderEntries(r),
+		Hostname:  s.Hostname,
+		Now:       now.Format(time.RFC3339),
+		UserEmail: userEmail,
+		LoginURL:  loginURLForRequest(r),
+		LogoutURL: "/__exe.dev/logout",
+		Headers:   buildHeaderEntries(r),
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -139,19 +115,6 @@ func mainDomainFromHost(h string) string {
 	}
 	// Return as-is for custom domains
 	return host
-}
-
-// SetupDatabase initializes the database connection and runs migrations
-func (s *Server) setUpDatabase(dbPath string) error {
-	wdb, err := db.Open(dbPath)
-	if err != nil {
-		return fmt.Errorf("failed to open db: %w", err)
-	}
-	s.DB = wdb
-	if err := db.RunMigrations(wdb); err != nil {
-		return fmt.Errorf("failed to run migrations: %w", err)
-	}
-	return nil
 }
 
 // Serve starts the HTTP server with the configured routes

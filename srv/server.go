@@ -19,12 +19,21 @@ import (
 const HistoryLimit = 32
 
 // Server is the HTTP front end. It owns the single in-memory Conductor for the
-// live performance; there is no persistence.
+// live performance and the Hub that fans the encoded performance out to every
+// connected listener; there is no persistence.
 type Server struct {
 	Conductor    *Conductor
+	Hub          *Hub
 	Hostname     string
 	TemplatesDir string
 	StaticDir    string
+
+	// wsWriteTimeout bounds one frame write to one listener (see handleWS). It is
+	// a field rather than a constant for one reason: the tests must be able to
+	// prove the bound exists without spending the production timeout in every
+	// run. It is read by handlers and written only by New, before the server
+	// serves anything.
+	wsWriteTimeout time.Duration
 }
 
 type pageData struct {
@@ -47,9 +56,12 @@ func New(hostname string) *Server {
 	baseDir := filepath.Dir(thisFile)
 	return &Server{
 		Conductor:    NewConductor(HistoryLimit),
+		Hub:          NewHub(HubDefaultSendBuffer),
 		Hostname:     hostname,
 		TemplatesDir: filepath.Join(baseDir, "templates"),
 		StaticDir:    filepath.Join(baseDir, "static"),
+
+		wsWriteTimeout: defaultWSWriteTimeout,
 	}
 }
 

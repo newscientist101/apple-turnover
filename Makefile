@@ -46,5 +46,11 @@ verify:
 # implementation on purpose, runs the tests, and requires them to fail. The
 # script reverts every mutation and reports any it did not catch. See
 # scripts/mutation-check.sh and the README.
+#
+# The outer timeout bounds the whole grid: each mutation costs one full test run
+# (and the deliberate wedge/binary-search mutations cost the go test timeout),
+# so the wall time grows with the number of mutations. It is currently ~5
+# minutes for 41 mutations; 900s leaves real headroom on a loaded machine while
+# still turning an infinite hang into a failure. Raise it when the grid grows.
 mutation-check:
-	timeout 300 ./scripts/mutation-check.sh
+	timeout 900 ./scripts/mutation-check.sh

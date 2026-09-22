@@ -101,6 +101,13 @@ MUTATIONS=$(cat <<'EOF'
 32-hub-count-escapes-the-hub-goroutine|srv/hub.go|case reply := <-h.count:\n\t\t\treply <- len(subs)|case reply := <-h.count:\n\t\t\tgo func() { reply <- len(subs) }()
 33-hub-dropped-client-not-removed|srv/hub.go|// hub down. removeSubscriber closes its channel exactly once.\n\t\t\t\t\tremoveSubscriber(subs, sub)|// hub down. removeSubscriber closes its channel exactly once.\n\t\t\t\t\t_ = sub
 34-hub-removal-not-recorded|srv/hub.go|close(sub.ch)\n\tdelete(subs, sub)\n\treturn true|close(sub.ch)\n\treturn true
+35-ws-listener-never-subscribes|srv/ws.go|sub, err := s.Hub.Subscribe()|sub, err := (*Subscriber)(nil), error(ErrHubClosed)
+36-ws-subscriber-leaked-on-exit|srv/ws.go|\tdefer s.Hub.Unsubscribe(sub)|\t_ = sub // deliberately leaked: the subscriber is never removed
+37-ws-broadcast-trimmed|srv/ws.go|return conn.Write(ctx, websocket.MessageText, msg)|return conn.Write(ctx, websocket.MessageText, msg[:max(0, len(msg)-1)])
+38-ws-write-deadline-removed|srv/ws.go|ctx, cancel := context.WithTimeout(context.Background(), s.wsWriteTimeout)|ctx, cancel := context.WithCancel(context.Background())
+39-ws-going-away-not-reported|srv/ws.go|websocket.StatusGoingAway, "server shutting down"|websocket.StatusNormalClosure, "server shutting down"
+40-ws-client-close-not-noticed|srv/ws.go|clientGone := conn.CloseRead(context.Background())|clientGone := context.Background()
+41-ws-binary-frames|srv/ws.go|return conn.Write(ctx, websocket.MessageText, msg)|return conn.Write(ctx, websocket.MessageBinary, msg)
 EOF
 )
 

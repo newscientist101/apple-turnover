@@ -48,15 +48,22 @@ same one `Server.Serve` mounts) and drives it the way the external agent does:
   end-of-document markers, which is what catches an `html/template` render that
   aborts mid-document while `HandleRoot` still returns 200), `/static/` still
   serves, and a non-`/api` 404 stays net/http's plain text;
-* the WebSocket upgrade path (`srv/ws_test.go`), over both a real loopback
-  listener and the in-process recorder: a genuine handshake is answered 101 and
-  then closed with a 1000 normal-closure frame, a non-GET verb on `/ws` is 405
+* the WebSocket upgrade path and the `/ws`-to-hub wiring (`srv/ws_test.go`,
+  issues `.3.2` and `.3.4.2`), over both a real loopback listener and the
+  in-process recorder: a genuine handshake is answered 101 and the listener
+  STAYS connected and subscribed, a message broadcast through the hub arrives as
+  one text frame carrying exactly the bytes that were broadcast (in order), a
+  client disconnect unsubscribes it (the hub count drops), a hub shutdown ends
+  the loop and the client sees a clean 1000 normal closure, a listener that
+  connects after the hub is gone is closed 1001, a non-GET verb on `/ws` is 405
   with an `Allow` header, a handshake-less GET of `/ws` is a clear 426 (400 for
   a bad `Sec-WebSocket-Version`, 501 for a writer that cannot be hijacked)
   rather than a panic, the cross-origin handshake is still refused with 403, and
   `/ws` matches exactly one path (`/ws/`, `/ws/extra` and `/api/ws` keep their
   pre-existing 404 shapes). Every dial and read carries an explicit deadline, so
-  a wedged handler fails the test instead of hanging it;
+  a wedged handler fails the test instead of hanging it — and a wedged listener
+  (a client that never reads a 1 MiB frame through a 1 KiB receive buffer) must
+  not be able to hold up shutdown either;
 * the hub core (`srv/hub_test.go`, issue `.3.3`): one broadcast reaches every
   subscriber with byte-identical payloads, an unsubscribed (or dropped)
   subscriber stops receiving and has its channel closed exactly once (a double
@@ -167,11 +174,15 @@ queries, and the `modernc.org/sqlite` dependency) are gone.
 - `srv`: HTTP server logic (handlers)
 - `srv/conductor.go`: the in-memory Conductor session core
 - `srv/api.go`: the agent HTTP API and the whole routing tree (`routes()`)
-- `srv/ws.go`: the listener WebSocket endpoint. Currently only the upgrade
-  slice (issue `.3.2`): `GET /ws` accepts the handshake and closes cleanly.
-  It is not wired to the hub yet, so a listener that connects still receives
-  nothing but a close frame until the later hub subtasks (`/api` fan-out,
-  snapshot on connect, listener count, ping/pong) land.
+- `srv/ws.go`: the listener WebSocket endpoint (issues `.3.2` + `.3.4.2`).
+  `GET /ws` accepts the handshake, registers the listener with the hub, relays
+  every hub message to it as one text frame under a per-frame write deadline,
+  and unsubscribes on every exit path. The read side is `Conn.CloseRead`, whose
+  cancelled context is the "client disconnected" signal, so a client that sends
+  nothing cannot block the handler and no read of its own is needed. Still not
+  wired: no snapshot on connect and no `/api` fan-out (issue `.3.4.3`), no
+  listener count through the Conductor (issue `.3.5`), and no ping/pong or
+  dead-socket reaping (issue `.3.6`).
 - `srv/hub.go`: the listener hub core (issue `.3.3`), decoupled from the
   Conductor and from the wire format: it fans one encoded `[]byte` message out
   to every subscriber. One goroutine owns the subscriber set, so all of
@@ -179,9 +190,12 @@ queries, and the `modernc.org/sqlite` dependency) are gone.
   small buffered send channel and a subscriber that cannot keep up is dropped
   and its channel closed exactly once rather than allowed to block the fan-out.
   No Conductor wiring, no snapshot on connect, no listener count, no ping/pong
-  and no encoding yet — those are issues `.3.4`–`.3.6`.
+  and no encoding yet — those are issues `.3.4.3`–`.3.6`.
 - `srv/integration_test.go`: the end-to-end verification harness (see above)
-- `srv/ws_test.go`: the WebSocket slice of that harness
+- `srv/ws_test.go`: the WebSocket slice of that harness: the upgrade, the
+  hub-to-frame relay (exact bytes, in order), disconnect/unsubscribe, clean
+  close on hub shutdown, the refused connection after hub close, and the wedged
+  listener that must not be able to hold up shutdown
 - `srv/hub_test.go`: the hub slice of that harness: fan-out to N subscribers
   with identical bytes, unsubscribe closing exactly once, concurrent churn
   under `-race`, and the slow/non-reading subscriber that must not block anyone

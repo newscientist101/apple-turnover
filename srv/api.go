@@ -62,6 +62,16 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/play", s.handleAPIPlay)
 	mux.HandleFunc("/api/play", methodNotAllowed(http.MethodPost))
 
+	// The listener WebSocket. It follows the /api idiom above rather than
+	// letting net/http answer: the bare pattern is the wrong-verb fallback (405
+	// plus Allow), while a WebSocket request without valid upgrade headers is
+	// answered by the upgrade library itself with a specific error (426 Upgrade
+	// Required, 400, or 501 if the writer cannot be hijacked) instead of a
+	// panic or a 500. Only /ws is matched: /ws/ and /ws/anything are plain
+	// 404s, exactly like every other unregistered non-/api path.
+	mux.HandleFunc("GET /ws", s.handleWS)
+	mux.HandleFunc("/ws", methodNotAllowed(http.MethodGet))
+
 	// Anything else under /api (including bare /api) is a JSON 404.
 	mux.HandleFunc("/api", handleAPINotFound)
 	mux.HandleFunc("/api/", handleAPINotFound)

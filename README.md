@@ -48,6 +48,15 @@ same one `Server.Serve` mounts) and drives it the way the external agent does:
   end-of-document markers, which is what catches an `html/template` render that
   aborts mid-document while `HandleRoot` still returns 200), `/static/` still
   serves, and a non-`/api` 404 stays net/http's plain text;
+* the WebSocket upgrade path (`srv/ws_test.go`), over both a real loopback
+  listener and the in-process recorder: a genuine handshake is answered 101 and
+  then closed with a 1000 normal-closure frame, a non-GET verb on `/ws` is 405
+  with an `Allow` header, a handshake-less GET of `/ws` is a clear 426 (400 for
+  a bad `Sec-WebSocket-Version`, 501 for a writer that cannot be hijacked)
+  rather than a panic, the cross-origin handshake is still refused with 403, and
+  `/ws` matches exactly one path (`/ws/`, `/ws/extra` and `/api/ws` keep their
+  pre-existing 404 shapes). Every dial and read carries an explicit deadline, so
+  a wedged handler fails the test instead of hanging it;
 * the shipped binary: `cmd/srv` is built and run on a loopback port and the loop
   is re-driven through the real process.
 
@@ -150,6 +159,12 @@ queries, and the `modernc.org/sqlite` dependency) are gone.
 - `srv`: HTTP server logic (handlers)
 - `srv/conductor.go`: the in-memory Conductor session core
 - `srv/api.go`: the agent HTTP API and the whole routing tree (`routes()`)
+- `srv/ws.go`: the listener WebSocket endpoint. Currently only the upgrade
+  slice (issue `.3.2`): `GET /ws` accepts the handshake and closes cleanly.
+  There is no hub, no fan-out, no snapshot on connect, no ping/pong and no
+  listener counting yet — a listener that connects receives nothing but a close
+  frame until the later hub subtasks land.
 - `srv/integration_test.go`: the end-to-end verification harness (see above)
+- `srv/ws_test.go`: the WebSocket slice of that harness
 - `srv/templates`: Go HTML templates
 - `scripts/mutation-check.sh`: sabotage check proving the tests are non-vacuous

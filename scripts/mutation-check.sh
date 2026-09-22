@@ -90,6 +90,10 @@ MUTATIONS=$(cat <<'EOF'
 21-history-window-wrong-start|srv/conductor.go|start := c.histNext - c.histLen|start := 0
 22-snapshot-omits-playing|srv/conductor.go|Playing:          c.playing,|Playing:          false,
 23-wedged-state-handler|srv/api.go|func (s *Server) handleAPIState(w http.ResponseWriter, r *http.Request) {|func (s *Server) handleAPIState(w http.ResponseWriter, r *http.Request) {\n\tselect {} // deliberately wedged: never responds|TestIntegrationParallelPushesAreBoundedAndContiguous
+24-ws-405-fallback-removed|srv/api.go|mux.HandleFunc("/ws", methodNotAllowed(http.MethodGet))|_ = methodNotAllowed(http.MethodGet)
+25-ws-wrong-close-status|srv/ws.go|websocket.StatusNormalClosure|websocket.StatusGoingAway
+26-ws-origin-check-disabled|srv/ws.go|websocket.Accept(w, r, nil)|websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+27-ws-closes-without-handshake|srv/ws.go|conn.Close(websocket.StatusNormalClosure, "")|conn.CloseNow()
 EOF
 )
 

@@ -505,9 +505,22 @@ func TestHubConcurrentSubscribeUnsubscribeBroadcast(t *testing.T) {
 	select {
 	case <-finished:
 	case <-time.After(hubWatchdogTimeout):
+		// The churn did not finish: the hub is likely wedged (e.g., blocked in
+		// deliver). close(stop) signals the watcher, but the watcher may be parked
+		// inside a hub command (SubscriberCount) and cannot be interrupted.
+		// Do NOT call h.Close() here — it would also block on the wedged hub.
+		// Let the test's Cleanup handle hub teardown with its own timeout.
 		close(stop)
-		<-watchDone
-		t.Fatalf("concurrent churn did not finish within %s: subscribe/unsubscribe/broadcast is wedged", hubWatchdogTimeout)
+		select {
+		case <-watchDone:
+			t.Fatalf("concurrent churn did not finish within %s: subscribe/unsubscribe/broadcast is wedged", hubWatchdogTimeout)
+		case <-time.After(hubWatchdogTimeout):
+			// The watcher itself is wedged (blocked in SubscriberCount on a wedged hub).
+			// This is a structural limitation: a goroutine parked in a hub command
+			// cannot be interrupted by close(stop) alone. Report it explicitly.
+			t.Errorf("watcher did not exit within %s after stop was closed: the watcher is blocked in a hub command and cannot be interrupted", hubWatchdogTimeout)
+			t.Fatalf("concurrent churn did not finish within %s: subscribe/unsubscribe/broadcast is wedged", hubWatchdogTimeout)
+		}
 	}
 
 	// Every churner removed its subscriber, so the hub owns nothing again. This

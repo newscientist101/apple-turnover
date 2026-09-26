@@ -570,7 +570,12 @@ func TestWSConnectingAfterHubCloseIsClosedGoingAway(t *testing.T) {
 			code, err, websocket.StatusGoingAway)
 	}
 
-	if got := s.Hub.SubscriberCount(); got != 0 {
+	// Bounded read, for the same reason as every other count assertion: it is
+	// a channel round-trip to the hub goroutine, which a wedged hub never
+	// answers. Here the hub was closed before this call, so it returns 0 via
+	// Hub.Done rather than blocking today — the bound is latent-only here, not
+	// a proven hang, but it keeps the whole suite on one guarded path.
+	if got := hubSubscriberCount(t, s.Hub); got != 0 {
 		t.Fatalf("SubscriberCount after a refused connection = %d, want 0: no subscriber may be created on the failure path", got)
 	}
 }

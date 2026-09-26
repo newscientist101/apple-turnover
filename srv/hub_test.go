@@ -198,7 +198,10 @@ func TestHubBroadcastReachesEverySubscriberWithIdenticalBytes(t *testing.T) {
 	for i := range subs {
 		subs[i] = hubSub(t, h)
 	}
-	if got := h.SubscriberCount(); got != subscribers {
+	// Bounded read: SubscriberCount is answered by the hub goroutine, so a
+	// wedged hub would block this call forever. hubSubscriberCount reports
+	// that wedge instead of waiting it out.
+	if got := hubSubscriberCount(t, h); got != subscribers {
 		t.Fatalf("hub holds %d subscribers after %d subscribes, want %d", got, subscribers, subscribers)
 	}
 
@@ -247,7 +250,7 @@ func TestHubUnsubscribeStopsDeliveryAndClosesExactlyOnce(t *testing.T) {
 	// Closed, not merely quiet: reading a closed channel completes with ok ==
 	// false immediately, so this both proves the close and bounds the test.
 	hubWantClosed(t, leaving)
-	if got := h.SubscriberCount(); got != 1 {
+	if got := hubSubscriberCount(t, h); got != 1 {
 		t.Fatalf("SubscriberCount after unsubscribe = %d, want 1", got)
 	}
 
@@ -284,7 +287,7 @@ func TestHubCloseClosesEverySubscriberExactlyOnceAndStopsTheGoroutine(t *testing
 	h := NewHub(4)
 
 	a, b := hubSub(t, h), hubSub(t, h)
-	if got := h.SubscriberCount(); got != 2 {
+	if got := hubSubscriberCount(t, h); got != 2 {
 		t.Fatalf("SubscriberCount before Close = %d, want 2", got)
 	}
 
@@ -318,7 +321,7 @@ func TestHubCloseClosesEverySubscriberExactlyOnceAndStopsTheGoroutine(t *testing
 		t.Errorf("Subscribe on a closed hub error = %v, want ErrHubClosed", err)
 	}
 
-	if got := h.SubscriberCount(); got != 0 {
+	if got := hubSubscriberCount(t, h); got != 0 {
 		t.Errorf("SubscriberCount on a closed hub = %d, want 0", got)
 	}
 
@@ -377,7 +380,7 @@ func TestHubSlowSubscriberCannotBlockOthers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Hub.Subscribe (slow): %v", err)
 	}
-	if got := h.SubscriberCount(); got != 2 {
+	if got := hubSubscriberCount(t, h); got != 2 {
 		t.Fatalf("SubscriberCount with a fast and a slow subscriber = %d, want 2", got)
 	}
 
@@ -411,7 +414,7 @@ func TestHubSlowSubscriberCannotBlockOthers(t *testing.T) {
 	if h.Unsubscribe(slow) {
 		t.Error("Unsubscribe of an already-dropped subscriber returned true, want false (no double close)")
 	}
-	if got := h.SubscriberCount(); got != 1 {
+	if got := hubSubscriberCount(t, h); got != 1 {
 		t.Fatalf("SubscriberCount after the slow subscriber was dropped = %d, want 1", got)
 	}
 

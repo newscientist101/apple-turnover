@@ -38,10 +38,10 @@ server starts at version 0 and already playing.
 ## Verification
 
 `make verify` is the repo-owned gate: `gofmt -l .`, `go vet ./...`,
-`go build ./...`, `go test ./... -race -count=1`. The test suite needs no
-network, database or running service. `AGENTS.md` covers the integration
-harness, the mutation grid that proves those tests are non-vacuous, and the
-architecture invariants.
+`go build ./...`, `go test ./... -race -count=1`
+`AGENTS.md` covers the integration harness, the mutation grid that proves those
+tests are non-vacuous, and the architecture invariants.
+
 ## Running as a systemd service
 
 ```bash
@@ -53,12 +53,6 @@ systemctl status srv                          # check status
 journalctl -u srv -f                          # follow logs
 make build && sudo systemctl restart srv      # pick up code changes
 ```
-
-## Authorization
-
-exe.dev provides the authorization headers and login/logout links this app uses.
-Proxied through exed, requests carry `X-ExeDev-UserID` and `X-ExeDev-Email` when
-the caller is authenticated.
 
 ## State
 

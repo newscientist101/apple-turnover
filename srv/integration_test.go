@@ -33,6 +33,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -1573,5 +1574,68 @@ func TestIntegrationSocketsAreLoopbackOnly(t *testing.T) {
 	}
 	if tcpAddr.Port == 8000 {
 		t.Error("test listener took the production port 8000; tests must not collide with a running service")
+	}
+}
+
+// TestReadmeAPITableMatchesRoutes keeps the README's API section honest. The
+// table is prose that no other test touches, so it can drift from routes()
+// silently — a renamed endpoint stays documented, a new one goes undocumented.
+// This asserts both directions: every endpoint the README names is really
+// mounted, and every mounted API/WS route is named in the README. It follows the
+// precedent of TestIntegrationListenAddrIsHonoured (assert on the shipped text)
+// rather than adding a throwaway script, which the README's own convention
+// forbids.
+func TestReadmeAPITableMatchesRoutes(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "README.md"))
+	if err != nil {
+		t.Skipf("cannot read README.md: %v", err)
+	}
+	readme := string(src)
+
+	// Collect the mounted routes by walking the same tree the server mounts.
+	// ServeMux does not expose its patterns, so parse routes()' source: the
+	// patterns are string literals in mux.HandleFunc/mux.Handle calls.
+	routeSrc, err := os.ReadFile("api.go")
+	if err != nil {
+		t.Fatalf("read api.go: %v", err)
+	}
+	// Parse routes()' source line by line, since ServeMux does not expose its
+	// patterns. Each registration is one mux.HandleFunc/mux.Handle call. The
+	// wrong-verb fallbacks (methodNotAllowed) and the /api catch-alls
+	// (handleAPINotFound) re-register a path a real handler already owns, so
+	// they are skipped by handler name — note the absence of a verb is not a
+	// usable test, because /static/ is methodless but a real endpoint.
+	re := regexp.MustCompile(`mux\.Handle(?:Func)?\("([^"]+)"`)
+	mounted := map[string]bool{}
+	for _, line := range strings.Split(string(routeSrc), "\n") {
+		m := re.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		if strings.Contains(line, "methodNotAllowed(") ||
+			strings.Contains(line, "handleAPINotFound") {
+			continue
+		}
+		// "/{$}" is Go 1.22's pattern for exactly "/", which is how the README
+		// documents it, so compare on that spelling.
+		mounted[strings.Replace(m[1], "/{$}", "/", 1)] = true
+	}
+	if len(mounted) == 0 {
+		t.Fatal("parsed no routes out of api.go; the regexp no longer matches routes()' shape")
+	}
+
+	// Every mounted endpoint must be documented.
+	for pattern := range mounted {
+		if !strings.Contains(readme, "`"+pattern+"`") {
+			t.Errorf("route %q is mounted in routes() but not named in README.md's API section", pattern)
+		}
+	}
+
+	// Every endpoint the README names must be mounted. Guard against a table
+	// row that documents something that does not exist.
+	for _, m := range regexp.MustCompile("`(GET|POST) (/[a-z/-]*)`").FindAllStringSubmatch(readme, -1) {
+		if !mounted[m[1]+" "+m[2]] {
+			t.Errorf("README.md documents %q but routes() does not mount it", m[1]+" "+m[2])
+		}
 	}
 }

@@ -112,7 +112,7 @@ reported as weak evidence rather than a catch, so a mutation that merely fails
 to compile cannot masquerade as a passing check; a mutation that survives is
 reported and the script exits non-zero. Each test run is bounded by
 `MUTATION_TIMEOUT` (default 180s) and `go test -timeout` (default 150s), and
-`make mutation-check` wraps the whole thing in `timeout 300`, so a hang is a
+`make mutation-check` wraps the whole thing in `timeout 900`, so a hang is a
 failure rather than a wait.
 
 A mutation entry may carry an optional fifth field narrowing the test run for

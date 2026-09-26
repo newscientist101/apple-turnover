@@ -64,8 +64,11 @@ trap 'restore_all; rm -rf "$BACKUP_DIR"' EXIT
 #
 # The optional 5th field narrows the test run for that one mutation (e.g. a
 # deliberately WEDGED handler makes every other test block until the go test
-# timeout, so hold it to the one test that is supposed to notice). Most
-# mutations leave it empty and run the whole suite.
+# timeout, so hold it to the one test that is supposed to notice). It REPLACES
+# MUTATION_TEST_ARGS for that mutation rather than narrowing it further, so a
+# mutation with a 5th field ignores an outer `-run` restriction; an alternation
+# such as TestA|TestB routes one mutation to several tests. Most mutations leave
+# it empty and run the whole suite.
 MUTATIONS=$(cat <<'EOF'
 01-empty-code-accepted|srv/api.go|strings.TrimSpace(req.Code) == ""|false
 02-unknown-json-field-allowed|srv/api.go|dec.DisallowUnknownFields()|_ = dec
@@ -95,11 +98,11 @@ MUTATIONS=$(cat <<'EOF'
 26-ws-origin-check-disabled|srv/ws.go|websocket.Accept(w, r, nil)|websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 27-ws-closes-without-handshake|srv/ws.go|conn.Close(websocket.StatusNormalClosure, "")|conn.CloseNow()
 28-hub-double-close-allowed|srv/hub.go|if _, present := subs[sub]; !present {\n\t\treturn false\n\t}|if false {\n\t\treturn false\n\t}
-29-hub-unsubscribe-does-not-close|srv/hub.go|close(sub.ch)\n\tdelete(subs, sub)\n\treturn true|delete(subs, sub)\n\treturn true
-30-hub-slow-client-blocks|srv/hub.go|select {\n\tcase sub.ch <- msg:\n\t\treturn true\n\tdefault:\n\t\treturn false\n\t}|sub.ch <- msg\n\treturn true
-31-hub-broadcast-skips-a-subscriber|srv/hub.go|case msg := <-h.broadcast:\n\t\t\tfor sub := range subs {\n\t\t\t\tif !h.deliver(sub, msg) {|case msg := <-h.broadcast:\n\t\t\tskipFirst := true\n\t\t\tfor sub := range subs {\n\t\t\t\tif skipFirst {\n\t\t\t\t\tskipFirst = false\n\t\t\t\t\tcontinue\n\t\t\t\t}\n\t\t\t\tif !h.deliver(sub, msg) {
+29-hub-unsubscribe-does-not-close|srv/hub.go|close(sub.ch)\n\tdelete(subs, sub)\n\treturn true|delete(subs, sub)\n\treturn true|TestHubUnsubscribeStopsDeliveryAndClosesExactlyOnce
+30-hub-slow-client-blocks|srv/hub.go|select {\n\tcase sub.ch <- msg:\n\t\treturn true\n\tdefault:\n\t\treturn false\n\t}|sub.ch <- msg\n\treturn true|TestHubSlowSubscriberCannotBlockOthers|TestHubConcurrentSubscribeUnsubscribeBroadcast
+31-hub-broadcast-skips-a-subscriber|srv/hub.go|case msg := <-h.broadcast:\n\t\t\tfor sub := range subs {\n\t\t\t\tif !h.deliver(sub, msg) {|case msg := <-h.broadcast:\n\t\t\tskipFirst := true\n\t\t\tfor sub := range subs {\n\t\t\t\tif skipFirst {\n\t\t\t\t\tskipFirst = false\n\t\t\t\t\tcontinue\n\t\t\t\t}\n\t\t\t\tif !h.deliver(sub, msg) {|TestHubBroadcastReachesEverySubscriberWithIdenticalBytes
 32-hub-count-escapes-the-hub-goroutine|srv/hub.go|case reply := <-h.count:\n\t\t\treply <- len(subs)|case reply := <-h.count:\n\t\t\tgo func() { reply <- len(subs) }()
-33-hub-dropped-client-not-removed|srv/hub.go|// hub down. removeSubscriber closes its channel exactly once.\n\t\t\t\t\tremoveSubscriber(subs, sub)|// hub down. removeSubscriber closes its channel exactly once.\n\t\t\t\t\t_ = sub
+33-hub-dropped-client-not-removed|srv/hub.go|// hub down. removeSubscriber closes its channel exactly once.\n\t\t\t\t\tremoveSubscriber(subs, sub)|// hub down. removeSubscriber closes its channel exactly once.\n\t\t\t\t\t_ = sub|TestHubSlowSubscriberCannotBlockOthers
 34-hub-removal-not-recorded|srv/hub.go|close(sub.ch)\n\tdelete(subs, sub)\n\treturn true|close(sub.ch)\n\treturn true
 35-ws-listener-never-subscribes|srv/ws.go|sub, err := s.Hub.Subscribe()|sub, err := (*Subscriber)(nil), error(ErrHubClosed)
 36-ws-subscriber-leaked-on-exit|srv/ws.go|\tdefer s.Hub.Unsubscribe(sub)|\t_ = sub // deliberately leaked: the subscriber is never removed

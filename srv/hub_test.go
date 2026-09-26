@@ -470,7 +470,20 @@ func TestHubConcurrentSubscribeUnsubscribeBroadcast(t *testing.T) {
 				return
 			default:
 			}
-			n := int64(h.SubscriberCount())
+			// The read is bounded: SubscriberCount is answered by the hub
+			// goroutine through a reply channel, so on a wedged hub it would
+			// block forever and the watcher would never re-check stop. A hub
+			// that stopped answering is a real finding and a different defect
+			// from a hub that answered with a wrong number, so it gets its own
+			// message. Returning here (rather than only logging) is what makes
+			// close(stop) able to actually reach this watcher's exit and close
+			// watchDone, instead of leaving it parked forever.
+			got, ok := hubSubscriberCountWithin(h, hubCountTimeout)
+			if !ok {
+				t.Errorf("SubscriberCount did not answer within %s: the hub goroutine is wedged (it is not answering the count command), so the watcher cannot tell how many subscribers are live", hubCountTimeout)
+				return
+			}
+			n := int64(got)
 			if n < 0 {
 				t.Errorf("SubscriberCount = %d, want >= 0", n)
 				return
@@ -567,7 +580,7 @@ func TestHubConcurrentSubscribeUnsubscribeBroadcast(t *testing.T) {
 	// Every churner removed its subscriber, so the hub owns nothing again. This
 	// is deterministic: no churner leaves its subscriber behind, and there is
 	// no other subscriber.
-	if got := h.SubscriberCount(); got != 0 {
+	if got := hubSubscriberCount(t, h); got != 0 {
 		t.Fatalf("SubscriberCount after churn = %d, want 0 (every churner unsubscribed)", got)
 	}
 	if broadcasts.Load() == 0 {
@@ -580,7 +593,15 @@ func TestHubConcurrentSubscribeUnsubscribeBroadcast(t *testing.T) {
 	// the check is not deterministic.
 	close(stop)
 	wg.Wait()
-	<-watchDone
+	// The success path still needs a bound: close(stop) stops the watcher only
+	// if the watcher can reach its stop check, and a watcher parked in a hub
+	// command cannot. A watcher that does not exit here is a failure with a
+	// message, never an unbounded bare receive.
+	select {
+	case <-watchDone:
+	case <-time.After(hubWatchdogTimeout):
+		t.Errorf("watcher did not exit within %s after stop was closed: the watcher is blocked in a hub command and cannot be interrupted", hubWatchdogTimeout)
+	}
 	if maxCount.Load() == 0 {
 		t.Error("SubscriberCount never reported a live subscriber during churn: the watcher proved nothing")
 	}

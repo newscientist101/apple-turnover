@@ -48,6 +48,14 @@ const (
 	// hubShutdownTimeout bounds Hub.Close and the hub's own exit, so a wedged
 	// hub goroutine fails teardown instead of stalling it.
 	hubShutdownTimeout = 5 * time.Second
+
+	// hubCountTimeout bounds ONE SubscriberCount read. SubscriberCount is
+	// answered by the hub goroutine through a reply channel, so a wedged hub
+	// goroutine blocks it forever: the call itself has to be bounded, not
+	// merely the loop around it. A deadline checked after the call is not a
+	// bound at all — a wedged hub never lets control reach the check — which is
+	// exactly the defect hubSubscriberCountWithin exists to close.
+	hubCountTimeout = 2 * time.Second
 )
 
 // hubTestHub returns a started hub whose shutdown is registered on the test
@@ -94,6 +102,39 @@ func hubRecvWithin(sub *Subscriber, d time.Duration) (msg []byte, closed, ok boo
 	case <-time.After(d):
 		return nil, false, false
 	}
+}
+
+// hubSubscriberCountWithin reads the hub's subscriber count, bounded. ok is
+// false when the hub did not answer within d, which means the hub goroutine is
+// wedged — information a caller must report rather than wait out.
+//
+// The goroutine left parked inside SubscriberCount when the bound fires is a
+// deliberate, documented leak: SubscriberCount is a channel round-trip to the
+// hub goroutine, and a blocked channel send cannot be cancelled. The test that
+// hit this is about to fail and exit, so the parked goroutine costs nothing and
+// the alternative — waiting for it forever — is the defect.
+func hubSubscriberCountWithin(h *Hub, d time.Duration) (int, bool) {
+	got := make(chan int, 1)
+	go func() { got <- h.SubscriberCount() }()
+	select {
+	case n := <-got:
+		return n, true
+	case <-time.After(d):
+		return 0, false
+	}
+}
+
+// hubSubscriberCount is hubSubscriberCountWithin under this file's default
+// bound, failing the test with a message that names the wedge. A hub goroutine
+// that stopped answering is a different defect from a hub that answered with
+// the wrong number, and the two must not be reported as one.
+func hubSubscriberCount(t *testing.T, h *Hub) int {
+	t.Helper()
+	n, ok := hubSubscriberCountWithin(h, hubCountTimeout)
+	if !ok {
+		t.Fatalf("SubscriberCount did not answer within %s: the hub goroutine is wedged (it is not answering the count command), so the subscriber count cannot be read at all", hubCountTimeout)
+	}
+	return n
 }
 
 // hubWantMessage requires the next thing on sub's channel to be a message with

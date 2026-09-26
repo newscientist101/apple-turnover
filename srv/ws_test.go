@@ -163,15 +163,32 @@ func wsCloseServer(t *testing.T, ts *httptest.Server) {
 // listener went away / was dropped": SubscriberCount is answered by the hub
 // goroutine itself, so the poll is a real synchronisation point and not a
 // sleep-and-hope.
+//
+// Each read of the count is bounded on its own (hubSubscriberCountWithin), not
+// just the loop: a deadline checked after a call that never returns is not a
+// bound, and a hub goroutine that stops answering the count command would
+// otherwise park every caller here until the go test timeout. The two failure
+// modes are reported separately, because they are different defects: the hub
+// stopped answering at all (a wedge) versus the hub answered with a count that
+// never became want (a wrong count).
 func wsWaitForSubscribers(t *testing.T, h *Hub, want int) {
 	t.Helper()
 	deadline := time.Now().Add(wsSubscriberTimeout)
+	last := 0
 	for {
-		if got := h.SubscriberCount(); got == want {
+		got, ok := hubSubscriberCountWithin(h, hubCountTimeout)
+		if !ok {
+			t.Fatalf("hub did not answer SubscriberCount within %s (last count read: %d, want %d after %s): the hub goroutine is wedged, so the subscriber count cannot be read at all", hubCountTimeout, last, want, wsSubscriberTimeout)
+		}
+		last = got
+		if got == want {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("hub holds %d subscribers after %s, want %d", h.SubscriberCount(), wsSubscriberTimeout, want)
+			// Report the count already read rather than calling
+			// SubscriberCount again: a second unbounded call on the
+			// failure path would reintroduce the very hang this bounds.
+			t.Fatalf("hub holds %d subscribers after %s, want %d", last, wsSubscriberTimeout, want)
 		}
 		time.Sleep(2 * time.Millisecond)
 	}

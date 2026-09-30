@@ -169,6 +169,39 @@ Mutations must:
 
 `SURVIVED` and `WEAK` are both failures.
 
+## Why there is no gomutants gate
+
+`gomutants` was evaluated as a replacement for this grid and **rejected**
+(epic `strudel-agent-kki`; verdict and numbers in
+`docs/mutation-bench/06-decision.md`). Do not re-litigate it without new
+evidence. Two independent reasons, both measured:
+
+* **It is slower.** 231.32s cold against this grid's 128.042s for all 41
+  mutations. Its one fast number (2.52s) needs an unchanged tree and a
+  populated cache — the wrong regime, because a gate runs after an edit.
+* **It passes a deliberate deadlock.** `TIMED OUT` and `PENDING` are both
+  excluded from the efficacy denominator *and* exit 0. Three wedged infinite
+  loops scored exit 0, efficacy 81.82%, coverage 100% — and the verdict was
+  cached and replayed. Independently, 23 of the 41 curated mutations have no
+  gomutants mutant expressing the same defect, including every `ws.go` row and
+  both hang rows.
+
+So: no `make verify` step, no `.gomutants.yml`, no pinned dependency. A tool
+whose `TIMED OUT` and `PENDING` verdicts both exit 0 must not be the thing that
+says the suite is non-vacuous.
+
+It remains useful as **non-gating breadth** in the dev loop, where its off-anchor
+survivors are how new curated mutations get found:
+
+```text
+gomutants -w 1 --exclude-files 'conductor\.go$' \
+  -cache=/tmp/gomutants-cache -o=/tmp/gomutants-out ./srv/...
+```
+
+Treat that as triage input, never a pass/fail. Keep `-cache`/`-o` outside the
+repo and use a fresh cache path per run. Expect noise: ~77% efficacy, and
+`conductor.go` is excluded because one of its mutants reaches 2.5 GB in ~7s.
+
 ## The invariant that overrides everything else
 
 **A bound may make a hang fast; it must never make a hang pass.**

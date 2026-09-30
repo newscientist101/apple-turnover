@@ -55,8 +55,10 @@ verify:
 #
 # The outer timeout bounds the whole grid: each mutation costs one full test run
 # (and the deliberate wedge/binary-search mutations cost the go test timeout),
-# so the wall time grows with the number of mutations. It is currently ~5
-# minutes for 41 mutations; 900s leaves real headroom on a loaded machine while
-# still turning an infinite hang into a failure. Raise it when the grid grows.
+# so the wall time grows with the number of mutations. It is currently ~130
+# seconds for 41 mutations (measured at 5604003, 41/41 caught; see
+# docs/mutation-bench/09-routing.md and 09-new-baseline.md); 900s leaves real
+# headroom on a loaded machine while still turning an infinite hang into a
+# failure. Raise it when the grid grows.
 mutation-check:
 	timeout 900 ./scripts/mutation-check.sh

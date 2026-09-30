@@ -21,6 +21,10 @@ test:
 #   go build  every package/command, so the shipped binary cannot rot
 #   go test   the whole suite under -race with the test cache disabled, so a
 #             stale cached PASS cannot mask a regression
+#   docs-split-check
+#             the README/AGENTS.md ownership split (user-facing vs agent-only),
+#             so agent invariants cannot silently drift back into the README or
+#             vanish from AGENTS.md
 #
 # Nothing here needs the network, a database, a real port or a service running:
 # the integration harness listens on loopback only and every operation is
@@ -40,6 +44,8 @@ verify:
 	@go build ./...
 	@echo "==> go test ./... -race -count=1"
 	@go test ./... -race -count=1
+	@echo "==> ./scripts/docs-split-check.sh"
+	@./scripts/docs-split-check.sh
 	@echo "==> verify: all checks passed"
 
 # mutation-check confirms the test suite is not vacuous: it breaks the

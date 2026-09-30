@@ -17,29 +17,29 @@ These are easy to break and each has tests. Changes should expect failures until
 * One goroutine exclusively owns the subscriber set.
 * It is independent of the Conductor and wire format and broadcasts one encoded `[]byte` to subscribers.
 * `SubscriberCount` is a synchronous round-trip and can block forever if the hub wedges.
-* Slow subscribers are dropped and their channel is closed exactly once.
+* Slow subscribers are dropped and their channel is closed exactly once; a double close would panic (mutation `28-hub-double-close-allowed`).
 * Hub shutdown and subscriber drop both appear as channel closure.
 
 **WebSocket (`srv/ws.go`)**
 
 * `/ws` must never block on a client.
 * Use `CloseRead`/its canceled context to detect disconnects; the handler does not need its own read loop.
-* Every frame write has `defaultWSWriteTimeout` (5s).
-* Unsubscribe on every exit path.
-* Handshake/error behavior is fixed: 426, 400, 501, 403, 405 + `Allow`, 1001 after hub shutdown, and clean 1000 on shutdown.
+* Every frame write has a per-frame write deadline via `defaultWSWriteTimeout` (5s).
+* Unsubscribe on every exit path so a listener cannot leak a subscriber slot.
+* Handshake/error behavior is fixed: 426 for a handshake-less GET, 400 for a bad `Sec-WebSocket-Version`, 501 for a writer that cannot be hijacked, 403 for a cross-origin handshake, 405 + `Allow`, 1001 for a listener arriving after hub shutdown, and clean 1000 on hub shutdown.
 * Match exactly one `/ws` path.
 
 **API**
 
-* Apply the 64 KiB `APIMaxBodyBytes` limit centrally in `limitAPIRequestBody`.
-* Size checking occurs before parsing, so oversized + malformed requests return 413.
+* Apply the 64 KiB `APIMaxBodyBytes` payload cap centrally in `limitAPIRequestBody`, so no endpoint can forget it.
+* Size checking occurs before parsing, so oversized + malformed requests return 413, not 400.
 * `/api` errors are JSON; other net/http errors remain plain text.
 
 ## Not yet wired
 
 Do not assume these features work; they remain open work.
 
-* API writes do not fan out through the Hub; `srv/api.go` does not reference it.
+* No snapshot on connect, and API writes do not fan out through the Hub; `srv/api.go` does not reference it, so a write does not reach listeners.
 * `SetListenerCount` has no production caller, so snapshots report listener count as 0.
 * No ping/pong, dead-socket reaping, or additional message encoding.
 * No browser client/audio playback exists yet. `/` and `srv/static/` are still the template content.
@@ -54,6 +54,7 @@ gofmt -l .
 go vet ./...
 go build ./...
 go test ./... -race -count=1
+./scripts/docs-split-check.sh
 ```
 
 Run it before every commit.
@@ -64,29 +65,33 @@ Tests must:
 
 * avoid network, databases, real ports, and running services;
 * use `httptest` and loopback where appropriate;
-* bound every operation so hangs fail instead of waiting forever.
+* bound every operation so a hang fails rather than waits.
 
 Main test locations:
 
-* `srv/integration_test.go` — real handler tree / end-to-end API behavior.
+* `srv/integration_test.go` — boots the real handler tree (`Server.routes()`, the same one `Server.Serve` mounts) / end-to-end API behavior.
 * `srv/ws_test.go` — WebSocket behavior.
 * `srv/hub_test.go` — Hub behavior.
+* Extend these files when a new feature needs proving; a one-off script is not part of the gate and the next agent will not run it.
 
 Coverage should include:
 
-* API feedback loop and response bodies;
+* API feedback loop asserting on response bodies, not just status codes;
 * malformed/oversized/error cases;
-* concurrent versioning with exact `1..N` results;
-* complete `/` rendering;
-* WebSocket behavior including wedged listeners;
-* Hub fan-out, exact-once close, churn, slow clients, and concurrent count polling;
+* concurrent versioning with parallel pushes yielding exactly `1..N`;
+* complete `/` rendering asserted on end-of-document markers;
+* WebSocket behavior including a wedged listener — one that never reads a 1 MiB frame through a 1 KiB receive buffer;
+* Hub fan-out, close exactly once, churn, slow clients (mutation `30-hub-slow-client-blocks` wedges the hub and fails after a 10s watchdog rather than hanging), and concurrent count polling;
 * the shipped `cmd/srv` binary.
 
 ## Boundedness in tests
 
-A hanging test is a defect.
+A hanging test is itself a defect, so bounding is a requirement, not a nicety.
 
-Bounds must apply to the operation that can block:
+Bounds must apply to the operation that can block — the parallel test carries
+three independent bounds (a context deadline on every request, per-transport
+response-header and client timeouts, and a watchdog waiting on a channel rather
+than on `wg.Wait()`):
 
 * request context;
 * transport/client timeouts;
@@ -94,6 +99,8 @@ Bounds must apply to the operation that can block:
 * server shutdown must itself be bounded.
 
 Do not rely on `wg.Wait()`, `httptest.Server.Close()`, or a deadline checked only after a blocking call.
+
+Close each `httptest.Server` with a timeout on a goroutine instead of `defer ts.Close()`, because `Close` waits for outstanding requests and would itself hang on a wedged handler. Verified against a deliberately deadlocked handler: the test fails in ~12s instead of hanging (mutation `23-wedged-state-handler`).
 
 ## Documentation needs no mutation proof
 
@@ -112,7 +119,7 @@ Documentation does not require mutation testing.
 srv/srv
 ```
 
-Run:
+`srv/` is a package directory, so `go build -o srv` places the binary inside the `srv/` directory. Run:
 
 ```text
 ./srv/srv
@@ -131,7 +138,8 @@ Examples:
 ```text
 make mutation-check
 ./scripts/mutation-check.sh --list
-./scripts/mutation-check.sh <mutation-name>
+./scripts/mutation-check.sh 30-hub-slow-client-blocks
+./scripts/mutation-check.sh 04-payload-cap-removed
 MUTATION_TEST_ARGS="-run TestHub" ./scripts/mutation-check.sh
 ```
 
@@ -144,10 +152,10 @@ Controls:
 Mutations must:
 
 * actually modify the intended source;
-* be reverted automatically;
-* restore byte-identical files;
-* treat assertion failures as catches;
-* treat compile/panic failures as `WEAK`;
+* be reverted automatically and checked byte-identical against a recorded sha256 — including on Ctrl-C, because the revert also runs from an `EXIT` trap;
+* treat assertion failures as catches (a failing test);
+* be applied with `python3` (no sed portability trap), verified to have actually changed the file, reverted as above;
+* treat compile/panic failures as `WEAK` — weak evidence rather than a catch;
 * treat survivors as failures.
 
 ## Mutation verdicts

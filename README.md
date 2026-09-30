@@ -38,7 +38,8 @@ server starts at version 0 and already playing.
 ## Verification
 
 `make verify` is the repo-owned gate: `gofmt -l .`, `go vet ./...`,
-`go build ./...`, `go test ./... -race -count=1`
+`go build ./...`, `go test ./... -race -count=1`, plus
+`scripts/docs-split-check.sh` holding the README/AGENTS.md ownership split
 `AGENTS.md` covers the integration harness, the mutation grid that proves those
 tests are non-vacuous, and the architecture invariants.
 

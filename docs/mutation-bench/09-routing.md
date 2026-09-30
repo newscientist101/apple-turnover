@@ -239,3 +239,63 @@ All measurements were taken in throwaway worktrees (`git worktree add`, `git wor
 - **`make verify`:** green (gofmt, vet, build, `go test -race -count=1` → `ok srv.exe.dev/srv 2.908s`).
 - **`./scripts/mutation-check.sh --list`:** 41 names.
 - **Tree:** clean apart from this file and the two commits above. `git worktree list` shows only main.
+
+---
+
+## 10. Container closure re-verification (`.2`, at `0551908`)
+
+Re-run at HEAD to confirm the routing still holds with no production/test/script
+change since the routing commits (`git diff 4cbb677 0551908 -- srv scripts cmd
+Makefile` is empty; everything after `4cbb677` is docs).
+
+```bash
+make verify
+timeout 900 ./scripts/mutation-check.sh
+MUTATION_TEST_ARGS="-run TestIntegration" timeout 900 ./scripts/mutation-check.sh
+MUTATION_TEST_ARGS="-run TestNoSuchTestExistsXYZ" GO_TEST_TIMEOUT=60s \
+  MUTATION_TIMEOUT=150 timeout 250 ./scripts/mutation-check.sh 29-hub-unsubscribe-does-not-close
+```
+
+| Run | Result | Wall | Exit |
+|---|---|---|---|
+| `make verify` | gofmt clean, vet/build clean, `ok srv.exe.dev/srv 2.828s` | — | 0 |
+| Whole grid, routed | **41 caught, 0 survived, 0 weak, 0 broken** | **128.14s** | 0 |
+| `MUTATION_TEST_ARGS=-run TestIntegration` | 31 caught, **10 survived** | 97.99s | **1** |
+| Routed mutation 29 under a nonexistent global `-run` | 1 caught | 3.63s | 0 |
+
+Three things this establishes at HEAD:
+
+1. **The routed grid is still non-vacuous.** 41/41 caught, and the log contains
+   **0** `panic: test timed out` and **0** `DATA RACE`. The script's own
+   sha256 revert check passed for every mutation: afterwards `git status` shows
+   no modification to any tracked file.
+2. **The integration-harness cross-check is vacuous for routed mutations, and
+   this run shows the vacuity directly.** The 10 survivors are all *unrouted*
+   (`24, 25, 26, 27, 28, 32, 34, 38, 39, 41`); **not one of the 9 routed
+   mutations survived**, and mutation 23 reported
+   `TestIntegrationParallelPushesAreBoundedAndContiguous` failing at 12.06s
+   despite the global restriction. This is §3's claim, measured again: the 5th
+   field replaces `MUTATION_TEST_ARGS`, so a routed mutation reports `caught`
+   whatever the outer `-run` says. **Do not read this run as proof that routing
+   dropped no coverage** — its exit 1 reflects the 10 unrouted mutations whose
+   catchers live in `srv/ws_test.go` and `srv/hub_test.go`, not in the
+   integration harness. The coverage proof remains `08-non-vacuity.md`
+   (41/41 caught routed **and** unrouted).
+3. **Routing errors stay self-detecting.** Mutation 29 is routed to
+   `TestHubUnsubscribeStopsDeliveryAndClosesExactlyOnce`; run with
+   `MUTATION_TEST_ARGS="-run TestNoSuchTestExistsXYZ"` it is still caught, by
+   that test. A 5th field that matched nothing, or omitted the real catcher,
+   would leave `go test` green → `SURVIVED` → exit 1 (§4).
+
+Each of the 9 5th fields was re-resolved with `go test ./srv/... -list` and
+every regex matches at least one real test; mutation 30's alternation resolves
+to both `TestHubSlowSubscriberCannotBlockOthers` and
+`TestHubConcurrentSubscribeUnsubscribeBroadcast`.
+
+**Correction to §9's closing line:** `git worktree list` no longer shows only
+main. Two worktrees (`/tmp/nv/w2`, `/tmp/nv/wt`, both at `7e71ae9`) are left
+over from the `08-non-vacuity.md` measurements and are still registered. They
+are harmless — no measurement in this section used them — but they should be
+removed with `git worktree remove --force` before anyone runs a worktree-based
+measurement, since §5 requires a *fresh* worktree and a stale one at the wrong
+commit would silently measure the wrong tree.

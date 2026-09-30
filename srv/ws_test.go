@@ -114,7 +114,7 @@ func wsTestServer(t *testing.T) (*Server, string) {
 func wsTestServerWith(t *testing.T, opts wsTestServerOptions) (*Server, string, *httptest.Server) {
 	t.Helper()
 
-	s := New("ws-host")
+	s := New()
 	if opts.writeTimeout > 0 {
 		s.wsWriteTimeout = opts.writeTimeout
 	}

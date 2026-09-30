@@ -4,7 +4,7 @@ A live, multi-user algorithmic music performance. The Go server is the conductor
 holding the one live performance state; an external AI agent drives it by pushing
 strudel code over HTTP.
 
-The browser side is not built yet: `GET /` still renders the template's welcome
+The browser side is not built yet: `GET /` still renders a minimal welcome
 page and nothing plays audio. The listener WebSocket endpoint and the hub that
 feeds it exist and are wired to each other, so the fan-out path works end to end
 from the hub onwards — `AGENTS.md` lists what is still unwired.
@@ -74,7 +74,7 @@ and a listener count. Nothing is persisted and there is no set saving.
 - `srv/integration_test.go`: the end-to-end verification harness
 - `srv/ws_test.go`, `srv/hub_test.go`: its WebSocket and hub slices
 - `srv/templates`: Go HTML templates
-- `srv/static`: stylesheets and scripts
+- `srv/static`: the stylesheet
 - `scripts/mutation-check.sh`: sabotage check proving the tests are non-vacuous
 - `scripts/mutation-bench.sh` + `docs/mutation-bench/`: grid timing baselines and
   audit reports

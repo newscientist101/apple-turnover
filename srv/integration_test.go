@@ -97,7 +97,7 @@ type integrationSession struct {
 
 func newIntegrationSession(t *testing.T) *integrationSession {
 	t.Helper()
-	s := New("integration-host")
+	s := New()
 	// routes() is called once and reused, exactly as Serve would.
 	return &integrationSession{t: t, server: s, handler: s.routes()}
 }
@@ -869,7 +869,7 @@ func TestIntegrationParallelPushesAreBoundedAndContiguous(t *testing.T) {
 		t.Fatalf("test bug: total %d is a multiple of HistoryLimit %d; the ring window would be trivial", total, HistoryLimit)
 	}
 
-	ts := httptest.NewServer(New("load-host").routes())
+	ts := httptest.NewServer(New().routes())
 	// Close is called with a bound below, NOT deferred: httptest.Server.Close
 	// waits for outstanding requests to finish, so if a handler is wedged (the
 	// very defect this test is meant to catch) a deferred Close would block
@@ -1066,11 +1066,11 @@ func TestIntegrationConcurrentReadsDuringPushes(t *testing.T) {
 
 // TestIntegrationShellRendersToCompletion guards the known past defect:
 // HandleRoot renders with html/template and, if the template references a
-// field that no longer exists on pageData, Execute aborts MID-DOCUMENT while
-// HandleRoot still logs only a warning and returns 200. A status-code-only
-// assertion would pass on a truncated page, so this asserts on markers that
-// only appear at the very end of the document (the Shelley ribbon and the
-// closing </html>), which prove the whole template executed.
+// field that no longer exists on the data passed to Execute, Execute aborts
+// MID-DOCUMENT while HandleRoot still logs only a warning and returns 200. A
+// status-code-only assertion would pass on a truncated page, so this asserts
+// on markers that only appear at the very end of the document ("</main>" and
+// the closing "</html>"), which prove the whole template executed.
 func TestIntegrationShellRendersToCompletion(t *testing.T) {
 	s := newIntegrationSession(t)
 
@@ -1081,14 +1081,12 @@ func TestIntegrationShellRendersToCompletion(t *testing.T) {
 	}
 
 	bodyText := body(w)
-	// Ordered check: </html> must be the tail, and it must come after the
-	// ribbon, so "Edit with Shelley" cannot be a stray string from a partial
-	// render that still happened to contain it.
+	// Ordered check: </html> must be the tail, and it must come after
+	// </main>, so a truncated render that still happened to contain one of them
+	// cannot pass.
 	for _, want := range []string{
 		"<!doctype html>",
-		"integration-host",
-		"Copied to clipboard!",
-		"Edit with Shelley",
+		"</main>",
 		"</html>",
 	} {
 		wantContains(t, bodyText, want, "GET / body")
@@ -1097,20 +1095,9 @@ func TestIntegrationShellRendersToCompletion(t *testing.T) {
 	if !strings.HasSuffix(trimmed, "</html>") {
 		t.Errorf("GET / body does not END with </html>; the template aborted mid-render (tail=%q)", tailOf(bodyText, 120))
 	}
-	if strings.Index(bodyText, "Edit with Shelley") > strings.Index(bodyText, "</html>") {
-		t.Error("GET / body has the Shelley ribbon after </html>; unexpected document order")
+	if strings.Index(bodyText, "</main>") > strings.Index(bodyText, "</html>") {
+		t.Error("GET / body has </main> after </html>; unexpected document order")
 	}
-	if strings.Contains(bodyText, "VisitCount") {
-		t.Error("GET / body references the removed VisitCount field")
-	}
-
-	// Signed-in rendering keeps working too (the identity header path).
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.Header.Set("X-ExeDev-Email", "agent@exe.dev")
-	w = s.do(r)
-	wantStatus(t, w, http.StatusOK)
-	wantContains(t, body(w), "agent@exe.dev", "GET / with identity")
-	wantContains(t, body(w), "</html>", "GET / with identity")
 }
 
 // tailOf returns the last n bytes of s, for readable failure messages.
@@ -1127,7 +1114,7 @@ func tailOf(s string, n int) string {
 func TestIntegrationStaticAssets(t *testing.T) {
 	s := newIntegrationSession(t)
 
-	for _, path := range []string{"/static/script.js", "/static/style.css"} {
+	for _, path := range []string{"/static/style.css"} {
 		t.Run(path, func(t *testing.T) {
 			w := s.get(path)
 			wantStatus(t, w, http.StatusOK)
@@ -1140,10 +1127,10 @@ func TestIntegrationStaticAssets(t *testing.T) {
 		})
 	}
 
-	// The shell references both assets, so a renamed file would break the page
+	// The shell references the stylesheet, so a renamed file would break the page
 	// even though the static mount itself still works.
 	shell := body(s.get("/"))
-	for _, ref := range []string{"/static/script.js", "/static/style.css"} {
+	for _, ref := range []string{"/static/style.css"} {
 		wantContains(t, shell, ref, "GET / body")
 	}
 }
@@ -1159,13 +1146,12 @@ func TestIntegrationNonAPINamespaceUntouched(t *testing.T) {
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("GET /not-the-page status = %d, want 404", w.Code)
 	}
-	if strings.Contains(body(w), "Edit with Shelley") {
+	if strings.Contains(body(w), "Strudel Agent") {
 		t.Error("GET /not-the-page served the HTML shell; the root pattern is too broad")
 	}
 
-	// The root pattern must ignore the query string, because exe.dev's login
-	// flow sends users back to "/?something=1" (see loginURLForRequest). A
-	// pattern that matched the whole RequestURI would 404 real users.
+	// The root pattern must ignore the query string: a pattern that matched the
+	// whole RequestURI would 404 any request that carries one.
 	w = s.get("/?redirect=%2F")
 	if w.Code != http.StatusOK {
 		t.Errorf("GET /?redirect=%%2F status = %d, want 200 (the root pattern must match on path only)", w.Code)
@@ -1196,7 +1182,7 @@ func TestIntegrationNonAPINamespaceUntouched(t *testing.T) {
 // loopback port, driven by a real http.Client with explicit timeouts. Nothing
 // here touches the network beyond 127.0.0.1 and every call is bounded.
 func TestIntegrationOverRealHTTPServer(t *testing.T) {
-	s := New("socket-host")
+	s := New()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -1310,7 +1296,7 @@ func TestIntegrationOverRealHTTPServer(t *testing.T) {
 
 	// The shell over a real socket too (Content-Length must match the body).
 	code, raw = get("/")
-	if code != http.StatusOK || !bytes.Contains(raw, []byte("Edit with Shelley")) {
+	if code != http.StatusOK || !bytes.Contains(raw, []byte("</html>")) {
 		t.Errorf("GET / over a real socket: %d, len=%d", code, len(raw))
 	}
 
@@ -1531,7 +1517,7 @@ func TestIntegrationBuiltBinaryServesTheLoop(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("GET / from the real binary: %d", code)
 	}
-	for _, want := range []string{"Edit with Shelley", "</html>"} {
+	for _, want := range []string{"</main>", "</html>"} {
 		if !bytes.Contains(shellRaw, []byte(want)) {
 			t.Errorf("the real binary did not render the whole shell: missing %q (len=%d)", want, len(shellRaw))
 		}

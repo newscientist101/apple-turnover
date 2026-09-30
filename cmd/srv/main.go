@@ -18,9 +18,5 @@ func main() {
 
 func run() error {
 	flag.Parse()
-	hostname, err := os.Hostname()
-	if err != nil {
-		hostname = "unknown"
-	}
-	return srv.New(hostname).Serve(*flagListenAddr)
+	return srv.New().Serve(*flagListenAddr)
 }

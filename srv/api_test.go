@@ -51,7 +51,7 @@ func wantJSONContentType(t *testing.T, w *httptest.ResponseRecorder) {
 // number 0 (not omitted), history is an empty array rather than null, and
 // lastEvalResult is explicitly null because nothing has been evaluated yet.
 func TestAPIStateEmpty(t *testing.T) {
-	s := New("api-host")
+	s := New()
 	w := apiRequest(t, s, http.MethodGet, "/api/state", "")
 
 	if w.Code != http.StatusOK {
@@ -113,7 +113,7 @@ func TestAPIStateEmpty(t *testing.T) {
 // transport flag, the eval feedback and the listener count all have to come
 // back out of the JSON unchanged.
 func TestAPIStateReflectsConductor(t *testing.T) {
-	s := New("api-host")
+	s := New()
 	s.Conductor.Publish(`s("bd*4")`, "four on the floor")
 	s.Conductor.Publish(`s("bd*4, ~ cp")`, "")
 	s.Conductor.SetMessage("adding backbeat")
@@ -197,7 +197,7 @@ func TestAPIStateReflectsConductor(t *testing.T) {
 // TestAPIStateMethodNotAllowed pins that the read endpoint is GET-only; a write
 // verb must not be silently accepted.
 func TestAPIStateMethodNotAllowed(t *testing.T) {
-	s := New("api-host")
+	s := New()
 	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
 		w := apiRequest(t, s, method, "/api/state", "")
 		if w.Code != http.StatusMethodNotAllowed {
@@ -214,7 +214,7 @@ func TestAPIStateMethodNotAllowed(t *testing.T) {
 // TestAPIUnknownPath pins that an unregistered /api path 404s as JSON instead
 // of falling through to the HTML shell.
 func TestAPIUnknownPath(t *testing.T) {
-	s := New("api-host")
+	s := New()
 	w := apiRequest(t, s, http.MethodGet, "/api/nope", "")
 	if w.Code != http.StatusNotFound {
 		t.Errorf("GET /api/nope status = %d, want 404", w.Code)
@@ -229,7 +229,7 @@ func TestAPIUnknownPath(t *testing.T) {
 // code, bumps the version by exactly one, records the narration, and returns the
 // new snapshot so the agent does not need a second round trip.
 func TestAPICodePublishes(t *testing.T) {
-	s := New("api-host")
+	s := New()
 
 	w := apiRequest(t, s, http.MethodPost, "/api/code", `{"code":"s(\"bd\")","message":"kick"}`)
 	if w.Code != http.StatusOK {
@@ -302,7 +302,7 @@ func TestAPICodeRejectsBadRequests(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s := New("api-host")
+			s := New()
 			w := apiRequest(t, s, http.MethodPost, "/api/code", tc.body)
 			if w.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400 (body=%q)", w.Code, w.Body.String())
@@ -324,7 +324,7 @@ func TestAPICodeRejectsBadRequests(t *testing.T) {
 }
 
 func TestAPICodeMethodNotAllowed(t *testing.T) {
-	s := New("api-host")
+	s := New()
 	w := apiRequest(t, s, http.MethodGet, "/api/code", "")
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET /api/code status = %d, want 405", w.Code)
@@ -347,7 +347,7 @@ func TestAPIPayloadLimit(t *testing.T) {
 		t.Fatalf("test body len %d is not over the %d limit", len(huge), APIMaxBodyBytes)
 	}
 
-	s := New("api-host")
+	s := New()
 	w := apiRequest(t, s, http.MethodPost, "/api/code", huge)
 	if w.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversized body status = %d, want 413 (body=%q)", w.Code, w.Body.String())
@@ -381,7 +381,7 @@ func TestAPIPayloadLimitAppliesToEveryWriteEndpoint(t *testing.T) {
 	huge := strings.Repeat("x", APIMaxBodyBytes+1024)
 	for _, path := range []string{"/api/code", "/api/message", "/api/eval-result", "/api/hush", "/api/play"} {
 		t.Run(path, func(t *testing.T) {
-			s := New("api-host")
+			s := New()
 			w := apiRequest(t, s, http.MethodPost, path, huge)
 			if w.Code != http.StatusRequestEntityTooLarge {
 				t.Fatalf("POST %s oversized status = %d, want 413 (body=%q)", path, w.Code, w.Body.String())
@@ -398,7 +398,7 @@ func TestAPIPayloadLimitAppliesToEveryWriteEndpoint(t *testing.T) {
 // code document and the history must all be untouched, which is what lets the
 // agent talk to listeners without interrupting the music.
 func TestAPIMessageNarratesWithoutBumpingVersion(t *testing.T) {
-	s := New("api-host")
+	s := New()
 	s.Conductor.Publish(`s("bd")`, "kick")
 	s.Conductor.SetListenerCount(2)
 
@@ -459,7 +459,7 @@ func TestAPIMessageRejectsBadRequests(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s := New("api-host")
+			s := New()
 			w := apiRequest(t, s, http.MethodPost, "/api/message", tc.body)
 			if w.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400 (body=%q)", w.Code, w.Body.String())
@@ -476,7 +476,7 @@ func TestAPIMessageRejectsBadRequests(t *testing.T) {
 }
 
 func TestAPIMessageMethodNotAllowed(t *testing.T) {
-	s := New("api-host")
+	s := New()
 	w := apiRequest(t, s, http.MethodGet, "/api/message", "")
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET /api/message status = %d, want 405", w.Code)
@@ -491,7 +491,7 @@ func TestAPIMessageMethodNotAllowed(t *testing.T) {
 // agent's see-what-my-code-did loop. A report with no stats is fine; the
 // optional fields simply stay absent.
 func TestAPIEvalResultSuccess(t *testing.T) {
-	s := New("api-host")
+	s := New()
 	s.Conductor.Publish(`s("bd*4")`, "kick")
 
 	w := apiRequest(t, s, http.MethodPost, "/api/eval-result",
@@ -565,7 +565,7 @@ func TestAPIEvalResultSuccess(t *testing.T) {
 // feedback loop is lying to it. The report is refused with 400 and nothing is
 // stored.
 func TestAPIEvalResultUnknownVersion(t *testing.T) {
-	s := New("api-host")
+	s := New()
 	s.Conductor.Publish(`s("bd")`, "")
 
 	cases := []struct {
@@ -597,7 +597,7 @@ func TestAPIEvalResultUnknownVersion(t *testing.T) {
 
 	// On a client that never saw any code (server still at version 0) every
 	// report is unknown.
-	fresh := New("api-host")
+	fresh := New()
 	w := apiRequest(t, fresh, http.MethodPost, "/api/eval-result", `{"version":1,"ok":true}`)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("report against version 0 conductor: status = %d, want 400", w.Code)
@@ -617,7 +617,7 @@ func TestAPIEvalResultRejectsBadRequests(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s := New("api-host")
+			s := New()
 			s.Conductor.Publish(`s("bd")`, "")
 			w := apiRequest(t, s, http.MethodPost, "/api/eval-result", tc.body)
 			if w.Code != http.StatusBadRequest {
@@ -637,7 +637,7 @@ func TestAPIEvalResultRejectsBadRequests(t *testing.T) {
 // the narration, because a listener who hits hush must be able to resume to
 // exactly the same pattern.
 func TestAPITransportHushAndPlay(t *testing.T) {
-	s := New("api-host")
+	s := New()
 	s.Conductor.Publish(`s("bd*4")`, "kick")
 	s.Conductor.SetListenerCount(4)
 
@@ -718,7 +718,7 @@ func TestAPITransportHushAndPlay(t *testing.T) {
 func TestAPITransportRejectsBodies(t *testing.T) {
 	for _, path := range []string{"/api/hush", "/api/play"} {
 		t.Run(path, func(t *testing.T) {
-			s := New("api-host")
+			s := New()
 			s.Conductor.Publish(`s("bd")`, "")
 
 			// A payload attempting to smuggle code through the transport
@@ -761,14 +761,14 @@ func TestAPITransportRejectsBodies(t *testing.T) {
 // renderTemplate gotcha means a 200 alone proves nothing), and the API paths
 // are not swallowed by the shell catch-all.
 func TestAPIDoesNotBreakShellRouting(t *testing.T) {
-	s := New("shell-host")
+	s := New()
 
 	w := apiRequest(t, s, http.MethodGet, "/", "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("GET / status = %d, want 200", w.Code)
 	}
 	body := w.Body.String()
-	for _, want := range []string{"Copied to clipboard!", "Edit with Shelley", "</html>"} {
+	for _, want := range []string{"</main>", "</html>"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("GET / did not render to completion: missing %q", want)
 		}
@@ -789,7 +789,7 @@ func TestAPIDoesNotBreakShellRouting(t *testing.T) {
 
 // TestAPIServesStaticAssets guards the /static/ mount against the API rewrite.
 func TestAPIServesStaticAssets(t *testing.T) {
-	s := New("shell-host")
+	s := New()
 	w := apiRequest(t, s, http.MethodGet, "/static/style.css", "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("GET /static/style.css status = %d, want 200", w.Code)
@@ -803,7 +803,7 @@ func TestAPIServesStaticAssets(t *testing.T) {
 // reads and must be clean under `go test -race`, mirroring the real traffic
 // shape of an agent plus many browsers reporting eval results.
 func TestAPIConcurrentWritesAreSerialised(t *testing.T) {
-	s := New("api-host")
+	s := New()
 	const (
 		pushes  = 60
 		reports = 60

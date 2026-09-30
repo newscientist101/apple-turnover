@@ -14,6 +14,7 @@ gaps are expected while subtasks are still open.
 | `03-gomutants.md` | kki.3 | What does gomutants discover/measure on this codebase, and at what wall time? (360 mutants found; 231.32s cold bounded run; WARM 2.52s; efficacy 77.07% / coverage 94.86%) | ✅ closed |
 | `04-timeout-semantics.md` | kki.4 | **Can gomutants catch a HANG-shaped defect?** (No. Wedge in the baseline → exit 1, no verdict, 600.30s. Wedge as a mutant → **3 infinite loops `TIMED OUT`, exit 0, efficacy 81.82%, coverage 100%** — and the verdict is cached and replayed. The curated grid catches both hang mutations with named assertions.) | ✅ closed |
 | `05-traceability.md` | kki.5 | How much of the curated 41-mutation grid can gomutants *express*? (**18/41** traceable and killed — 10 exact, 8 equivalent at the same anchor; **23/41** NOT-GENERATED, 8 with no mutant on any anchor line and all 10 `ws.go` rows among them; 300 of the 357 judged mutants are off the anchor lines, 66 of them LIVED) | ✅ closed |
+| `06-decision.md` | kki.6 | **The decision: faster or not, adopt or not.** gomutants is **1.8× slower cold** (231.32s for 242 mutants vs the routed grid's 128.042s for all 41) and only faster on a warm unchanged tree (2.52s; after a real edit: never measured). It **cannot replace the grid**: a gomutants gate passes a deliberate deadlock (exit 0, 81.82% efficacy, verdict cached) and 23/41 curated mutations are inexpressible. **Recommendation (d) hybrid** — the grid keeps exclusive ownership of the hang-shaped and domain invariants and remains the gate; gomutants is a non-gating breadth pass in the dev loop | ✅ closed |
 | `07-unbounded-audit.md` | e2v.1.2 | Which test bounds sit *outside* the call they bound, so a wedge cannot reach them? (36 sites: 32 OK, 2 shape-A, 2 shape-B) | ✅ closed |
 | `08-unbounded-fixes.md` | e2v.1.3.4 | Class-level proof for the unbounded-wait fixes: what fails, how fast, and with what message under a deliberately wedged hub? (10 clean failures at ~2.0s, **0** timeout panics) | ✅ closed |
 | `08-non-vacuity.md` | e2v.3.1 | Did bounding the waits and adding routing silently delete coverage? (41/41 caught **routed** 128.858s and **unrouted** 352.302s; every fixed site re-wedged; no assertion weakened) | ✅ closed |
@@ -22,7 +23,24 @@ gaps are expected while subtasks are still open.
 
 | `10-mutation18.md` | bgb | Was mutation 18 caught only by an unrelated API test? (`SURVIVED` under `-run TestConductor` → now `caught` by `TestConductorRecordEvalResultSameVersionReplaces`; the old catch was partly a panic) | ✅ closed |
 
-Not yet written: `06-decision.md` (kki.6).
+Not yet written: nothing — the set is complete (01–10).
+
+## Where to start
+
+- **Deciding whether to use gomutants at all?** Read `06-decision.md` alone; it
+  synthesises 01–05 and states the recommendation. The other reports are its
+  evidence.
+- **Re-measuring the grid today?** `09-new-baseline.{md,tsv}` (128.042s, 41/41
+  caught) is the current denominator; `01-baseline.*` is the frozen historical
+  one, kept for the −59.1 % comparison.
+- **Checking that a mutation is genuinely caught?** `08-non-vacuity.md` (41/41
+  routed *and* unrouted) and `09-routing.md` (routing cannot delete coverage) are
+  the two non-vacuity proofs; `07-unbounded-audit.md` and `08-unbounded-fixes.md`
+  are the bounded-wait work that made the timings trustworthy.
+- **Understanding gomutants' verdicts before quoting one?** `03-gomutants.md`
+  §1 (efficacy excludes `TIMED OUT`) and §7 (a `PENDING` run still exits 0) are
+  the two traps; `04-timeout-semantics.md` is the one that disqualifies it as a
+  gate.
 
 ## How to read the two baselines
 

@@ -285,6 +285,17 @@ also why §2 cross-checks every regex with `go test -list` **and** requires a
 real `caught` — a plausible-looking regex that silently stops covering
 anything is the exact failure mode that keeps the grid honest.
 
+> **Superseded in part by `10-mutation18.md` (`strudel-agent-bgb`).** The
+> sentence above — "The defect is only observable through the HTTP surface" —
+> was true of the suite as it stood and is **no longer true**.
+> `TestConductorRecordEvalResultSameVersionReplaces` now distinguishes `<` from
+> `<=` directly, and mutation 18 is caught by the conductor tests themselves
+> (`SURVIVED` → `caught`). The warnings here still stand in general: routing 18
+> to a Conductor test would have been wrong, and wrong *silently*. But the
+> reason is now that the owning test did not exist, not that the boundary is
+> unobservable from the conductor. Mutation 18 deliberately still carries **no**
+> 5th routing field.
+
 ## 8. Verdict
 
 **Threshold: 300s** for a full local mutation-check run — the budget that

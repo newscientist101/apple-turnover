@@ -1,32 +1,52 @@
-# New Baseline: Fixed + Routed Grid (provisional)
+# New Baseline: Fixed + Routed Grid
 
-**Date:** 2026-09-29
+**Date:** 2026-09-29 (measured) / 2026-09-29 (de-provisioned, see §0).
 **Machine:** Linux ROGQ58 WSL2. **Go:** go1.27.1. **Commit:** 4cbb677.
-**Deliverable for:** strudel-agent-e2v.3.2. **Depends on:** .3.1 (see §0).
+**Deliverable for:** strudel-agent-e2v.3.2. **Non-vacuity dependency:** .3.1, CLOSED.
 
-## 0. Ordering note: provisional until .3.1 closes
+## 0. Ordering: the non-vacuity gate is now satisfied
 
 The issue orders this work after the non-vacuity proof (.3.1): nothing may be
 re-baselined until the grid is proven still fully load-bearing, because a
 bounded wait can silently convert a hang into a PASS and delete coverage with
-no test going red. At measurement time `.3.1` is still `in_progress` and
-`docs/mutation-bench/08-non-vacuity.md` does not exist yet, so the numbers
-below are measurements of the current fixed+routed tree, pending .3.1's
-verdict. If .3.1 changes any test, script row, or routing field, this baseline
-must be re-run. What this report does instead of .3.1's proof:
+no test going red. This report was originally written as **provisional** for
+exactly that reason — at measurement time `.3.1` was still `in_progress` and
+`docs/mutation-bench/08-non-vacuity.md` did not exist.
 
-- the whole grid was run cold on the current tree and reports 41 caught, 0
-  survived, 0 weak, 0 broken (log /tmp/e2v32-bench-logs/grid3.log,
-  wall 128.042s, rc=0);
-- the per-mutation table below records all 41 verdicts as caught;
-- `make verify` is green on the unmutated tree (§8);
-- `git status` is clean apart from docs/mutation-bench/*, `01-baseline.*`
-  are byte-identical to the kki.1 commit (sha256 in §7), and
-  `docs/mutation-bench/README.md` indexes the evidence set.
+`.3.1` is now **CLOSED** (commit `a8dd269`, deliverable
+`docs/mutation-bench/08-non-vacuity.md`). Its verdict, quoted from that file's
+§0: *41/41 caught in the routed grid (0 panics) and 41/41 caught in the
+unrouted control (one panic, explained in its §3)*; no assertion was removed
+or loosened, only bounded. So the gate this report was waiting on is closed
+and these numbers are final.
 
-The six-check non-vacuity proof itself (routed AND unrouted runs, mutation-30
-two-test failure quote with no timeout panic, per-site worktree re-wedging,
-assertion-shape justification) remains .3.1's deliverable, not this file's.
+**The re-run trigger did not fire.** §0 originally warned: *if .3.1 changes
+any test, script row, or routing field, this baseline must be re-run.* It did
+not. `.3.1` added exactly one file:
+
+```bash
+git --no-pager show --stat --format= a8dd269
+#  docs/mutation-bench/08-non-vacuity.md | 593 ++++++++++++++
+#  1 file changed, 593 insertions(+)
+
+git --no-pager diff --stat 4cbb677 a8dd269 -- srv scripts cmd
+# (empty — no test, no script, no routing field changed)
+```
+
+The measurements below were taken at `4cbb677`; `.3.1` reports on `7e71ae9`
+and states *test files identical to `4cbb677`*. The tree under measurement is
+therefore the tree `.3.1` proved, and no re-run is required.
+
+What this report contributes on its own account (distinct from `.3.1`'s
+proof, which lives in `08-non-vacuity.md`):
+
+- the whole grid run cold, reporting 41 caught, 0 survived, 0 weak, 0 broken
+  (log /tmp/e2v32-bench-logs/grid3.log, wall 128.042s, rc=0);
+- the per-mutation timing table below, all 41 verdicts caught;
+- the before/after comparison against kki.1's frozen 312.680s (§2, §3);
+- `make verify` green on the unmutated tree (§8);
+- `01-baseline.*` byte-identical to the kki.1 commit (sha256 in §7), and
+  `docs/mutation-bench/README.md` indexing the evidence set.
 
 ## 1. Exact commands used
 
@@ -65,7 +85,7 @@ new TSV.
 | Unmutated baseline pass | 3.606s | 3.043s | -0.563s (noise) |
 | Sum of 41 individual runs | 442.085s | 242.396s | -199.689s (-45.2%) |
 | Sum baseline-subtracted | 294.239s | 117.633s | -176.606s (-60.0%) |
-| Grid verdict | 41 caught | 41 caught, 0 survived, 0 weak, 0 broken | no loss (pending .3.1) |
+| Grid verdict | 41 caught | 41 caught, 0 survived, 0 weak, 0 broken | no loss — confirmed by .3.1 (routed AND unrouted, 41/41) |
 
 Arithmetic check (stated awk command — run it yourself):
 
@@ -238,11 +258,13 @@ present throughout; docs-only, no build effect.
 
 ## 8. Gate state
 
-make verify green (gofmt/vet/build/go test -race ok ~2.8s). git status clean
-apart from docs/mutation-bench/* (03-gomutants.md pre-existing; 09-new files
-are this report). No production code, test, or script modified. The bd memory
-mutation-grid-baseline was updated in place (new numbers, the defect class, and
-the lesson that a bound checked outside the call it bounds cannot fire), and
-docs/mutation-bench/README.md now indexes the evidence set (01–09, listing the
-not-yet-written 02/04/05/06/08 as open).
+make verify green (gofmt/vet/build/go test -race ok ~2.8s). The only file this
+report modifies is itself; no production code, test, or script was touched.
+`03-gomutants.md` is untracked in the working tree — it is kki.3's in-progress
+artifact and was deliberately left uncommitted, so `git status` shows it
+alongside docs/mutation-bench/* and that is the expected state, not drift.
+The bd memory mutation-grid-baseline was updated in place (new numbers, the
+defect class, and the lesson that a bound checked outside the call it bounds
+cannot fire), and docs/mutation-bench/README.md indexes the evidence set
+(01–09, listing the not-yet-written 02/04/05/06 as open).
 

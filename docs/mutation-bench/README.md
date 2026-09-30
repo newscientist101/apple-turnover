@@ -11,7 +11,7 @@ gaps are expected while subtasks are still open.
 |---|---|---|---|
 | `01-baseline.md`, `01-baseline.tsv` | kki.1 | What does the curated 41-mutation grid cost today, per mutation? (whole grid cold **312.680s**, 3.606s baseline pass, mutation 30 alone 48.0%) | ✅ closed, frozen as the historical record |
 | `02-routing.md` | kki.2 | Is per-mutation routing alone enough to make the grid locally runnable? (41-row survey; all 41 routed = **79.5s**; but 77% of a routed run is `go test` startup, not tests). §7 superseded in part by `10-mutation18.md` | ✅ closed |
-| `03-gomutants.md` | kki.3 | What does gomutants discover/measure on this codebase, and at what wall time? (360 mutants found; 231.32s cold bounded run) | in progress, untracked |
+| `03-gomutants.md` | kki.3 | What does gomutants discover/measure on this codebase, and at what wall time? (360 mutants found; 231.32s cold bounded run; WARM 2.52s; efficacy 77.07% / coverage 94.86%) | ✅ closed |
 | `07-unbounded-audit.md` | e2v.1.2 | Which test bounds sit *outside* the call they bound, so a wedge cannot reach them? (36 sites: 32 OK, 2 shape-A, 2 shape-B) | ✅ closed |
 | `08-unbounded-fixes.md` | e2v.1.3.4 | Class-level proof for the unbounded-wait fixes: what fails, how fast, and with what message under a deliberately wedged hub? (10 clean failures at ~2.0s, **0** timeout panics) | ✅ closed |
 | `08-non-vacuity.md` | e2v.3.1 | Did bounding the waits and adding routing silently delete coverage? (41/41 caught **routed** 128.858s and **unrouted** 352.302s; every fixed site re-wedged; no assertion weakened) | ✅ closed |

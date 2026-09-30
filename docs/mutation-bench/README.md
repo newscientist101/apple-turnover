@@ -13,6 +13,7 @@ gaps are expected while subtasks are still open.
 | `02-routing.md` | kki.2 | Is per-mutation routing alone enough to make the grid locally runnable? (41-row survey; all 41 routed = **79.5s**; but 77% of a routed run is `go test` startup, not tests). §7 superseded in part by `10-mutation18.md` | ✅ closed |
 | `03-gomutants.md` | kki.3 | What does gomutants discover/measure on this codebase, and at what wall time? (360 mutants found; 231.32s cold bounded run; WARM 2.52s; efficacy 77.07% / coverage 94.86%) | ✅ closed |
 | `04-timeout-semantics.md` | kki.4 | **Can gomutants catch a HANG-shaped defect?** (No. Wedge in the baseline → exit 1, no verdict, 600.30s. Wedge as a mutant → **3 infinite loops `TIMED OUT`, exit 0, efficacy 81.82%, coverage 100%** — and the verdict is cached and replayed. The curated grid catches both hang mutations with named assertions.) | ✅ closed |
+| `05-traceability.md` | kki.5 | How much of the curated 41-mutation grid can gomutants *express*? (**18/41** traceable and killed — 10 exact, 8 equivalent at the same anchor; **23/41** NOT-GENERATED, 8 with no mutant on any anchor line and all 10 `ws.go` rows among them; 300 of the 357 judged mutants are off the anchor lines, 66 of them LIVED) | ✅ closed |
 | `07-unbounded-audit.md` | e2v.1.2 | Which test bounds sit *outside* the call they bound, so a wedge cannot reach them? (36 sites: 32 OK, 2 shape-A, 2 shape-B) | ✅ closed |
 | `08-unbounded-fixes.md` | e2v.1.3.4 | Class-level proof for the unbounded-wait fixes: what fails, how fast, and with what message under a deliberately wedged hub? (10 clean failures at ~2.0s, **0** timeout panics) | ✅ closed |
 | `08-non-vacuity.md` | e2v.3.1 | Did bounding the waits and adding routing silently delete coverage? (41/41 caught **routed** 128.858s and **unrouted** 352.302s; every fixed site re-wedged; no assertion weakened) | ✅ closed |
@@ -21,7 +22,7 @@ gaps are expected while subtasks are still open.
 
 | `10-mutation18.md` | bgb | Was mutation 18 caught only by an unrelated API test? (`SURVIVED` under `-run TestConductor` → now `caught` by `TestConductorRecordEvalResultSameVersionReplaces`; the old catch was partly a panic) | ✅ closed |
 
-Not yet written: `05-traceability.md` (kki.5), `06-decision.md` (kki.6).
+Not yet written: `06-decision.md` (kki.6).
 
 ## How to read the two baselines
 

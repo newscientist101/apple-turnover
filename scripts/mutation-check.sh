@@ -113,7 +113,7 @@ MUTATIONS=$(cat <<'EOF'
 28-hub-double-close-allowed|srv/hub.go|if _, present := subs[sub]; !present {\n\t\treturn false\n\t}|if false {\n\t\treturn false\n\t}
 29-hub-unsubscribe-does-not-close|srv/hub.go|close(sub.ch)\n\tdelete(subs, sub)\n\treturn true|delete(subs, sub)\n\treturn true|TestHubUnsubscribeStopsDeliveryAndClosesExactlyOnce
 30-hub-slow-client-blocks|srv/hub.go|select {\n\tcase sub.ch <- msg:\n\t\treturn true\n\tdefault:\n\t\treturn false\n\t}|sub.ch <- msg\n\treturn true|TestHubSlowSubscriberCannotBlockOthers|TestHubConcurrentSubscribeUnsubscribeBroadcast
-31-hub-broadcast-skips-a-subscriber|srv/hub.go|case msg := <-h.broadcast:\n\t\t\tfor sub := range subs {\n\t\t\t\tif !h.deliver(sub, msg) {|case msg := <-h.broadcast:\n\t\t\tskipFirst := true\n\t\t\tfor sub := range subs {\n\t\t\t\tif skipFirst {\n\t\t\t\t\tskipFirst = false\n\t\t\t\t\tcontinue\n\t\t\t\t}\n\t\t\t\tif !h.deliver(sub, msg) {|TestHubBroadcastReachesEverySubscriberWithIdenticalBytes
+31-hub-broadcast-skips-a-subscriber|srv/hub.go|case msg := <-h.broadcast:\n\t\t\tbefore := len(subs)\n\t\t\tfor sub := range subs {\n\t\t\t\tif !h.deliver(sub, msg) {|case msg := <-h.broadcast:\n\t\t\tbefore := len(subs)\n\t\t\tskipFirst := true\n\t\t\tfor sub := range subs {\n\t\t\t\tif skipFirst {\n\t\t\t\t\tskipFirst = false\n\t\t\t\t\tcontinue\n\t\t\t\t}\n\t\t\t\tif !h.deliver(sub, msg) {|TestHubBroadcastReachesEverySubscriberWithIdenticalBytes
 32-hub-count-escapes-the-hub-goroutine|srv/hub.go|case reply := <-h.count:\n\t\t\treply <- len(subs)|case reply := <-h.count:\n\t\t\tgo func() { reply <- len(subs) }()
 33-hub-dropped-client-not-removed|srv/hub.go|// hub down. removeSubscriber closes its channel exactly once.\n\t\t\t\t\tremoveSubscriber(subs, sub)|// hub down. removeSubscriber closes its channel exactly once.\n\t\t\t\t\t_ = sub|TestHubSlowSubscriberCannotBlockOthers
 34-hub-removal-not-recorded|srv/hub.go|close(sub.ch)\n\tdelete(subs, sub)\n\treturn true|close(sub.ch)\n\treturn true
@@ -134,6 +134,15 @@ MUTATIONS=$(cat <<'EOF'
 49-code-broadcast-twice|srv/api.go|s.broadcast(EventCode, snap)|s.broadcast(EventCode, snap)\n\ts.broadcast(EventCode, snap)|TestIntegrationEveryAcceptedWriteFansOutOnceToEveryListener
 50-rejected-code-still-broadcasts|srv/api.go|\t\twriteError(w, http.StatusBadRequest, "code must not be empty: send the strudel pattern to play")\n\t\treturn\n\t}|\t\ts.broadcast(EventCode, s.Conductor.Snapshot())\n\t\twriteError(w, http.StatusBadRequest, "code must not be empty: send the strudel pattern to play")\n\t\treturn\n\t}|TestIntegrationRejectedAndStaleWritesBroadcastNothing
 51-connect-snapshot-not-the-live-state|srv/ws.go|s.encodeEvent(EventSnapshot, s.Conductor.Snapshot())|s.encodeEvent(EventSnapshot, Snapshot{})|TestIntegrationConnectReceivesTheLiveSnapshot
+52-count-hook-never-installed|srv/server.go|NewHubWithCountHook(HubDefaultSendBuffer, conductor.SetListenerCount)|NewHub(HubDefaultSendBuffer)|TestWSListenerCountIsPublishedOnConnectAndDisconnect
+53-count-not-published-on-subscribe|srv/hub.go|\t\t\tsubs[sub] = struct{}{}\n\t\t\tpublishCount()\n\t\t\treq.reply <- sub|\t\t\tsubs[sub] = struct{}{}\n\t\t\treq.reply <- sub|TestHubCountHookReportsEveryTransition
+54-count-not-published-on-unsubscribe|srv/hub.go|\t\t\tif removed {\n\t\t\t\tpublishCount()\n\t\t\t}\n\t\t\treq.reply <- removed|\t\t\tif false {\n\t\t\t\tpublishCount()\n\t\t\t}\n\t\t\treq.reply <- removed|TestWSListenerCountIsPublishedOnConnectAndDisconnect
+55-count-not-published-on-drop|srv/hub.go|\t\t\tif len(subs) != before {\n\t\t\t\tpublishCount()\n\t\t\t}\n|\t\t\t_ = before\n|TestHubCountHookReportsTheDropOfASlowSubscriber
+56-count-published-after-the-subscribe-reply|srv/hub.go|\t\t\tpublishCount()\n\t\t\treq.reply <- sub|\t\t\treq.reply <- sub\n\t\t\tpublishCount()|TestHubCountHookIsPublishedBeforeTheCommandIsAnswered|TestWSConnectSnapshotCountsTheConnectingListener
+57-count-not-published-on-close|srv/hub.go|\t\t\t// 0 without polling for it.\n\t\t\tpublishCount()\n\t\t\tclose(reply)|\t\t\t// 0 without polling for it.\n\t\t\tclose(reply)|TestHubCountHookPublishesZeroOnClose
+58-count-published-when-nothing-changed|srv/hub.go|\t\t\tif len(subs) != before {\n\t\t\t\tpublishCount()\n\t\t\t}\n|\t\t\tpublishCount()\n\t\t\t_ = before\n|TestHubCountHookReportsEveryTransition
+59-negative-listener-count-not-clamped|srv/conductor.go|\tif n < 0 {\n\t\tn = 0\n\t}\n\tc.mu.Lock()\n\tdefer c.mu.Unlock()\n\tc.listeners = n|\tc.mu.Lock()\n\tdefer c.mu.Unlock()\n\tc.listeners = n|TestConductorSetListenerCountClampsAndLeavesTheVersionAlone
+60-listener-count-bumps-the-version|srv/conductor.go|\tc.mu.Lock()\n\tdefer c.mu.Unlock()\n\tc.listeners = n|\tc.mu.Lock()\n\tdefer c.mu.Unlock()\n\tc.listeners = n\n\tc.version++|TestConductorListenerCountDoesNotBumpVersion
 EOF
 )
 

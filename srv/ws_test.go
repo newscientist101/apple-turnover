@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -280,6 +281,263 @@ func wsDial(t *testing.T, url string, header http.Header) (*websocket.Conn, *htt
 	}
 	t.Cleanup(func() { _ = conn.CloseNow() })
 	return conn, resp
+}
+
+// ---------- the listener count, end to end (issue .3.5) ----------
+
+// wsGetJSON performs one bounded GET and decodes the body as a JSON object.
+// json.Number is used so numeric fields compare as numbers and never as float
+// text.
+func wsGetJSON(t *testing.T, base, path string) (map[string]any, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), wsReadTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Transport: boundedTransport(), Timeout: wsReadTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET %s: status %d", path, resp.StatusCode)
+	}
+	var got map[string]any
+	dec := json.NewDecoder(io.LimitReader(resp.Body, 1<<20))
+	dec.UseNumber()
+	if err := dec.Decode(&got); err != nil {
+		return nil, fmt.Errorf("GET %s: decode body: %w", path, err)
+	}
+	return got, nil
+}
+
+// wsListenerCountField extracts listenerCount from a decoded state object, as a
+// number. A missing or non-numeric field is the failure it is, not a zero:
+// reading a missing field as 0 is exactly how a permanently-zero listener count
+// would pass unnoticed.
+func wsListenerCountField(t *testing.T, got map[string]any) int {
+	t.Helper()
+	raw, ok := got["listenerCount"]
+	if !ok {
+		t.Fatalf("the state object has no listenerCount field: %v", got)
+	}
+	n, ok := raw.(json.Number)
+	if !ok {
+		t.Fatalf("listenerCount = %v (%T), want a JSON number", raw, raw)
+	}
+	v, err := n.Int64()
+	if err != nil {
+		t.Fatalf("listenerCount = %s, want an integer: %v", n.String(), err)
+	}
+	return int(v)
+}
+
+// wsWantStateListenerCount waits, bounded, for GET /api/state to report
+// listenerCount == want.
+//
+// The poll is over the HTTP body rather than over Hub.SubscriberCount, because
+// the body is what the agent contract promises: a count that was correct in the
+// hub but absent from /api/state would pass a hub-level assertion and fail every
+// real client. Each individual read is bounded (so a wedged handler fails the
+// test rather than parking the poll), and so is the whole wait.
+func wsWantStateListenerCount(t *testing.T, base string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(wsSubscriberTimeout)
+	last := -1
+	for {
+		got, err := wsGetJSON(t, base, "/api/state")
+		if err != nil {
+			t.Fatalf("GET /api/state: %v: the count must be readable over HTTP, not merely present in the hub", err)
+		}
+		last = wsListenerCountField(t, got)
+		if last == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			// Report what was read rather than reading again: a second
+			// unbounded read on the failure path is the hang this bounds.
+			t.Fatalf("GET /api/state reports listenerCount=%d after %s, want %d", last, wsSubscriberTimeout, want)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// TestWSListenerCountIsPublishedOnConnectAndDisconnect is the end-to-end
+// behaviour issue .3.5 exists for: GET /api/state.listenerCount tracks the real
+// number of connected listeners across connect, clean disconnect and abrupt
+// disconnect.
+//
+// The sequence 0 -> 1 -> 3 -> 2 -> 0 is the bead's own scenario, and every step
+// is asserted on the response body. The two disconnects are deliberately
+// different kinds — a clean close frame (a listener navigating away) and
+// CloseNow with no close frame at all (a killed tab, a yanked cable) — because
+// the server detects them by different routes, and only the abrupt one proves
+// the detection is the read side noticing rather than the close handshake.
+func TestWSListenerCountIsPublishedOnConnectAndDisconnect(t *testing.T) {
+	s, url, ts := wsTestServerWith(t, wsTestServerOptions{})
+	base := ts.URL
+
+	// Nobody has connected yet.
+	wsWantStateListenerCount(t, base, 0)
+
+	// One, then three.
+	c1, _ := wsDial(t, url, nil)
+	wsWantStateListenerCount(t, base, 1)
+	c2, _ := wsDial(t, url, nil)
+	wsWantStateListenerCount(t, base, 2)
+	c3, _ := wsDial(t, url, nil)
+	wsWantStateListenerCount(t, base, 3)
+
+	// The hub and the API must agree: the published count is not a second,
+	// independent tally maintained somewhere else.
+	if got := hubSubscriberCount(t, s.Hub); got != 3 {
+		t.Fatalf("SubscriberCount = %d while /api/state reports 3: the published count and the hub disagree", got)
+	}
+
+	// A CLEAN disconnect: the client sends a close frame.
+	if err := c2.Close(websocket.StatusNormalClosure, ""); err != nil {
+		t.Fatalf("client clean close: %v", err)
+	}
+	wsWantStateListenerCount(t, base, 2)
+
+	// An ABRUPT disconnect: the socket goes away with no close frame, which is
+	// what a killed browser tab looks like to the server.
+	if err := c1.CloseNow(); err != nil {
+		t.Fatalf("client CloseNow: %v", err)
+	}
+	wsWantStateListenerCount(t, base, 1)
+
+	// The last one, also abruptly.
+	if err := c3.CloseNow(); err != nil {
+		t.Fatalf("client CloseNow: %v", err)
+	}
+	wsWantStateListenerCount(t, base, 0)
+
+	// And the count really reached zero rather than being pinned there: the hub
+	// holds nobody, and a broadcast reaches nobody rather than resurrecting a
+	// departed subscriber.
+	if got := hubSubscriberCount(t, s.Hub); got != 0 {
+		t.Fatalf("SubscriberCount = %d after every listener left, want 0", got)
+	}
+	s.Hub.Broadcast([]byte(`{"kind":"code"}`))
+	wsWantStateListenerCount(t, base, 0)
+}
+
+// TestWSConnectSnapshotCountsTheConnectingListener pins the user-visible
+// consequence of the publish-before-reply ordering, which is the entire reason
+// that ordering exists.
+//
+// A listener's FIRST frame is its catch-up snapshot, so the count a new listener
+// sees on arrival is decided by when the hub published relative to when
+// Subscribe returned. Published after the reply, this snapshot could report a
+// listenerCount that excludes the very listener reading it — and because that is
+// a race it would be intermittent, passing in almost every run.
+//
+// The count is read straight out of the frame with no waiting, because the claim
+// is that it was ALREADY correct when the frame was written.
+func TestWSConnectSnapshotCountsTheConnectingListener(t *testing.T) {
+	s, url, _ := wsTestServerWith(t, wsTestServerOptions{})
+
+	conn, _ := wsDial(t, url, nil)
+	ev := wsReadConnectSnapshot(t, conn, s.Conductor.Snapshot())
+	if ev.Snapshot.ListenerCount != 1 {
+		t.Fatalf("the first listener's catch-up snapshot reports listenerCount=%d, want 1: the count must be published before Subscribe is acknowledged, or the snapshot counts the listener reading it as absent", ev.Snapshot.ListenerCount)
+	}
+
+	// A second listener sees two, which also rules out a count that is merely
+	// "not zero".
+	conn2, _ := wsDial(t, url, nil)
+	ev2 := wsReadConnectSnapshot(t, conn2, s.Conductor.Snapshot())
+	if ev2.Snapshot.ListenerCount != 2 {
+		t.Fatalf("the second listener's catch-up snapshot reports listenerCount=%d, want 2", ev2.Snapshot.ListenerCount)
+	}
+
+	// The Conductor agrees with the frame it produced: the hook targets the same
+	// field the frame carries, so a count published to one and not the other
+	// would surface here.
+	if got := s.Conductor.Snapshot().ListenerCount; got != 2 {
+		t.Fatalf("Conductor.Snapshot().ListenerCount = %d, want 2", got)
+	}
+}
+
+// TestWSListenerCountIsNotBroadcastAsAnEvent pins the deliberate scope limit of
+// this issue: the count reaches /api/state and every snapshot, but a listener
+// ARRIVING or LEAVING sends no frame of its own.
+//
+// This is asserted rather than assumed, because "the count changed" is exactly
+// the kind of thing a later change would helpfully add a frame for — and adding
+// an event kind is a wire-contract change that deserves a decision made on
+// purpose rather than arriving by accident. If this test ever starts failing
+// because a listener-count event WAS added, that is the moment to make the
+// decision deliberately; see the listener-count follow-up bead.
+//
+// The negative assertion is a bounded WAIT, not a non-blocking peek: a peek
+// cannot distinguish "nothing yet" from "nothing ever", so it would pass for a
+// merely slow delivery. The reader runs on its own goroutine so the connection
+// stays healthy and a later failure elsewhere cannot be masked by a dead socket.
+func TestWSListenerCountIsNotBroadcastAsAnEvent(t *testing.T) {
+	_, url, _ := wsTestServerWith(t, wsTestServerOptions{})
+
+	conn, _ := wsDial(t, url, nil)
+	// Consume the catch-up frame first: it is expected, and counting it as an
+	// unexpected event would make this test fail for the right reason by the
+	// wrong route.
+	ctx, cancel := context.WithTimeout(context.Background(), wsReadTimeout)
+	if _, _, err := conn.Read(ctx); err != nil {
+		cancel()
+		t.Fatalf("connect snapshot: no frame within %s: %v", wsReadTimeout, err)
+	}
+	cancel()
+
+	// Drain anything that arrives from here on.
+	frames := make(chan string, 8)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			rctx, rcancel := context.WithTimeout(context.Background(), wsReadTimeout)
+			_, data, err := conn.Read(rctx)
+			rcancel()
+			if err != nil {
+				return
+			}
+			var ev Event
+			if err := json.Unmarshal(data, &ev); err != nil {
+				return
+			}
+			select {
+			case frames <- ev.Kind:
+			default:
+			}
+		}
+	}()
+	defer func() {
+		_ = conn.CloseNow()
+		select {
+		case <-readerDone:
+		case <-time.After(wsReadTimeout):
+			t.Errorf("the background reader did not exit within %s after the socket was closed", wsReadTimeout)
+		}
+	}()
+
+	// Somebody arrives and somebody leaves. Neither is a change to the
+	// performance, so neither may produce a frame here.
+	other, _ := wsDial(t, url, nil)
+	_ = other.CloseNow()
+
+	quiet := time.After(250 * time.Millisecond)
+	for {
+		select {
+		case kind := <-frames:
+			t.Fatalf("a listener connecting or leaving produced a %q frame for an already-connected listener; this issue publishes the count through /api/state only, and a count event is a separate wire-contract decision", kind)
+		case <-quiet:
+			return
+		}
+	}
 }
 
 // TestWSUpgradeSucceedsAndStaysOpen is this slice's first behaviour, over a

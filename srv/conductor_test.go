@@ -328,3 +328,145 @@ func TestConductorHistoryRingWrapLongRun(t *testing.T) {
 			snap.Version, snap.Code, newest.Version, newest.Code)
 	}
 }
+
+// TestConductorSetListenerCountClampsAndLeavesTheVersionAlone covers the
+// Conductor half of issue .3.5, which the hub's count hook depends on.
+//
+// The clamp is the point that matters most: the hub can only ever report
+// len(subs), so a negative count cannot come from a correct hub — it would mean
+// some other caller passed nonsense, and publishing it would put an impossible
+// number ("-1 listeners") into the snapshot every listener and the agent read.
+// Clamping to 0 means the worst case is a stale 0 rather than a lie.
+//
+// The version must not move. Listeners arriving and leaving is not a change to
+// the performance: a version bump would add a connect to the code history and
+// make every browser reconnect look like a new document to anything keyed on the
+// version.
+func TestConductorSetListenerCountClampsAndLeavesTheVersionAlone(t *testing.T) {
+	c := NewConductor(4)
+
+	if got := c.Snapshot().ListenerCount; got != 0 {
+		t.Fatalf("a fresh Conductor reports listenerCount=%d, want 0", got)
+	}
+
+	for _, n := range []int{0, 1, 3, 7, 0} {
+		c.SetListenerCount(n)
+		if got := c.Snapshot().ListenerCount; got != n {
+			t.Fatalf("after SetListenerCount(%d) the snapshot reports %d", n, got)
+		}
+	}
+
+	// Negative inputs clamp rather than serialise: a listener count claiming
+	// fewer than zero listeners is never true, and the wire format has no way
+	// to express "unknown".
+	for _, n := range []int{-1, -7} {
+		c.SetListenerCount(n)
+		if got := c.Snapshot().ListenerCount; got != 0 {
+			t.Errorf("SetListenerCount(%d) published %d, want 0: a negative listener count must be clamped", n, got)
+		}
+	}
+
+	// The clamp must survive being the LAST thing that happened, so it is
+	// re-asserted after the loop rather than trusted from inside it.
+	if got := c.Snapshot().ListenerCount; got != 0 {
+		t.Errorf("final listenerCount = %d, want 0", got)
+	}
+}
+
+// TestConductorListenerCountDoesNotBumpVersion pins that publishing a count is
+// not a change to the performance.
+//
+// This is a separate assertion from the one above because the failure it catches
+// is invisible in a snapshot comparison: a bumped version would still serialise
+// the listener count correctly, so only the version and the history reveal it.
+func TestConductorListenerCountDoesNotBumpVersion(t *testing.T) {
+	c := NewConductor(4)
+	c.Publish(`s("bd*4")`, "kick")
+
+	before := c.Snapshot()
+	c.SetListenerCount(5)
+	after := c.Snapshot()
+
+	if after.Version != before.Version {
+		t.Errorf("version moved from %d to %d across SetListenerCount: a listener count is not a change to the performance", before.Version, after.Version)
+	}
+	if len(after.History) != len(before.History) {
+		t.Errorf("history length moved from %d to %d across SetListenerCount: connecting listeners must not enter the code history", len(before.History), len(after.History))
+	}
+	if after.ListenerCount != 5 {
+		t.Errorf("listenerCount = %d, want 5", after.ListenerCount)
+	}
+}
+
+// TestConductorListenerCountIsSafeUnderConcurrentPublishesAndCounts exercises
+// the real call pattern under -race: the hub's count hook writes the listener
+// count from the hub goroutine while agent writes read and rewrite everything
+// else, and Snapshot reads the result.
+//
+// It is here because that is the one way the new wiring could be unsafe. The
+// hook runs on the hub goroutine and takes the Conductor's write lock; if any
+// Conductor method held that lock while calling back into the Hub, this would
+// deadlock rather than merely race. A watchdog bounds the whole thing so a
+// deadlock fails the test with a message instead of hanging the run.
+func TestConductorListenerCountIsSafeUnderConcurrentPublishesAndCounts(t *testing.T) {
+	c := NewConductor(8)
+
+	const (
+		counters    = 4
+		publishers  = 4
+		iterations  = 200
+		watchdogFor = 20 * time.Second
+	)
+
+	var wg sync.WaitGroup
+
+	for i := 0; i < counters; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				c.SetListenerCount(id*iterations + j)
+			}
+		}(i)
+	}
+
+	for i := 0; i < publishers; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				c.Publish("code-"+strconv.Itoa(id)+"-"+strconv.Itoa(j), "msg")
+				c.SetMessage("msg-" + strconv.Itoa(j))
+				c.SetPlaying(j%2 == 0)
+			}
+		}(i)
+	}
+
+	// A reader, so the count is being read under contention too rather than only
+	// written.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for j := 0; j < iterations*2; j++ {
+			snap := c.Snapshot()
+			if snap.ListenerCount < 0 {
+				t.Errorf("Snapshot().ListenerCount = %d, want >= 0 under concurrent writes", snap.ListenerCount)
+				return
+			}
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(watchdogFor):
+		t.Fatalf("concurrent publishes and count publishes did not finish within %s: the count hook and the Conductor lock are deadlocking against each other", watchdogFor)
+	}
+
+	// Every version published must be accounted for and contiguous: the count
+	// writes must not have disturbed the version counter at all.
+	if got, want := c.Snapshot().Version, int64(publishers*iterations); got != want {
+		t.Errorf("version = %d after %d concurrent publishes, want %d: listener-count writes disturbed the version counter", got, want, want)
+	}
+}

@@ -26,6 +26,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -172,6 +173,363 @@ func hubWantClosed(t *testing.T, sub *Subscriber) {
 		case closed:
 			return
 		}
+	}
+}
+
+// ---------- the subscriber-count hook (issue .3.5) ----------
+
+// hubCountLog records every count the hub hook publishes.
+//
+// It is deliberately NOT a mutex-guarded view of the live count: the tests need
+// the SEQUENCE of published values, not just the latest, because "the count ended
+// up right" is a much weaker claim than "the count was reported at every
+// transition, and only ever with the value that transition implies".
+type hubCountLog struct {
+	mu     sync.Mutex
+	counts []int
+}
+
+func (l *hubCountLog) record(n int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.counts = append(l.counts, n)
+}
+
+func (l *hubCountLog) all() []int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.counts)
+}
+
+func (l *hubCountLog) last() (int, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.counts) == 0 {
+		return 0, false
+	}
+	return l.counts[len(l.counts)-1], true
+}
+
+// hubCountedHub is hubTestHub plus the count hook, returning the hub and the log
+// the hook writes to. The teardown bound is the same one hubTestHub installs, so
+// a wedged hub goroutine fails the test here exactly as it does there.
+func hubCountedHub(t *testing.T, sendBuffer int) (*Hub, *hubCountLog) {
+	t.Helper()
+	log := &hubCountLog{}
+	h := NewHubWithCountHook(sendBuffer, log.record)
+
+	t.Cleanup(func() {
+		closed := make(chan struct{})
+		go func() { h.Close(); close(closed) }()
+		select {
+		case <-closed:
+		case <-time.After(hubShutdownTimeout):
+			t.Errorf("Hub.Close did not return within %s: the hub goroutine is wedged", hubShutdownTimeout)
+		}
+	})
+	return h, log
+}
+
+// hubWantPublished requires the hook's most recent published count to be want,
+// bounded.
+//
+// It is a POSITIVE assertion about a value, not a quiet window: it polls for the
+// value to BE there rather than waiting to see whether anything arrives. The
+// bound is on each poll iteration, and the whole wait is separately bounded, so
+// a hub that publishes nothing fails after hubCountTimeout naming what it last
+// published — rather than passing because nothing showed up.
+func hubWantPublished(t *testing.T, log *hubCountLog, want int) {
+	t.Helper()
+	deadline := time.Now().Add(hubCountTimeout)
+	var last int
+	var seen bool
+	for {
+		if n, ok := log.last(); ok {
+			last, seen = n, true
+			if n == want {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if !seen {
+		t.Fatalf("the count hook published nothing within %s, want %d", hubCountTimeout, want)
+	}
+	t.Fatalf("the count hook's latest published count is %d after %s, want %d", last, hubCountTimeout, want)
+}
+
+// hubWantNoPublish requires that the hook publishes NOTHING MORE within d.
+//
+// This is the negative counterpart to hubWantPublished, and it is the assertion
+// that keeps "the count was published" distinguishable from "the count changed".
+// Publishing on a transition that changed nothing (a broadcast nobody was
+// dropped from, an unsubscribe of an already-gone subscriber) is not harmless
+// noise: a consumer cannot tell a real change from a redundant one, so the count
+// stops being evidence of anything.
+func hubWantNoPublish(t *testing.T, log *hubCountLog, d time.Duration) {
+	t.Helper()
+	before := len(log.all())
+	time.Sleep(d)
+	if after := len(log.all()); after != before {
+		t.Fatalf("the count hook published %d extra value(s) in %s with no subscriber-set change: %v", after-before, d, log.all()[before:])
+	}
+}
+
+// TestHubCountHookReportsEveryTransition is the hub's half of issue .3.5: the
+// count leaves the hub on every transition that changes the set, with the value
+// that transition implies.
+//
+// The expected sequence is asserted in full, not just the final value, because
+// the transitions are what can individually be lost: a hub that published only
+// on subscribe would still end up with the right last count if this test only
+// looked at the end, while a listener watching /api/state would have been told
+// nothing when people left.
+func TestHubCountHookReportsEveryTransition(t *testing.T) {
+	h, log := hubCountedHub(t, HubDefaultSendBuffer)
+
+	// Nothing has subscribed yet, so nothing has been published. The hub IS
+	// running, though — this distinguishes "no hook installed" from "a hook that
+	// reports 0 on start", which is the mutation that would make an empty hub
+	// look live.
+	hubWantNoPublish(t, log, 50*time.Millisecond)
+
+	// Three connects: 1, 2, 3.
+	subs := make([]*Subscriber, 3)
+	for i := range subs {
+		subs[i] = hubSub(t, h)
+		hubWantPublished(t, log, i+1)
+	}
+
+	// One clean disconnect: 2.
+	if !h.Unsubscribe(subs[1]) {
+		t.Fatal("Unsubscribe of a live subscriber returned false, want true")
+	}
+	hubWantPublished(t, log, 2)
+
+	// Removing something already gone changes nothing, so it must publish
+	// nothing: publishing here would report a change nobody made.
+	if h.Unsubscribe(subs[1]) {
+		t.Error("second Unsubscribe of the same subscriber returned true, want false")
+	}
+	hubWantNoPublish(t, log, 50*time.Millisecond)
+
+	// A broadcast that drops nobody is likewise not a count change.
+	h.Broadcast([]byte(`{"kind":"code"}`))
+	hubWantNoPublish(t, log, 50*time.Millisecond)
+
+	// The remaining disconnects: 1, then 0.
+	if !h.Unsubscribe(subs[0]) {
+		t.Fatal("Unsubscribe returned false, want true")
+	}
+	hubWantPublished(t, log, 1)
+	if !h.Unsubscribe(subs[2]) {
+		t.Fatal("Unsubscribe returned false, want true")
+	}
+	hubWantPublished(t, log, 0)
+
+	// And the published sequence is exactly what the transitions imply: no
+	// missing step, no duplicated step, no value that was never true.
+	want := []int{1, 2, 3, 2, 1, 0}
+	if got := log.all(); !slices.Equal(got, want) {
+		t.Fatalf("published counts = %v, want exactly %v", got, want)
+	}
+}
+
+// TestHubCountHookIsPublishedBeforeTheCommandIsAnswered pins the ordering the
+// whole design rests on: by the time Subscribe returns, the count has already
+// been published.
+//
+// It is not an optimisation. srv/ws.go subscribes and then immediately takes the
+// catch-up snapshot it sends to the connecting listener, so if the count were
+// published after the reply, that snapshot could report a listenerCount that
+// excludes the listener reading it.
+//
+// The assertion is made DETERMINISTIC by making the hook itself block; see the
+// comments in the body. The obvious alternative — read the count log immediately
+// after Subscribe returns — was tried first and does NOT work: whether the test
+// goroutine wins the race against the hub goroutine's next instruction is up to
+// the scheduler. Mutation 56-count-published-after-the-subscribe-reply SURVIVED
+// that version, which is the proof. A test that only usually catches a race is
+// not evidence.
+func TestHubCountHookIsPublishedBeforeTheCommandIsAnswered(t *testing.T) {
+	// entered receives each count the hook is given; release gates it. The hook
+	// signalling and then blocking is what turns the ordering into something a
+	// test can OBSERVE rather than infer.
+	entered := make(chan int, 8)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+
+	h := NewHubWithCountHook(HubDefaultSendBuffer, func(n int) {
+		entered <- n
+		<-release
+	})
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(release) })
+		closed := make(chan struct{})
+		go func() { h.Close(); close(closed) }()
+		select {
+		case <-closed:
+		case <-time.After(hubShutdownTimeout):
+			t.Errorf("Hub.Close did not return within %s: the hub goroutine is wedged", hubShutdownTimeout)
+		}
+	})
+
+	// Subscribe runs on its own goroutine so "has it returned yet?" is
+	// observable at all.
+	type subResult struct {
+		sub *Subscriber
+		err error
+	}
+	returned := make(chan subResult, 1)
+	go func() {
+		sub, err := h.Subscribe()
+		returned <- subResult{sub, err}
+	}()
+
+	// First the hook really is entered — otherwise everything below would pass
+	// for the wrong reason on a hub that never calls it at all.
+	select {
+	case n := <-entered:
+		if n != 1 {
+			t.Fatalf("the count hook was entered with %d, want 1", n)
+		}
+	case <-time.After(hubCountTimeout):
+		t.Fatal("the count hook was never entered within " + hubCountTimeout.String() + ": Subscribe never reached publishCount")
+	}
+
+	// While the hook is blocked, the hub goroutine is INSIDE publishCount, so it
+	// has not reached `req.reply <- sub` and Subscribe cannot have returned.
+	//
+	// This wait is not doing the assertion's work by hoping nothing shows up: the
+	// condition is structurally impossible under the correct ordering, because
+	// the only code that can complete Subscribe is the code the hook is blocking.
+	// Under the inverted order Subscribe has already returned, so this fails at
+	// once rather than usually.
+	select {
+	case r := <-returned:
+		t.Fatalf("Subscribe returned (sub=%p err=%v) while the count hook was still running: the count must be published BEFORE the command is answered, or a connect snapshot can report a count that excludes the listener reading it", r.sub, r.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Let the hook finish; the subscribe then completes normally.
+	releaseOnce.Do(func() { close(release) })
+	var sub *Subscriber
+	select {
+	case r := <-returned:
+		if r.err != nil {
+			t.Fatalf("Hub.Subscribe: %v", r.err)
+		}
+		if r.sub == nil {
+			t.Fatal("Hub.Subscribe returned a nil Subscriber and a nil error")
+		}
+		sub = r.sub
+	case <-time.After(hubCountTimeout):
+		t.Fatal("Subscribe did not return within " + hubCountTimeout.String() + " after the hook was released: the hub goroutine is wedged")
+	}
+
+	// And the same ordering holds on the way out, for the disconnect a killed
+	// browser tab produces. The hook is released by now, so this checks the
+	// published value rather than re-proving the interleaving.
+	if !h.Unsubscribe(sub) {
+		t.Fatal("Unsubscribe returned false, want true")
+	}
+	select {
+	case n := <-entered:
+		if n != 0 {
+			t.Fatalf("the count hook was entered with %d on unsubscribe, want 0", n)
+		}
+	case <-time.After(hubCountTimeout):
+		t.Fatal("the count hook was never entered on unsubscribe within " + hubCountTimeout.String())
+	}
+}
+
+// TestHubCountHookReportsTheDropOfASlowSubscriber covers the transition the
+// dropped listener's own handler cannot see.
+//
+// When the hub drops a subscriber for not keeping up, nothing in that
+// subscriber's handler runs: the handler only ever learns its channel closed,
+// and only when it next tries to write. A count maintained by the ws handler
+// would therefore go stale on exactly this path — the listener stays counted
+// until its handler happens to wake. Here the count must fall as soon as the
+// broadcast that overflowed the buffer has been answered.
+func TestHubCountHookReportsTheDropOfASlowSubscriber(t *testing.T) {
+	// A ONE-message buffer, so the overflow below is a matter of construction
+	// rather than of timing.
+	h, log := hubCountedHub(t, 1)
+
+	fast := hubSub(t, h)
+	slow := hubSub(t, h)
+	hubWantPublished(t, log, 2)
+
+	// The slow subscriber never reads. One message fits its buffer; the next
+	// does not, so it is dropped and the count falls to 1.
+	first := []byte(`{"kind":"code","version":1}`)
+	h.Broadcast(first)
+	hubWantMessage(t, fast, first)
+	hubWantPublished(t, log, 2)
+
+	second := []byte(`{"kind":"code","version":2}`)
+	h.Broadcast(second)
+	hubWantMessage(t, fast, second)
+	hubWantPublished(t, log, 1)
+
+	// The dropped subscriber is genuinely gone, not merely uncounted: its
+	// channel is closed and it is no longer in the hub.
+	hubWantClosed(t, slow)
+	if h.Unsubscribe(slow) {
+		t.Error("Unsubscribe of an already-dropped subscriber returned true, want false")
+	}
+	if got := hubSubscriberCount(t, h); got != 1 {
+		t.Fatalf("SubscriberCount after the drop = %d, want 1", got)
+	}
+}
+
+// TestHubCountHookPublishesZeroOnClose covers the shutdown transition. A hub
+// closed with listeners still attached must report 0, not whatever count it
+// happened to be holding: the listeners are gone with it, and a count left at
+// its last value would report listeners that no longer exist.
+func TestHubCountHookPublishesZeroOnClose(t *testing.T) {
+	h, log := hubCountedHub(t, HubDefaultSendBuffer)
+	hubSub(t, h)
+	hubSub(t, h)
+	hubWantPublished(t, log, 2)
+
+	closed := make(chan struct{})
+	go func() { h.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(hubShutdownTimeout):
+		t.Fatalf("Hub.Close did not return within %s: the hub goroutine is wedged", hubShutdownTimeout)
+	}
+
+	// Read directly, with no wait: Close returning is the synchronisation point,
+	// because the count is published before Close is acknowledged.
+	if got, ok := log.last(); !ok || got != 0 {
+		t.Fatalf("after Hub.Close the latest published count is %v (published=%v), want 0", got, log.all())
+	}
+}
+
+// TestHubWithoutACountHookIsUnaffected keeps NewHub (the no-hook constructor)
+// honest: the hub must behave identically with no observer attached, so the hook
+// cannot have introduced a requirement only the wired path satisfies.
+func TestHubWithoutACountHookIsUnaffected(t *testing.T) {
+	h := hubTestHub(t, HubDefaultSendBuffer)
+
+	sub := hubSub(t, h)
+	msg := []byte(`{"kind":"code"}`)
+	h.Broadcast(msg)
+	hubWantMessage(t, sub, msg)
+	if got := hubSubscriberCount(t, h); got != 1 {
+		t.Fatalf("SubscriberCount with no hook installed = %d, want 1", got)
+	}
+	if !h.Unsubscribe(sub) {
+		t.Fatal("Unsubscribe returned false, want true")
+	}
+	if got := hubSubscriberCount(t, h); got != 0 {
+		t.Fatalf("SubscriberCount after Unsubscribe with no hook = %d, want 0", got)
 	}
 }
 
@@ -649,5 +1007,76 @@ func TestHubConcurrentSubscribeUnsubscribeBroadcast(t *testing.T) {
 	case <-h.Done():
 	default:
 		t.Error("Hub.Done is not closed after the racing Close")
+	}
+}
+
+// TestHubCountHookStaysConsistentUnderConcurrentChurn runs the count hook under
+// the same concurrent connect/disconnect load the real server sees, and checks
+// the two properties that matter under contention: the published count is never
+// negative, and once the churn is over the published count equals the hub's own
+// answer.
+//
+// The final equality is the real assertion. A hook that published a stale or
+// racing value would still pass a "never negative" check, and a hook that simply
+// stopped publishing would pass a test that only ever inspected intermediate
+// values.
+func TestHubCountHookStaysConsistentUnderConcurrentChurn(t *testing.T) {
+	const (
+		churners          = 8
+		iterationsPerGoro = 150
+	)
+
+	h, log := hubCountedHub(t, 4)
+
+	var wg sync.WaitGroup
+	for i := 0; i < churners; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterationsPerGoro; j++ {
+				sub, err := h.Subscribe()
+				if err != nil {
+					// Nothing here closes the hub before the churn is done, so
+					// a refusal means the hub stopped answering.
+					t.Errorf("Hub.Subscribe during churn: %v", err)
+					return
+				}
+				h.Unsubscribe(sub)
+			}
+		}()
+	}
+
+	// A watchdog on a channel, NOT wg.Wait(): a wedged hub goroutine would park
+	// every churner inside Subscribe, and waiting for them all would turn that
+	// hang into an unbounded wait instead of a bounded failure.
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(hubWatchdogTimeout):
+		t.Fatalf("the churn did not finish within %s: the hub goroutine is wedged, so Subscribe/Unsubscribe are not being answered", hubWatchdogTimeout)
+	}
+
+	// Every published value must have been a real count. Anything below zero
+	// would be a listener count claiming fewer than zero listeners, which is the
+	// failure mode the Conductor's clamp exists to contain.
+	for i, n := range log.all() {
+		if n < 0 {
+			t.Fatalf("published count %d (at index %d of %v) is negative", n, i, log.all())
+		}
+	}
+
+	// And the last word is the truth: with every churner finished, the published
+	// count and the hub's own answer must agree.
+	want := hubSubscriberCount(t, h)
+	got, ok := log.last()
+	if !ok {
+		t.Fatalf("the count hook published nothing across %d churned connect/disconnect pairs", churners*iterationsPerGoro)
+	}
+	if got != want {
+		t.Fatalf("after the churn the published count is %d but SubscriberCount reports %d: the hook and the hub disagree", got, want)
+	}
+	if want != 0 {
+		t.Fatalf("SubscriberCount after every churner unsubscribed = %d, want 0", want)
 	}
 }

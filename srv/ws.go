@@ -41,11 +41,18 @@ const defaultWSWriteTimeout = 5 * time.Second
 //
 // Deliberately absent, and owned by later subtasks of .3:
 //
-//   - no listener counting through the Conductor (issue .3.5): a listener is
-//     visible here only as Hub.SubscriberCount;
 //   - no ping/pong keepalive and no dead-socket reaping (issue .3.6). What this
 //     slice provides is the piece a reaper needs: every path through the loop is
 //     bounded and releases the subscriber.
+//
+// The listener count is not tracked HERE either (issue .3.5). Counting in this
+// file would be wrong twice over: the hub drops a slow subscriber from its own
+// goroutine without this handler's involvement, so this file could only ever
+// learn about that indirectly, via a closed channel, and be late; and the count
+// would then have to be recomputed by every handler that touched it, with two
+// concurrent handlers free to publish values that arrive out of order. The hub
+// publishes the count instead (see hub.go), and this file needs no counting code
+// at all — which is also why a listener dropped mid-broadcast still decrements.
 //
 // The one thing added on top of the subscribe/relay/teardown shape is the
 // catch-up snapshot (issue .3.4.3): a newly connected listener is sent the
@@ -104,6 +111,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// idempotent: if the hub already removed this subscriber (it dropped it for
 	// not keeping up, or Close closed every channel), it is a no-op and reports
 	// false, and the channel is never closed twice.
+	//
+	// The listener count needs no code here at all (issue .3.5). Both of these
+	// calls are what publish it: the hub has already reported the new count by
+	// the time Subscribe and Unsubscribe return, so the connect snapshot below
+	// counts this listener, and /api/state is correct the instant a disconnect
+	// handler has finished. See hub.go.
 	defer s.Hub.Unsubscribe(sub)
 
 	// Send the catch-up snapshot BEFORE entering the loop, so a listener that

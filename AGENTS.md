@@ -39,7 +39,6 @@ These are easy to break and each has tests. Changes should expect failures until
 
 Do not assume these features work; they remain open work.
 
-* `SetListenerCount` has no production caller, so snapshots report listener count as 0.
 * No ping/pong, dead-socket reaping, or additional message encoding beyond the
   single `{"kind","snapshot"}` frame.
 * No browser client/audio playback exists yet. `/` and `srv/static/` are still the template content.
@@ -64,6 +63,22 @@ Recorded here so the "not yet wired" list above cannot quietly become wrong.
   marker. This is why `Conductor.RecordEvalResult` returns `(stored bool, err
   error)`: a nil error alone cannot tell "stored" from "understood and dropped as
   stale", and the stale case must not broadcast.
+* **Listener count** (`srv/hub.go`, `srv/server.go`): the hub goroutine owns the
+  subscriber set, so it publishes the count through an optional `func(int)` hook
+  that `New` wires to `Conductor.SetListenerCount`. Two properties are
+  load-bearing and each has a mutation:
+  - **The hook fires BEFORE the command is acknowledged.** `srv/ws.go` subscribes
+    and then immediately snapshots, so publishing afterwards would let a
+    listener's catch-up frame report a count that excludes the listener reading
+    it. Mutation 56 inverts the order; the test catches it by BLOCKING the hook,
+    which makes the interleaving observable instead of raced. Reading the count
+    straight after `Subscribe` returns does NOT work and survived that mutation —
+    an intermittent test is not evidence.
+  - **A drop publishes too.** The hub drops a slow subscriber from its own
+    goroutine, so a count maintained by the ws handler would go stale until that
+    handler happened to wake. A broadcast that drops nobody publishes nothing.
+  The count is deliberately NOT broadcast as an event: that is a wire-contract
+  change, tracked separately.
 
 ## Verification conventions
 

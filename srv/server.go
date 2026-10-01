@@ -42,12 +42,25 @@ type Server struct {
 	wsWriteTimeout time.Duration
 }
 
+// New builds a Server with its Conductor and its Hub, and the wiring between
+// them: the Hub reports its live subscriber count to the Conductor, which is
+// what makes Snapshot.ListenerCount (and so GET /api/state.listenerCount) a real
+// number rather than a permanently-0 field.
+//
+// The hook is the hub's, and it is a func(int) precisely so this wiring lives
+// here instead of inside the hub. Note the direction of travel: hub → conductor,
+// on the hub goroutine, and the Conductor never calls into the Hub while holding
+// its own lock (the API handlers broadcast only after the Conductor call
+// returns). That makes the pair acyclic — a Conductor method that called back
+// into the Hub from inside its critical section would deadlock against the
+// command the hub goroutine is currently serving.
 func New() *Server {
 	_, thisFile, _, _ := runtime.Caller(0)
 	baseDir := filepath.Dir(thisFile)
+	conductor := NewConductor(HistoryLimit)
 	return &Server{
-		Conductor:    NewConductor(HistoryLimit),
-		Hub:          NewHub(HubDefaultSendBuffer),
+		Conductor:    conductor,
+		Hub:          NewHubWithCountHook(HubDefaultSendBuffer, conductor.SetListenerCount),
 		TemplatesDir: filepath.Join(baseDir, "templates"),
 		StaticDir:    filepath.Join(baseDir, "static"),
 

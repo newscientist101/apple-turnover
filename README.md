@@ -33,6 +33,11 @@ playing, listenerCount, lastEvalResult}`. Every write returns the new snapshot,
 except `POST /api/eval-result`, which answers `{accepted, version}`. A fresh
 server starts at version 0 and already playing.
 
+`listenerCount` is the live number of connected `/ws` listeners, updated on
+connect and on disconnect (including a dropped dead socket). It is not a change
+to the performance, so it does not bump the version and does not send a frame of
+its own; it shows up in the next snapshot a listener or the agent reads.
+
 Listeners get one frame shape: `{"kind": ..., "snapshot": {...}}`, where the
 snapshot is the same object `GET /api/state` returns. A listener that connects
 receives a `snapshot` frame immediately, so it lands mid-performance. Accepted

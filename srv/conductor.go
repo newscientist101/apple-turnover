@@ -76,8 +76,9 @@ type Conductor struct {
 	// broadcasts whether the performance is running or hushed.
 	playing bool
 
-	// listeners is pushed in by the WebSocket hub (issue .3). It stays 0
-	// until a hub exists and is always serialised.
+	// listeners is pushed in by the WebSocket hub's count hook (issue .3.5),
+	// which reports the live subscriber count before acknowledging each change.
+	// It is always serialised.
 	listeners int
 
 	lastEval *EvalResult
@@ -151,11 +152,20 @@ func (c *Conductor) SetPlaying(playing bool) {
 	c.playing = playing
 }
 
-// SetListenerCount records how many clients are currently subscribed. It exists
-// so the future WebSocket hub (issue .3) has one place to publish its
-// subscriber count; it deliberately does not bump the version. The count always
-// serialises (0 until a hub reports otherwise) and negative values are clamped
-// to 0.
+// SetListenerCount records how many clients are currently subscribed. It is the
+// hub's count hook (issue .3.5) target: New wires Hub → this, so the number in
+// GET /api/state is the live count rather than a permanently-0 field.
+//
+// It deliberately does not bump the version: listeners arriving and leaving is
+// not a change to the performance, and a version bump would put a connect in the
+// code history and make every listener reconnect look like a new document. The
+// count always serialises as a number and negative values are clamped to 0, so a
+// bug elsewhere can never publish a listener count that claims more listeners
+// than could exist.
+//
+// It is safe to call from the hub goroutine, which is where it is actually
+// called from: it takes only c.mu and never calls back into the Hub, so it
+// cannot deadlock against the command the hub goroutine is serving.
 func (c *Conductor) SetListenerCount(n int) {
 	if n < 0 {
 		n = 0

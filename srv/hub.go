@@ -36,11 +36,27 @@ package srv
 //     Done and exits, so a caller can wait for a clean, goroutine-free shutdown
 //     instead of guessing with runtime.NumGoroutine.
 //
+// The count leaves the hub through an optional hook rather than a reference to
+// whatever wants it. onCount is called with len(subs) whenever the subscriber set
+// changes, which the hub goroutine is the only place that knows exactly; the ws
+// handler does not, because a subscriber the hub DROPPED for falling behind is
+// removed without the handler's involvement and is only observed as a closed
+// channel. Keeping this a func(int) rather than a Conductor means the hub still
+// does not know what a Conductor is.
+//
+// The hook runs ON THE HUB GOROUTINE and must not block. That is what makes the
+// publish-before-reply ordering in run() safe to rely on: by the time Subscribe
+// or Unsubscribe returns, the count has already been published, so a caller that
+// reads state straight afterwards sees a count consistent with what it just did.
+// It also means a slow hook stalls the hub, so it has to stay cheap.
+//
 // Deliberately absent, and owned by later subtasks of .3:
 //
-//   - no Conductor interaction at all: the hub never publishes a listener count
-//     (issue .3.5) and never attaches a snapshot to a new subscriber (issue
-//     .3.4). Subscribe hands back a channel and nothing else.
+//   - no Conductor interaction at all: the hub publishes a count and never
+//     attaches a snapshot to a new subscriber (issue .3.4), and it does not
+//     BROADCAST a count change to listeners, which is its own wire-contract
+//     change (see the "listener-count" follow-up). Subscribe hands back a
+//     channel and nothing else.
 //   - no ping/pong, no write deadline and no dead-socket reaping (issue .3.6):
 //     wire liveness is that subtask's business. What lives here is the bounded
 //     send guarantee it depends on: a client that cannot keep up with the
@@ -117,6 +133,12 @@ type Hub struct {
 
 	// sendBuffer is the per-subscriber channel capacity.
 	sendBuffer int
+
+	// onCount is the optional subscriber-count hook (see the file header). It is
+	// written once, by the constructor, before the hub goroutine is started, and
+	// only ever READ by that goroutine — so it needs no lock and cannot race.
+	// A nil hook means the hub reports nothing, which is what NewHub gives.
+	onCount func(int)
 }
 
 type subscribeReq struct {
@@ -130,7 +152,30 @@ type unsubscribeReq struct {
 
 // NewHub starts a hub whose subscribers each get a send buffer of sendBuffer
 // messages. A non-positive sendBuffer means HubDefaultSendBuffer.
+//
+// The hub reports no subscriber count: use NewHubWithCountHook for that. This
+// constructor exists so the hub can be built and driven with no observer at all,
+// which is what most of hub_test.go does.
 func NewHub(sendBuffer int) *Hub {
+	return NewHubWithCountHook(sendBuffer, nil)
+}
+
+// NewHubWithCountHook is NewHub plus the subscriber-count hook: onCount is
+// called with the live subscriber count every time the set changes — on
+// subscribe, on unsubscribe, when a subscriber is dropped for not keeping up,
+// and once more with 0 as the hub closes.
+//
+// The hook is invoked on the hub goroutine BEFORE the triggering command is
+// acknowledged. That ordering is what lets a caller treat "Subscribe returned"
+// as "the count already includes me": the alternative (publishing afterwards)
+// leaves a window in which the count is briefly stale, and the catch-up snapshot
+// a listener is sent on connect could therefore report a count that excludes the
+// listener reading it.
+//
+// onCount must not block: it runs on the one goroutine that owns the subscriber
+// set, so a slow hook stalls fan-out for every listener. It must also not call
+// back into the Hub, which would deadlock against the command being served.
+func NewHubWithCountHook(sendBuffer int, onCount func(int)) *Hub {
 	if sendBuffer <= 0 {
 		sendBuffer = HubDefaultSendBuffer
 	}
@@ -142,6 +187,7 @@ func NewHub(sendBuffer int) *Hub {
 		closeReq:    make(chan chan struct{}),
 		done:        make(chan struct{}),
 		sendBuffer:  sendBuffer,
+		onCount:     onCount,
 	}
 	go h.run()
 	return h
@@ -226,8 +272,15 @@ func (h *Hub) Unsubscribe(sub *Subscriber) bool {
 
 // SubscriberCount reports how many subscribers are live at the moment the hub
 // answers. It is the observability that makes "a subscriber was removed"
-// assertable without a sleep, and it is the value issue .3.5 publishes through
-// the Conductor. A closed hub has no subscribers, so it reports 0.
+// assertable without a sleep, and it is the same number the onCount hook is
+// given — this is the pull-based read of it, for a caller asking a question,
+// rather than the push-based report the hook is. A closed hub has no
+// subscribers, so it reports 0.
+//
+// Prefer the hook for keeping state in sync: it fires BEFORE the command that
+// changed the set is acknowledged, whereas a caller that calls this afterwards
+// can observe a count that a concurrent connect or disconnect has already moved
+// on from.
 func (h *Hub) SubscriberCount() int {
 	reply := make(chan int, 1)
 	select {
@@ -262,25 +315,51 @@ func (h *Hub) Close() {
 // when Close asks it to, closing every remaining subscriber channel on the way
 // out. It handles one command at a time, so the map is never shared and no
 // command can interleave with another.
+//
+// publishCount is called at every point where the set can have changed, and
+// ALWAYS BEFORE the triggering command is replied to. That ordering is the
+// contract NewHubWithCountHook documents: it is what makes "Subscribe returned"
+// imply "the published count already includes this subscriber", so the catch-up
+// snapshot a listener reads on connect cannot report a count that excludes it.
+// Publishing after the reply would leave exactly that window open.
 func (h *Hub) run() {
 	defer close(h.done)
 
 	subs := make(map[*Subscriber]struct{})
+
+	// publishCount reports the live count to the hook, if there is one. It is
+	// the single place the count leaves the hub, so the four transitions below
+	// cannot drift apart in how — or whether — they report.
+	publishCount := func() {
+		if h.onCount != nil {
+			h.onCount(len(subs))
+		}
+	}
 
 	for {
 		select {
 		case req := <-h.subscribe:
 			sub := &Subscriber{ch: make(chan []byte, h.sendBuffer)}
 			subs[sub] = struct{}{}
+			publishCount()
 			req.reply <- sub
 
 		case req := <-h.unsubscribe:
-			req.reply <- removeSubscriber(subs, req.sub)
+			removed := removeSubscriber(subs, req.sub)
+			// Only a subscriber that WAS in the set changes the count. An
+			// unsubscribe of something already gone (double unsubscribe, or
+			// one racing a drop) must not publish a value that implies a
+			// change nobody made.
+			if removed {
+				publishCount()
+			}
+			req.reply <- removed
 
 		case reply := <-h.count:
 			reply <- len(subs)
 
 		case msg := <-h.broadcast:
+			before := len(subs)
 			for sub := range subs {
 				if !h.deliver(sub, msg) {
 					// The subscriber's buffer is full: it is not keeping up, so
@@ -289,11 +368,28 @@ func (h *Hub) run() {
 					removeSubscriber(subs, sub)
 				}
 			}
+			// A drop is invisible to the listener's own handler — it only ever
+			// learns its channel closed — so this is the ONLY place the count
+			// can learn about it. Published once after the loop rather than per
+			// drop, so N dropped subscribers produce one publish of the final
+			// count rather than N publishes of intermediate ones.
+			//
+			// Guarded on an actual change, so a broadcast nobody was dropped
+			// from publishes nothing: a hook call on every message would be
+			// noise, and would make "the count was published" indistinguishable
+			// from "the count changed".
+			if len(subs) != before {
+				publishCount()
+			}
 
 		case reply := <-h.closeReq:
 			for sub := range subs {
 				removeSubscriber(subs, sub)
 			}
+			// The final count is 0, and it is published before Done closes, so
+			// a caller that has waited for Hub.Close knows the count is already
+			// 0 without polling for it.
+			publishCount()
 			close(reply)
 			return
 		}

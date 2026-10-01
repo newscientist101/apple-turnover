@@ -1,5 +1,7 @@
-# Built binary (srv/ is a package directory, so -o srv writes srv/srv)
+# Built binaries. srv/ is a package directory, so -o srv writes srv/srv;
+# `make build` writes the agent CLI to bin/agentcli.
 srv/srv
+bin/
 
 # Local database artifacts (this project is deliberately ephemeral, but ignore
 # them so an accidental db.sqlite3 never gets committed)

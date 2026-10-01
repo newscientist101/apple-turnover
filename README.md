@@ -58,6 +58,42 @@ agent should run, and the complete frame vocabulary.
 
 `GET /` serves the page and `/static/` the assets.
 
+## The agent CLI
+
+`cmd/agentcli` is a pure-Go client for the endpoints above, so a harness does
+not have to hand-roll `curl` on every iteration. `make build` writes it to
+`bin/agentcli`.
+
+```bash
+bin/agentcli state                             # version, code, playing, listeners, verdict
+echo 's("bd*2, ~ cp")' | bin/agentcli push     # or: push -f pattern.js
+bin/agentcli message "four on the floor"
+bin/agentcli hush
+bin/agentcli play
+bin/agentcli eval-result -version 1 -ok=false -error "x is not a function"
+```
+
+The base URL comes from `-base` or from `$STRUDEL_AGENT_URL`, defaulting to
+`http://localhost:8000`; a bare `host:port` is accepted. `-timeout` (10s) bounds
+each request, and `-json` prints the raw snapshot for piping into `jq`.
+
+Two properties matter more than the convenience:
+
+* **A rejection is never softened.** The server's own `{"error": ...}` text is
+  printed verbatim on stderr and the exit code is non-zero, so a script can tell
+  a refusal from a success without parsing prose. Exit codes are `0` success,
+  `1` the server refused or could not be reached, `2` a bad command line.
+* **"Accepted" is not "applied."** The server deliberately answers
+  `accepted:true` for a report it understood and then discarded as stale, and
+  `hush`/`play` are idempotent. The CLI reads the state first and says plainly
+  which happened — `eval-result: accepted but IGNORED for version 1`, or
+  `hush: accepted, no change` — instead of printing an unqualified success over a
+  performance that did not move.
+
+The CLI adds no behaviour to the server; it is a client of the contract above.
+`AGENT_API.md` remains authoritative, and `curl` still reaches anything the CLI
+does not cover.
+
 ## Verification
 
 `make verify` is the repo-owned gate: `gofmt -l .`, `go vet ./...`,
@@ -89,6 +125,7 @@ and a listener count. Nothing is persisted and there is no set saving.
 ## Code layout
 
 - `cmd/srv`: main package (binary entrypoint)
+- `cmd/agentcli`: pure-Go client for the agent API (`state`, `push`, `message`, `hush`, `play`, `eval-result`)
 - `srv/server.go`: `Server`, `Serve`, `HandleRoot`
 - `srv/api.go`: the agent HTTP API and the whole routing tree (`routes()`)
 - `srv/conductor.go`: the in-memory Conductor session core

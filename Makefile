@@ -1,11 +1,14 @@
 .PHONY: build clean stop start restart test verify mutation-check
 
 # srv/ is a package directory, so -o srv writes the binary to srv/srv.
+# -o bin/agentcli keeps the CLI's binary out of the source directories, where a
+# stray executable would sit next to the package it was built from.
 build:
 	go build -o srv ./cmd/srv
+	go build -o bin/agentcli ./cmd/agentcli
 
 clean:
-	rm -f srv/srv
+	rm -f srv/srv bin/agentcli
 
 test:
 	go test ./...

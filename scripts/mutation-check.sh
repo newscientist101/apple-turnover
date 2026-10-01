@@ -169,6 +169,10 @@ MUTATIONS=$(cat <<'EOF'
 67-count-frame-sent-to-its-cause|srv/hub.go|\t\t\t\tif sub == skip {\n\t\t\t\t\tcontinue\n\t\t\t\t}|\t\t\t\t_ = skip // deliberately: the listener that caused the change is told too|TestWSListenerCountFrameIsNotSentToTheListenerThatCausedIt|TestHubCountHookFrameReachesEveryoneExceptTheCause
 68-count-frame-built-and-thrown-away|srv/hub.go|\t\tif frame := h.onCount(len(subs)); frame != nil {\n\t\t\tfanOut(frame, cause)\n\t\t}|\t\t_ = h.onCount(len(subs)) // deliberately: the frame is built and never delivered|TestWSListenerCountIsBroadcastAsAnEvent|TestHubCountHookFrameReachesEveryoneExceptTheCause
 69-drop-not-broadcast-to-survivors|srv/hub.go|\t\t\tmsg = h.onCount(len(subs))\n\t\t\tif msg == nil {\n\t\t\t\treturn\n\t\t\t}|\t\t\t_ = h.onCount(len(subs)) // deliberately: a drop publishes the count but sends no frame|TestHubCountHookFrameReachesTheSurvivorsOfADrop
+70-cli-rejection-exits-zero|cmd/agentcli/main.go|\treturn exitError|\treturn exitOK // deliberately: the failure is printed but reported as success|TestRejectionIsReportedVerbatimAndFails|TestUsageErrorsExitTwoWithoutSending|TestUnreachableServerIsNotARejection
+71-cli-swalows-the-servers-reason|cmd/agentcli/client.go|\treturn probe.Error|\treturn "request failed" // deliberately: the server's exact reason is replaced by a generic one|TestRejectionIsReportedVerbatimAndFails|TestOversizedDocumentIsRejectedByTheServer
+72-cli-reports-a-stale-verdict-as-stored|cmd/agentcli/commands.go|\tstale := before.LastEvalResult != nil && *ver < before.LastEvalResult.Version|\tstale := false // deliberately: "accepted" is reported as "stored"|TestEvalResultDistinguishesStoredFromIgnored
+73-cli-hush-noop-reported-as-a-change|cmd/agentcli/commands.go|\tif before.Playing == playing {|\tif before.Playing != playing && false { // deliberately: an idempotent no-op is reported as a change|TestTransportReportsANoopAsANoop
 EOF
 )
 

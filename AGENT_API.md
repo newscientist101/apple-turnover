@@ -370,6 +370,7 @@ it in its very first `snapshot` frame.
 
 * `README.md` — how to build and run it, and the invariants this repo holds.
 * `AGENTS.md` — the architecture invariants and how they are proved.
-
-A `cmd/agentcli` wrapping these endpoints is planned (issue
-`strudel-agent-3vo.9.1`); until it lands, `curl` is the way in.
+* `cmd/agentcli` — a pure-Go client for these endpoints (`state`, `push`,
+  `message`, `hush`, `play`, `eval-result`), so a harness does not have to
+  hand-roll `curl`. It wraps this contract rather than extending it; `curl`
+  remains the way to reach anything the CLI does not cover.

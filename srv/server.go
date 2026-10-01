@@ -125,6 +125,18 @@ func (s *Server) renderTemplate(w http.ResponseWriter, name string, data any) er
 	return nil
 }
 
+// Handler returns the server's whole handler tree — the same one Serve mounts.
+//
+// It exists so that code OUTSIDE this package can drive the real routes: the
+// cmd/agentcli tests boot this handler over httptest rather than hand-rolling a
+// fake of the API, which is the only way a test can catch the CLI drifting from
+// the contract (a renamed json tag, a changed status code) instead of merely
+// agreeing with itself.
+//
+// It is deliberately behaviour-free: Serve still mounts routes() exactly as
+// before, and this changes no route, status code or broadcast.
+func (s *Server) Handler() http.Handler { return s.routes() }
+
 // Serve starts the HTTP server with the configured routes. All routing lives in
 // routes() so tests can drive the exact same handler tree over httptest.
 func (s *Server) Serve(addr string) error {

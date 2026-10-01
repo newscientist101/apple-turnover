@@ -48,6 +48,26 @@ Do not assume these features work; they remain open work.
 
 Recorded here so the "not yet wired" list above cannot quietly become wrong.
 
+* **The agent CLI** (`cmd/agentcli`, issue strudel-agent-3vo.9.1): a pure-Go
+  client for the documented HTTP API, so the harness stops hand-rolling `curl`.
+  It adds NO server behaviour — every subcommand maps one-to-one onto an
+  endpoint, and `srv.Server.Handler()` exists (behaviour-free) purely so its
+  tests can drive the REAL `routes()` instead of a fake that could drift from
+  the contract. Two properties are load-bearing and each has a mutation
+  (rows 70-73):
+  - **A rejection is never softened.** The server's `{"error": ...}` string is
+    printed verbatim on stderr and the exit code is non-zero (1 for a refusal,
+    2 for a bad command line). A CLI that paraphrased the reason, or exited 0 on
+    a 400, would let an agent believe a refused push had landed.
+  - **"Accepted" is not "applied."** The server deliberately answers
+    `accepted:true` for a report it understood and then DISCARDED as stale, and
+    `hush`/`play` are idempotent — nothing on the wire distinguishes the cases.
+    So `eval-result` and `hush`/`play` read `/api/state` first and report the
+    comparison ("accepted but IGNORED", "no change") rather than an unqualified
+    success. The pre-read is a bounded extra round trip and a deliberately racy
+    report, which is why the wording says what was OBSERVED, never what the
+    server holds now.
+
 * **Snapshot on connect** (`srv/ws.go`, `srv/event.go`): a listener that
   subscribes is sent the full state immediately as a `snapshot` frame, so a late
   joiner lands mid-performance instead of waiting for the next change. The

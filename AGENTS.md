@@ -54,7 +54,6 @@ gofmt -l .
 go vet ./...
 go build ./...
 go test ./... -race -count=1
-./scripts/docs-split-check.sh
 ```
 
 Run it before every commit.

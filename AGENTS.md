@@ -78,6 +78,8 @@ go test ./... -race -count=1
 
 Run it before every commit.
 
+Commit each piece of completed work when the task finishes; never leave finished changes sitting uncommitted in the tree, and do not close a bead until its work is committed.
+
 When adding verification, extend `make verify`; do not create throwaway scripts.
 
 Tests must:

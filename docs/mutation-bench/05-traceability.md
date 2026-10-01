@@ -175,6 +175,29 @@ These reproduce `03-gomutants.md` §6/§8 exactly (K=242, L=72, NC=17, efficacy 
 coverage 94.86 %); the derivation above is recorded because it also shows *where* the 17
 not-covered mutants are, which the earlier document reports only as a total.
 
+**Amendment 2026-09-30 (`strudel-agent-rka.3`) — row 14's anchor has moved.** The table
+above is kki.5's measurement against the tree as it stood then, and its verdicts are left
+as recorded. The *anchor* it names is no longer current, because the exe.dev removal
+(`strudel-agent-rka.1`, `a5385f0`) rewrote `HandleRoot` and emptied `welcome.html` of
+every field reference. Row 14 was re-anchored from
+`srv/server.go` (`s.renderTemplate(w, "welcome.html", data)` → a truncated
+`struct{ Hostname string }{data.Hostname}`) to `srv/templates/welcome.html`
+(`<h1>Strudel Agent</h1>` → `<h1>{{.NoSuchField}}</h1>`), which reproduces the same
+defect — `html/template` aborts at that node, `HandleRoot` swallows the error through
+`slog.Warn`, and the visitor receives a 200 with a body that stops mid-document.
+
+The obvious alternative was rejected on measurement, not taste: repointing the original
+Go anchor at a field that still exists (`struct{ Now string }{data.Now}`) compiles **and
+passes the entire suite**, so the harness would have reported `SURVIVED` — a silently
+vacuous row, which is worse than the `WEAK` it replaced. With no field references left in
+the template, substituting the data value can no longer truncate anything.
+
+`server.go:84` no longer holds the render call (the file is 87 lines; `Serve` is at :84),
+so the line reference in row 14 is historical. The gomutants verdict for that row is
+unaffected: it was `NOT-GENERATED` because no mutator rewrites an argument's type or
+value, and the new anchor is a template edit, which is even further outside that tool's
+28 mutator types.
+
 **One correction to a documentation claim (not to any number used here).**
 `03-gomutants.md` §10 describes `dry-srv.txt` and `dry-all.txt` as "identical 360 mutants".
 They are not: `./srv/...` discovers 360 with 17 not covered, `./...` discovers **368** with

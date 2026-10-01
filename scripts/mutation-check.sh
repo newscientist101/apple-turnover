@@ -69,6 +69,19 @@ trap 'restore_all; rm -rf "$BACKUP_DIR"' EXIT
 # mutation with a 5th field ignores an outer `-run` restriction; an alternation
 # such as TestA|TestB routes one mutation to several tests. Most mutations leave
 # it empty and run the whole suite.
+#
+# Row 14 is anchored in the TEMPLATE, not in Go, and that is deliberate. Its
+# claim is behavioural: "GET / never serves a body that stops mid-document". The
+# original anchor substituted a truncated pageData struct, which only truncated
+# the render because welcome.html named a field the struct lacked. After the
+# exe.dev removal (issue strudel-agent-rka.1) the template has no field
+# references at all, so that substitution now compiles AND renders the full
+# page — the row would report SURVIVED, a silently vacuous grid. Naming a field
+# pageData does not have reproduces the same defect (html/template aborts at
+# that node, HandleRoot swallows the error via slog.Warn, and the visitor gets a
+# 200 with a truncated body) and keeps the row load-bearing on pageData being a
+# struct: against nil data the same mutation renders empty and SURVIVES, so the
+# grid fails loudly if anyone "simplifies" pageData away.
 MUTATIONS=$(cat <<'EOF'
 01-empty-code-accepted|srv/api.go|strings.TrimSpace(req.Code) == ""|false
 02-unknown-json-field-allowed|srv/api.go|dec.DisallowUnknownFields()|_ = dec
@@ -83,7 +96,7 @@ MUTATIONS=$(cat <<'EOF'
 11-message-bumps-version|srv/api.go|s.Conductor.SetMessage(req.Message)|s.Conductor.Publish(req.Message, req.Message)
 12-transport-accepts-any-body|srv/api.go|if err := rejectUnexpectedBody(r); err != nil {|if err := error(nil); false {
 13-hush-plays-instead|srv/api.go|s.handleAPITransport(w, r, false)|s.handleAPITransport(w, r, true)
-14-shell-render-silently-truncates|srv/server.go|s.renderTemplate(w, "welcome.html", data)|s.renderTemplate(w, "welcome.html", struct{ Hostname string }{data.Hostname})
+14-shell-render-silently-truncates|srv/templates/welcome.html|      <h1>Strudel Agent</h1>|      <h1>{{.NoSuchField}}</h1>
 15-eval-accepts-future-version|srv/conductor.go|res.Version > c.version {|res.Version > c.version+1 {
 16-eval-result-not-stored|srv/conductor.go|c.lastEval = &stored|_ = stored
 17-stale-report-regresses|srv/conductor.go|if c.lastEval != nil && res.Version < c.lastEval.Version {|if false {

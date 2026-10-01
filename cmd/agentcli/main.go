@@ -150,5 +150,3 @@ func envOr(name, fallback string) string {
 	}
 	return fallback
 }
-
-// PLACEHOLDER_CMDS

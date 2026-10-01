@@ -61,6 +61,7 @@ type codeRequest struct {
 // eval-result has to name.
 func cmdPush(ctx context.Context, c *client, args []string, stdin io.Reader, out io.Writer) error {
 	fs := flag.NewFlagSet("push", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
 	file := fs.String("f", "", "read the document from this file (\"-\" or omitted means stdin)")
 	message := fs.String("m", "", "narration shown to listeners beside the code")
 	if err := fs.Parse(args); err != nil {

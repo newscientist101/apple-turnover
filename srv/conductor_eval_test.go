@@ -48,7 +48,7 @@ func TestConductorRecordEvalResult(t *testing.T) {
 	}
 
 	// Nothing has been published yet, so there is no version 1 to report on.
-	if err := c.RecordEvalResult(EvalResult{Version: 1, OK: true}); !errors.Is(err, ErrUnknownVersion) {
+	if _, err := c.RecordEvalResult(EvalResult{Version: 1, OK: true}); !errors.Is(err, ErrUnknownVersion) {
 		t.Fatalf("report for unpublished version: err = %v, want ErrUnknownVersion", err)
 	}
 
@@ -59,7 +59,7 @@ func TestConductorRecordEvalResult(t *testing.T) {
 		Error:   "SyntaxError: unexpected token",
 		Stats:   json.RawMessage(`{"events":3}`),
 	}
-	if err := c.RecordEvalResult(res); err != nil {
+	if _, err := c.RecordEvalResult(res); err != nil {
 		t.Fatalf("RecordEvalResult for version 1 failed: %v", err)
 	}
 	got := c.Snapshot().LastEvalResult
@@ -89,7 +89,7 @@ func TestConductorRecordEvalResult(t *testing.T) {
 	}
 
 	// Version 2's verdict replaces version 1's.
-	if err := c.RecordEvalResult(EvalResult{Version: 2, OK: true}); err != nil {
+	if _, err := c.RecordEvalResult(EvalResult{Version: 2, OK: true}); err != nil {
 		t.Fatalf("RecordEvalResult for version 2 failed: %v", err)
 	}
 	got = c.Snapshot().LastEvalResult
@@ -101,7 +101,7 @@ func TestConductorRecordEvalResult(t *testing.T) {
 	}
 
 	// A late report for version 1 must not clobber the version 2 verdict.
-	if err := c.RecordEvalResult(EvalResult{Version: 1, OK: false, Error: "late"}); err != nil {
+	if _, err := c.RecordEvalResult(EvalResult{Version: 1, OK: false, Error: "late"}); err != nil {
 		t.Fatalf("late report for a known version returned error: %v", err)
 	}
 	got = c.Snapshot().LastEvalResult
@@ -130,7 +130,7 @@ func TestConductorRecordEvalResultSameVersionReplaces(t *testing.T) {
 	c.Publish(`s("bd")`, "first")
 
 	// The first verdict for version 1 succeeds.
-	if err := c.RecordEvalResult(EvalResult{Version: 1, OK: true}); err != nil {
+	if _, err := c.RecordEvalResult(EvalResult{Version: 1, OK: true}); err != nil {
 		t.Fatalf("first report for version 1 failed: %v", err)
 	}
 	if got := c.Snapshot().LastEvalResult; got == nil || !got.OK {
@@ -138,7 +138,7 @@ func TestConductorRecordEvalResultSameVersionReplaces(t *testing.T) {
 	}
 
 	// Re-reporting the SAME version with the opposite verdict must replace it.
-	if err := c.RecordEvalResult(EvalResult{Version: 1, OK: false, Error: "SyntaxError: unexpected token"}); err != nil {
+	if _, err := c.RecordEvalResult(EvalResult{Version: 1, OK: false, Error: "SyntaxError: unexpected token"}); err != nil {
 		t.Fatalf("re-report for the same version returned error: %v", err)
 	}
 	got := c.Snapshot().LastEvalResult
@@ -162,7 +162,7 @@ func TestConductorRecordEvalResultSameVersionReplaces(t *testing.T) {
 func TestConductorEvalResultSnapshotImmutability(t *testing.T) {
 	c := NewConductor(2)
 	c.Publish("code", "msg")
-	if err := c.RecordEvalResult(EvalResult{Version: 1, OK: true, Stats: json.RawMessage(`{"events":7}`)}); err != nil {
+	if _, err := c.RecordEvalResult(EvalResult{Version: 1, OK: true, Stats: json.RawMessage(`{"events":7}`)}); err != nil {
 		t.Fatalf("RecordEvalResult failed: %v", err)
 	}
 

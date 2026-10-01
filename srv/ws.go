@@ -41,16 +41,18 @@ const defaultWSWriteTimeout = 5 * time.Second
 //
 // Deliberately absent, and owned by later subtasks of .3:
 //
-//   - no snapshot on connect: a listener is not sent the current code document,
-//     the anchor or the transport state when it connects (issue .3.4.3);
-//   - no Conductor wiring: the /api endpoints that change the performance do not
-//     broadcast yet (issue .3.4.3), so the only writer is a test or a future
-//     caller, via Hub.Broadcast;
 //   - no listener counting through the Conductor (issue .3.5): a listener is
 //     visible here only as Hub.SubscriberCount;
 //   - no ping/pong keepalive and no dead-socket reaping (issue .3.6). What this
 //     slice provides is the piece a reaper needs: every path through the loop is
 //     bounded and releases the subscriber.
+//
+// The one thing added on top of the subscribe/relay/teardown shape is the
+// catch-up snapshot (issue .3.4.3): a newly connected listener is sent the
+// current state immediately, so it lands mid-performance instead of waiting for
+// a change that may never come. The /api endpoints that change the performance
+// broadcast through the same hub (also .3.4.3, see srv/event.go), so a write
+// reaches listeners as well as the agent.
 //
 // handleWS accepts a listener's WebSocket handshake and then stays with the
 // connection for as long as it is useful. Accept writes the 101 Switching
@@ -104,6 +106,27 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// false, and the channel is never closed twice.
 	defer s.Hub.Unsubscribe(sub)
 
+	// Send the catch-up snapshot BEFORE entering the loop, so a listener that
+	// connects mid-performance lands in the music rather than waiting for the
+	// next change — which may be minutes away, or may never come.
+	//
+	// The ordering (subscribe, THEN snapshot) is deliberate and is the whole
+	// reason this cannot drop a change: because the subscription is already
+	// registered, any write from this instant on is queued for this listener.
+	// Taking the snapshot afterwards means it is at least as new as anything
+	// already queued, so the listener never observes a state older than one it
+	// has been sent. Snapshotting first and subscribing second would leave a
+	// window in which a write is broadcast to everyone else and silently lost
+	// here.
+	//
+	// A failure to write it is not fatal: the listener is still subscribed and
+	// will receive every subsequent change. Dropping the connection instead
+	// would turn a transient write timeout into a listener that can never hear
+	// anything again.
+	if err := s.sendSnapshot(conn); err != nil {
+		slog.Debug("websocket snapshot", "path", r.URL.Path, "error", err)
+	}
+
 	// CloseRead is what makes the read side bounded and useful: it reads
 	// actively in its own goroutine (so control frames, including the client's
 	// close frame, are answered by the library), and it hands back a context that
@@ -156,6 +179,20 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// sendSnapshot sends one listener the current state as an EventSnapshot frame,
+// under the same per-write deadline as every other frame. It is the first thing
+// a newly connected listener sees, so its kind says "this is the catch-up, not
+// a change" — a client can tell "I have just caught up" from "the performance
+// moved" without inspecting the payload.
+//
+// It returns the write error rather than handling it, because the caller has
+// the context (this is a connect, not a relay) and the honest reaction to a
+// failed catch-up is to log it and carry on serving changes, not to hang up on
+// a listener that is otherwise perfectly subscribed.
+func (s *Server) sendSnapshot(conn *websocket.Conn) error {
+	return s.writeToListener(conn, s.encodeEvent(EventSnapshot, s.Conductor.Snapshot()))
 }
 
 // writeToListener writes one hub message to one listener as a single text frame

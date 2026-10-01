@@ -25,6 +25,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -41,6 +42,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // ---------- harness plumbing ----------
@@ -1303,6 +1306,608 @@ func TestIntegrationOverRealHTTPServer(t *testing.T) {
 	code, raw = get("/definitely-not-here")
 	if code != http.StatusNotFound || bytes.HasPrefix(bytes.TrimSpace(raw), []byte("{")) {
 		t.Errorf("non-API 404 over a real socket: %d %q, want a plain-text 404", code, raw)
+	}
+}
+
+// ---------- 5. listener fan-out: the API and the WebSocket together ---------
+//
+// Everything above proves the API in isolation: the state it stores and the
+// bodies it returns. It cannot prove that a WRITE reaches a LISTENER, because
+// the listener side is a WebSocket on a real socket. That gap is what this
+// section closes, and it is why it drives real WS clients over a real loopback
+// listener rather than poking the Hub directly: poking the hub proves the hub
+// fans out (already covered in hub_test.go), whereas what could still be broken
+// is the wiring between the two — a handler that mutates and forgets to
+// broadcast, or announces a change it then rejected.
+//
+// The harness reuses the /ws helpers from ws_test.go (same package): wsDial,
+// wsWaitForSubscribers and wsReadConnectSnapshot. What is new here is the HTTP
+// client, because these tests must drive the API and the socket against the
+// SAME server and compare what each saw.
+
+// fanoutQuietWindow is how long a "nothing was broadcast" assertion waits before
+// concluding nothing is coming. It must be long enough that a broadcast which
+// IS on its way would have arrived, and short enough to keep the negative tests
+// fast. Delivery is a single non-blocking send into a buffered channel that the
+// handler is already looping on, so this is many times what it could need; it is
+// a ceiling, not a tuned constant.
+const fanoutQuietWindow = 400 * time.Millisecond
+
+// fanoutServer boots the real handler tree on a loopback listener and returns
+// the Server plus its base URLs. Teardown closes the hub before the listener,
+// both bounded, for the reason wsTestServerWith documents: a wedged /ws handler
+// must fail the test rather than hang it.
+func fanoutServer(t *testing.T) (*Server, string, string) {
+	t.Helper()
+	s, _, ts := wsTestServerWith(t, wsTestServerOptions{})
+	return s, ts.URL, "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+}
+
+// fanoutGet and fanoutPost drive the API over the real listener. Every step is
+// bounded on three independent sides — request context, the transport's
+// response-header timeout, and the client timeout — so a wedged handler becomes
+// an error instead of a hang.
+func fanoutGet(t *testing.T, base, path string) (int, string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
+	if err != nil {
+		t.Fatalf("build GET %s: %v", path, err)
+	}
+	client := &http.Client{Transport: boundedTransport(), Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		t.Fatalf("GET %s: read body: %v", path, err)
+	}
+	return resp.StatusCode, string(raw)
+}
+
+func fanoutPost(t *testing.T, base, path, body string) (int, string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("build POST %s: %v", path, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Transport: boundedTransport(), Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		t.Fatalf("POST %s: read body: %v", path, err)
+	}
+	return resp.StatusCode, string(raw)
+}
+
+// fanoutListener owns ONE websocket connection and is the only thing that ever
+// reads it.
+//
+// It exists because of a hard constraint in the WebSocket library: a read that
+// times out leaves the connection unusable, because the library cannot know how
+// much of a partially-read frame it consumed, so it abandons the connection.
+// Every fan-out assertion here needs a NEGATIVE read ("nothing else was sent"),
+// which would therefore kill the socket and make the next case fail on a closed
+// connection instead of on the behaviour it is testing.
+//
+// So reading happens on one background goroutine for the life of the listener,
+// pushing decoded events into a channel. A negative assertion is then a timed
+// receive on that channel, which leaves the connection perfectly healthy for
+// the next read.
+//
+// The goroutine is bounded by the connection: the dial helper's cleanup closes
+// the socket, the read fails, and the goroutine exits. It never calls t.Fatal —
+// failures are reported by the assertion helpers, on the test's own goroutine.
+type fanoutListener struct {
+	name   string
+	frames chan Event
+	// done is closed when the read loop ends; err is then the reason. A
+	// negative assertion must distinguish "nothing was sent" from "the
+	// connection died", or a broken listener would read as a pass.
+	done chan struct{}
+	err  error
+}
+
+// fanoutAttach starts reading a listener connection in the background and
+// returns the handle assertions read through. wantSnap is the snapshot the
+// connect frame must carry, and it is consumed here: attaching is the moment the
+// listener becomes live, so the catch-up frame is checked as part of coming up.
+func fanoutAttach(t *testing.T, name string, conn *websocket.Conn, wantSnap Snapshot) *fanoutListener {
+	t.Helper()
+	l := &fanoutListener{
+		name:   name,
+		frames: make(chan Event, 64),
+		done:   make(chan struct{}),
+	}
+
+	go func() {
+		defer close(l.done)
+		for {
+			typ, data, err := conn.Read(context.Background())
+			if err != nil {
+				l.err = err
+				return
+			}
+			if typ != websocket.MessageText {
+				l.err = fmt.Errorf("frame type %v, want text", typ)
+				return
+			}
+			var ev Event
+			if err := json.Unmarshal(data, &ev); err != nil {
+				l.err = fmt.Errorf("frame is not a JSON Event (%v): %q", err, data)
+				return
+			}
+			l.frames <- ev
+		}
+	}()
+
+	// The catch-up frame is the first thing, always.
+	got := l.next(t, "connect snapshot")
+	if got.Kind != EventSnapshot {
+		t.Fatalf("%s: connect frame kind = %q, want %q", name, got.Kind, EventSnapshot)
+	}
+	if got.Snapshot.Version != wantSnap.Version || got.Snapshot.Code != wantSnap.Code ||
+		got.Snapshot.LastAgentMessage != wantSnap.LastAgentMessage || got.Snapshot.Playing != wantSnap.Playing {
+		t.Fatalf("%s: connect snapshot = %+v, want %+v", name, got.Snapshot, wantSnap)
+	}
+	return l
+}
+
+// next returns the next event, bounded. It fails rather than hanging.
+func (l *fanoutListener) next(t *testing.T, what string) Event {
+	t.Helper()
+	select {
+	case ev := <-l.frames:
+		return ev
+	case <-l.done:
+		t.Fatalf("%s: listener connection ended (%v) before the frame arrived", what, l.err)
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s: no frame within 5s", what)
+	}
+	return Event{}
+}
+
+// expectNone asserts nothing else is sent, by giving the channel a short window
+// and requiring it to stay empty.
+//
+// This is a bounded negative WAIT rather than a non-blocking peek, which cannot
+// distinguish "nothing yet" from "nothing ever": a peek would pass on a merely
+// slow delivery, so a mutation that made a rejected request broadcast could
+// survive it. The window is many times what a real broadcast needs.
+//
+// A dead connection FAILS rather than passing. Otherwise a listener whose socket
+// broke would satisfy every "nothing was broadcast" assertion in the file.
+func (l *fanoutListener) expectNone(t *testing.T, what string) {
+	t.Helper()
+	select {
+	case ev := <-l.frames:
+		t.Fatalf("%s: %s received an extra %q event; exactly one frame is expected per change, and a change that did not happen must not be announced at all", what, l.name, ev.Kind)
+	case <-l.done:
+		if l.err != nil && websocket.CloseStatus(l.err) < 0 && !errors.Is(l.err, net.ErrClosed) {
+			t.Fatalf("%s: listener connection died (%v) instead of staying quiet: a broken socket must not read as a pass", what, l.err)
+		}
+	case <-time.After(fanoutQuietWindow):
+		// The expected outcome.
+	}
+}
+
+// fanoutReadEvent reads one frame from a listener and decodes it, bounded.
+func fanoutReadEvent(t *testing.T, conn *websocket.Conn, what string) Event {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	typ, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("%s: no frame within 5s: %v", what, err)
+	}
+	if typ != websocket.MessageText {
+		t.Fatalf("%s: frame type = %v, want text", what, typ)
+	}
+	var ev Event
+	if err := json.Unmarshal(data, &ev); err != nil {
+		t.Fatalf("%s: frame is not a JSON Event (%v): %q", what, err, data)
+	}
+	return ev
+}
+
+// fanoutDrainUntil reads frames until stop reports the one it was waiting for,
+// or until the listener goes quiet. It exists to clear setup writes, which
+// legitimately broadcast, so that a quiet window afterwards measures only the
+// request under test rather than setup leftovers.
+func fanoutDrainUntil(t *testing.T, l *fanoutListener, stop func(Event) bool) {
+	t.Helper()
+	for i := 0; i < 16; i++ {
+		select {
+		case ev := <-l.frames:
+			if stop(ev) {
+				return
+			}
+		case <-l.done:
+			return
+		case <-time.After(2 * time.Second):
+			return
+		}
+	}
+}
+
+// TestIntegrationConnectReceivesTheLiveSnapshot is the late-joiner test: a
+// listener that connects after the performance is already under way must be able
+// to land in it immediately, rather than sitting silent until the agent happens
+// to push again — which may be minutes later, or never.
+//
+// It also pins the one framing claim the whole design rests on: the snapshot a
+// listener receives on connect is BYTE-IDENTICAL to the body GET /api/state
+// returns. If those ever diverge, clients end up with two subtly different
+// notions of the current state, and which is authoritative becomes a matter of
+// which endpoint a given code path happened to call.
+func TestIntegrationConnectReceivesTheLiveSnapshot(t *testing.T) {
+	s, base, wsURL := fanoutServer(t)
+
+	// Build up real state first, so the snapshot is not the trivial
+	// all-defaults one: a joiner must catch a performance in progress.
+	if status, b := fanoutPost(t, base, "/api/code", `{"code":"s(\"bd*4\")","message":"in progress"}`); status != http.StatusOK {
+		t.Fatalf("seed POST /api/code: %d %q", status, b)
+	}
+	if status, b := fanoutPost(t, base, "/api/message", `{"message":"narrating mid-performance"}`); status != http.StatusOK {
+		t.Fatalf("seed POST /api/message: %d %q", status, b)
+	}
+	if status, b := fanoutPost(t, base, "/api/hush", ""); status != http.StatusOK {
+		t.Fatalf("seed POST /api/hush: %d %q", status, b)
+	}
+
+	// Now a listener arrives late.
+	conn, resp := wsDial(t, wsURL, nil)
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("GET /ws handshake status = %d, want 101", resp.StatusCode)
+	}
+	wsWaitForSubscribers(t, s.Hub, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	typ, frame, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("a late listener received no frame within 5s: %v", err)
+	}
+	if typ != websocket.MessageText {
+		t.Fatalf("connect frame type = %v, want text", typ)
+	}
+
+	var ev Event
+	if err := json.Unmarshal(frame, &ev); err != nil {
+		t.Fatalf("connect frame is not a JSON Event (%v): %q", err, frame)
+	}
+	if ev.Kind != EventSnapshot {
+		t.Fatalf("connect frame kind = %q, want %q", ev.Kind, EventSnapshot)
+	}
+
+	// The connect frame really is the live performance, not a fresh one.
+	if ev.Snapshot.Version != 1 {
+		t.Errorf("connect snapshot version = %d, want 1: a late joiner must catch up, not restart", ev.Snapshot.Version)
+	}
+	if ev.Snapshot.Code != `s("bd*4")` {
+		t.Errorf("connect snapshot code = %q, want the pushed pattern", ev.Snapshot.Code)
+	}
+	if ev.Snapshot.LastAgentMessage != "narrating mid-performance" {
+		t.Errorf("connect snapshot lastAgentMessage = %q, want the seeded narration", ev.Snapshot.LastAgentMessage)
+	}
+	if ev.Snapshot.Playing {
+		t.Error("connect snapshot playing = true, want false: the performance was hushed before this listener arrived")
+	}
+
+	// The byte-identity claim. The snapshot is pulled out as raw JSON so it is
+	// compared as BYTES against the /api/state body, not as two decoded values
+	// that happen to agree — a renamed field or a reordered object would decode
+	// to the same thing and hide the drift this exists to catch.
+	var raw struct {
+		Snapshot json.RawMessage `json:"snapshot"`
+	}
+	if err := json.Unmarshal(frame, &raw); err != nil {
+		t.Fatalf("re-decode connect frame: %v", err)
+	}
+	stateStatus, stateBody := fanoutGet(t, base, "/api/state")
+	if stateStatus != http.StatusOK {
+		t.Fatalf("GET /api/state: %d %q", stateStatus, stateBody)
+	}
+	// writeJSON uses a json.Encoder, which terminates the body with a newline;
+	// the frame is a marshalled value and has none. Comparing trimmed forms
+	// isolates that known, harmless difference instead of waving it through.
+	if got, want := bytes.TrimSpace(raw.Snapshot), bytes.TrimSpace([]byte(stateBody)); !bytes.Equal(got, want) {
+		t.Errorf("connect snapshot is not byte-identical to GET /api/state:\n connect: %s\n  state: %s", got, want)
+	}
+}
+
+// TestIntegrationEveryAcceptedWriteFansOutOnceToEveryListener is the core
+// wiring test. Each mutating endpoint, driven over real HTTP against real
+// listeners, must produce EXACTLY ONE frame on EVERY listener carrying the right
+// kind and a snapshot reflecting the write.
+//
+// "Exactly one" is the half that is easiest to lose: broadcasting from both the
+// handler and some other layer would double every event, and a client applying
+// both would replay the same change twice.
+func TestIntegrationEveryAcceptedWriteFansOutOnceToEveryListener(t *testing.T) {
+	const listeners = 3
+
+	cases := []struct {
+		name     string
+		path     string
+		body     string
+		wantKind string
+		// check asserts the broadcast snapshot reflects this write. It is not
+		// enough that a frame arrived: a handler could broadcast a stale
+		// snapshot captured before mutating.
+		check func(t *testing.T, snap Snapshot)
+	}{
+		{
+			name: "code", path: "/api/code", body: `{"code":"s(\"bd*8\")","message":"kick"}`,
+			wantKind: EventCode,
+			check: func(t *testing.T, snap Snapshot) {
+				if snap.Version != 1 {
+					t.Errorf("code event version = %d, want 1", snap.Version)
+				}
+				if snap.Code != `s("bd*8")` {
+					t.Errorf("code event code = %q, want the pushed pattern", snap.Code)
+				}
+			},
+		},
+		{
+			name: "message", path: "/api/message", body: `{"message":"building"}`,
+			wantKind: EventMessage,
+			check: func(t *testing.T, snap Snapshot) {
+				if snap.LastAgentMessage != "building" {
+					t.Errorf("message event lastAgentMessage = %q, want %q", snap.LastAgentMessage, "building")
+				}
+				if snap.Version != 1 {
+					t.Errorf("message event version = %d, want 1: narration must not bump the version", snap.Version)
+				}
+			},
+		},
+		{
+			name: "hush", path: "/api/hush", body: "",
+			wantKind: EventTransport,
+			check: func(t *testing.T, snap Snapshot) {
+				if snap.Playing {
+					t.Error("hush event playing = true, want false")
+				}
+			},
+		},
+		{
+			name: "play", path: "/api/play", body: "",
+			wantKind: EventTransport,
+			check: func(t *testing.T, snap Snapshot) {
+				if !snap.Playing {
+					t.Error("play event playing = false, want true")
+				}
+			},
+		},
+		{
+			name: "eval-result", path: "/api/eval-result", body: `{"version":1,"ok":true,"stats":{"events":5}}`,
+			wantKind: EventEvalResult,
+			check: func(t *testing.T, snap Snapshot) {
+				if snap.LastEvalResult == nil {
+					t.Fatal("eval-result event lastEvalResult = nil, want the stored verdict")
+				}
+				if snap.LastEvalResult.Version != 1 || !snap.LastEvalResult.OK {
+					t.Errorf("eval-result event verdict = %+v, want version 1 ok", snap.LastEvalResult)
+				}
+			},
+		},
+	}
+
+	// One server for the whole table, so later cases run against a performance
+	// carrying the earlier ones' state: a fan-out that only worked on a pristine
+	// server would be caught from the third case onward.
+	s, base, wsURL := fanoutServer(t)
+
+	conns := make([]*websocket.Conn, listeners)
+	for i := range conns {
+		conns[i], _ = wsDial(t, wsURL, nil)
+	}
+	wsWaitForSubscribers(t, s.Hub, listeners)
+	ls := make([]*fanoutListener, listeners)
+	for i, conn := range conns {
+		ls[i] = fanoutAttach(t, fmt.Sprintf("listener %d", i), conn, s.Conductor.Snapshot())
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, respBody := fanoutPost(t, base, tc.path, tc.body)
+			if status != http.StatusOK {
+				t.Fatalf("POST %s = %d %q, want 200", tc.path, status, respBody)
+			}
+			for i, l := range ls {
+				ev := l.next(t, fmt.Sprintf("POST %s -> listener %d", tc.path, i))
+				if ev.Kind != tc.wantKind {
+					t.Errorf("POST %s: listener %d got kind %q, want %q", tc.path, i, ev.Kind, tc.wantKind)
+				}
+				tc.check(t, ev.Snapshot)
+				// Exactly one: a second frame would mean the change was
+				// announced twice.
+				l.expectNone(t, fmt.Sprintf("POST %s -> listener %d (second frame)", tc.path, i))
+			}
+		})
+	}
+}
+
+// TestIntegrationRejectedAndStaleWritesBroadcastNothing is the other half of
+// the fan-out contract, and the half a listener cannot check for itself. A
+// request that was rejected, or understood and deliberately dropped as stale,
+// changed nothing — so announcing it would tell every listener something happened
+// while the state they hold is still correct. There is no field in the frame
+// saying "actually nothing changed", so a false announcement is indistinguishable
+// from a real one.
+func TestIntegrationRejectedAndStaleWritesBroadcastNothing(t *testing.T) {
+	cases := []struct {
+		name string
+		// setup runs before the request under test and may make writes that DO
+		// broadcast, which the test then drains.
+		setup    func(t *testing.T, base string)
+		path     string
+		body     string
+		wantCode int
+		// drained is the kind of the last setup frame, so the drain knows when
+		// setup is finished. Empty means setup broadcasts nothing.
+		drained string
+	}{
+		{
+			name:     "rejected empty code",
+			path:     "/api/code",
+			body:     `{"code":"   "}`,
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name:     "rejected empty message",
+			path:     "/api/message",
+			body:     `{"message":""}`,
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name:     "rejected malformed body",
+			path:     "/api/code",
+			body:     `{"code":`,
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name:     "rejected unknown field",
+			path:     "/api/code",
+			body:     `{"code":"s(\"bd\")","typo":1}`,
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name:     "rejected transport with a body",
+			path:     "/api/hush",
+			body:     `{"code":"s(\"bd\")"}`,
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name:     "rejected verdict for an unpublished version",
+			path:     "/api/eval-result",
+			body:     `{"version":99,"ok":true}`,
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name: "ignored stale verdict",
+			// Two published versions and a verdict stored for the newer one,
+			// then a late report for the older. The request SUCCEEDS (the report
+			// was well-formed) but the Conductor discards it as stale, so the
+			// stored state is untouched and nothing may be broadcast.
+			setup: func(t *testing.T, base string) {
+				t.Helper()
+				if st, b := fanoutPost(t, base, "/api/code", `{"code":"s(\"bd\")"}`); st != http.StatusOK {
+					t.Fatalf("seed push 1: %d %q", st, b)
+				}
+				if st, b := fanoutPost(t, base, "/api/code", `{"code":"s(\"cp\")"}`); st != http.StatusOK {
+					t.Fatalf("seed push 2: %d %q", st, b)
+				}
+				if st, b := fanoutPost(t, base, "/api/eval-result", `{"version":2,"ok":true}`); st != http.StatusOK {
+					t.Fatalf("seed verdict for v2: %d %q", st, b)
+				}
+			},
+			path:     "/api/eval-result",
+			body:     `{"version":1,"ok":false,"error":"late failure"}`,
+			wantCode: http.StatusOK,
+			drained:  EventEvalResult,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, base, wsURL := fanoutServer(t)
+			conn, _ := wsDial(t, wsURL, nil)
+			wsWaitForSubscribers(t, s.Hub, 1)
+			l := fanoutAttach(t, "listener", conn, s.Conductor.Snapshot())
+
+			if tc.setup != nil {
+				tc.setup(t, base)
+				// Drain the setup writes, which legitimately broadcast, so the
+				// quiet window below measures only the request under test.
+				fanoutDrainUntil(t, l, func(ev Event) bool {
+					return tc.drained == "" || ev.Kind == tc.drained
+				})
+			}
+
+			status, respBody := fanoutPost(t, base, tc.path, tc.body)
+			if status != tc.wantCode {
+				t.Fatalf("POST %s = %d %q, want %d", tc.path, status, respBody, tc.wantCode)
+			}
+			l.expectNone(t, fmt.Sprintf("POST %s (%s)", tc.path, tc.name))
+		})
+	}
+}
+
+// TestIntegrationAPIFeedbackLoopReachesListeners closes the loop the feature
+// exists for: an agent pushes, a browser reports how it evaluated, and the
+// agent reads the verdict back — with listeners seeing both halves.
+//
+// It is deliberately one narrative rather than another table, because the
+// property under test is the COMPOSITION (a verdict recorded by one listener is
+// broadcast to all of them, so a second listener learns the first one's verdict)
+// and that is invisible in per-endpoint assertions.
+func TestIntegrationAPIFeedbackLoopReachesListeners(t *testing.T) {
+	s, base, wsURL := fanoutServer(t)
+
+	// Two browsers are listening; only the first one reports.
+	reporter, _ := wsDial(t, wsURL, nil)
+	observer, _ := wsDial(t, wsURL, nil)
+	wsWaitForSubscribers(t, s.Hub, 2)
+	lsRep := fanoutAttach(t, "reporter", reporter, s.Conductor.Snapshot())
+	lsObs := fanoutAttach(t, "observer", observer, s.Conductor.Snapshot())
+
+	if status, b := fanoutPost(t, base, "/api/code", `{"code":"s(\"bd*2, ~ cp\")"}`); status != http.StatusOK {
+		t.Fatalf("POST /api/code: %d %q", status, b)
+	}
+	for _, p := range []struct {
+		name string
+		l    *fanoutListener
+	}{{"reporter", lsRep}, {"observer", lsObs}} {
+		ev := p.l.next(t, "push -> "+p.name)
+		if ev.Kind != EventCode || ev.Snapshot.Version != 1 {
+			t.Errorf("%s: push event kind=%q version=%d, want %q version 1", p.name, ev.Kind, ev.Snapshot.Version, EventCode)
+		}
+	}
+
+	// The reporter's browser evaluates the push and says it failed.
+	if status, b := fanoutPost(t, base, "/api/eval-result", `{"version":1,"ok":false,"error":"x is not a function"}`); status != http.StatusOK {
+		t.Fatalf("POST /api/eval-result: %d %q", status, b)
+	}
+
+	// BOTH listeners learn the verdict, including the one that did not report
+	// it. That is what lets an agent watching the aggregate close its loop.
+	for _, p := range []struct {
+		name string
+		l    *fanoutListener
+	}{{"reporter", lsRep}, {"observer", lsObs}} {
+		ev := p.l.next(t, "verdict -> "+p.name)
+		if ev.Kind != EventEvalResult {
+			t.Errorf("%s: verdict event kind = %q, want %q", p.name, ev.Kind, EventEvalResult)
+		}
+		if ev.Snapshot.LastEvalResult == nil || ev.Snapshot.LastEvalResult.OK ||
+			ev.Snapshot.LastEvalResult.Error != "x is not a function" {
+			t.Errorf("%s: verdict event carried %+v, want the stored failure", p.name, ev.Snapshot.LastEvalResult)
+		}
+	}
+
+	// And the agent reads the same verdict back over the read path, which is
+	// what the feedback loop actually closes on.
+	status, stateBody := fanoutGet(t, base, "/api/state")
+	if status != http.StatusOK {
+		t.Fatalf("GET /api/state: %d %q", status, stateBody)
+	}
+	if !strings.Contains(stateBody, `"error":"x is not a function"`) {
+		t.Errorf("GET /api/state did not carry the verdict back to the agent: %s", stateBody)
 	}
 }
 

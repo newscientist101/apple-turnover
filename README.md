@@ -5,9 +5,9 @@ holding the one live performance state; an external AI agent drives it by pushin
 strudel code over HTTP.
 
 The browser side is not built yet: `GET /` still renders a minimal welcome
-page and nothing plays audio. The listener WebSocket endpoint and the hub that
-feeds it exist and are wired to each other, so the fan-out path works end to end
-from the hub onwards — `AGENTS.md` lists what is still unwired.
+page and nothing plays audio. The listener WebSocket endpoint, the hub that
+feeds it, and the fan-out from the agent API are all wired, so a push reaches
+connected listeners — `AGENTS.md` lists what is still unwired.
 
 ## Building and Running
 
@@ -26,12 +26,19 @@ WebSocket. Bodies are JSON and capped at 64 KiB.
 | `POST /api/message` | set the message shown to listeners |
 | `POST /api/play`, `POST /api/hush` | start / stop the performance |
 | `POST /api/eval-result` | report how the last code evaluated |
-| `GET /ws` | listener WebSocket; receives each hub broadcast as one text frame |
+| `GET /ws` | listener WebSocket; one JSON frame per state change |
 
 A snapshot is `{version, code, lastAgentMessage, anchor{epochMs,cps}, history,
 playing, listenerCount, lastEvalResult}`. Every write returns the new snapshot,
 except `POST /api/eval-result`, which answers `{accepted, version}`. A fresh
 server starts at version 0 and already playing.
+
+Listeners get one frame shape: `{"kind": ..., "snapshot": {...}}`, where the
+snapshot is the same object `GET /api/state` returns. A listener that connects
+receives a `snapshot` frame immediately, so it lands mid-performance. Accepted
+writes then arrive as `code`, `message`, `transport` or `eval-result` frames.
+A rejected request — or a stale eval result that is accepted but not stored —
+sends nothing at all.
 
 `GET /` serves the page and `/static/` the assets.
 
@@ -71,6 +78,7 @@ and a listener count. Nothing is persisted and there is no set saving.
 - `srv/conductor.go`: the in-memory Conductor session core
 - `srv/hub.go`: the listener hub core — fan-out to every subscriber
 - `srv/ws.go`: the listener WebSocket endpoint (`GET /ws`)
+- `srv/event.go`: the listener frame shape and the broadcast helper
 - `srv/integration_test.go`: the end-to-end verification harness
 - `srv/ws_test.go`, `srv/hub_test.go`: its WebSocket and hub slices
 - `srv/templates`: Go HTML templates

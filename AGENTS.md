@@ -39,11 +39,31 @@ These are easy to break and each has tests. Changes should expect failures until
 
 Do not assume these features work; they remain open work.
 
-* No snapshot on connect, and API writes do not fan out through the Hub; `srv/api.go` does not reference it, so a write does not reach listeners.
 * `SetListenerCount` has no production caller, so snapshots report listener count as 0.
-* No ping/pong, dead-socket reaping, or additional message encoding.
+* No ping/pong, dead-socket reaping, or additional message encoding beyond the
+  single `{"kind","snapshot"}` frame.
 * No browser client/audio playback exists yet. `/` and `srv/static/` are still the template content.
-* The working fan-out path is proven only from the Hub onward.
+* The verified fan-out path stops at the API: nothing yet proves a listener
+  renders what it receives, because there is no browser client.
+
+## Wired since the last audit
+
+Recorded here so the "not yet wired" list above cannot quietly become wrong.
+
+* **Snapshot on connect** (`srv/ws.go`, `srv/event.go`): a listener that
+  subscribes is sent the full state immediately as a `snapshot` frame, so a late
+  joiner lands mid-performance instead of waiting for the next change. The
+  subscribe-then-snapshot order is load-bearing: subscribing first means no
+  change can slip through the gap between reading the state and joining the
+  fan-out.
+* **Write fan-out** (`srv/api.go`): every accepted `POST /api/code`,
+  `/api/message`, `/api/hush`, `/api/play` and stored `/api/eval-result`
+  broadcasts one frame to every listener. A REJECTED or accepted-but-ignored
+  request broadcasts NOTHING — telling listeners about a change that did not
+  happen is worse than silence, because the frame carries no "nothing changed"
+  marker. This is why `Conductor.RecordEvalResult` returns `(stored bool, err
+  error)`: a nil error alone cannot tell "stored" from "understood and dropped as
+  stale", and the stale case must not broadcast.
 
 ## Verification conventions
 

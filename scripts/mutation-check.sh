@@ -124,6 +124,16 @@ MUTATIONS=$(cat <<'EOF'
 39-ws-going-away-not-reported|srv/ws.go|websocket.StatusGoingAway, "server shutting down"|websocket.StatusNormalClosure, "server shutting down"
 40-ws-client-close-not-noticed|srv/ws.go|clientGone := conn.CloseRead(context.Background())|clientGone := context.Background()|TestWSDisconnectUnsubscribesTheListener
 41-ws-binary-frames|srv/ws.go|return conn.Write(ctx, websocket.MessageText, msg)|return conn.Write(ctx, websocket.MessageBinary, msg)
+42-no-snapshot-on-connect|srv/ws.go|if err := s.sendSnapshot(conn); err != nil {\n\t\tslog.Debug("websocket snapshot", "path", r.URL.Path, "error", err)\n\t}|_ = 0 // deliberately no catch-up snapshot on connect|TestWSUpgradeSucceedsAndStaysOpen
+43-connect-frame-not-a-snapshot|srv/ws.go|s.encodeEvent(EventSnapshot, s.Conductor.Snapshot())|s.encodeEvent(EventCode, s.Conductor.Snapshot())|TestWSUpgradeSucceedsAndStaysOpen
+44-code-write-not-broadcast|srv/api.go|s.broadcast(EventCode, snap)|_ = snap // deliberately not broadcast|TestIntegrationEveryAcceptedWriteFansOutOnceToEveryListener
+45-message-write-not-broadcast|srv/api.go|s.broadcast(EventMessage, snap)|_ = snap // deliberately not broadcast|TestIntegrationEveryAcceptedWriteFansOutOnceToEveryListener
+46-transport-write-not-broadcast|srv/api.go|s.broadcast(EventTransport, snap)|_ = snap // deliberately not broadcast|TestIntegrationEveryAcceptedWriteFansOutOnceToEveryListener
+47-eval-result-not-broadcast|srv/api.go|s.broadcast(EventEvalResult, s.Conductor.Snapshot())|_ = 0 // deliberately not broadcast|TestIntegrationEveryAcceptedWriteFansOutOnceToEveryListener
+48-stale-eval-result-broadcasts|srv/conductor.go|return false, nil|return true, nil // deliberately claims a stale report was stored|TestIntegrationRejectedAndStaleWritesBroadcastNothing
+49-code-broadcast-twice|srv/api.go|s.broadcast(EventCode, snap)|s.broadcast(EventCode, snap)\n\ts.broadcast(EventCode, snap)|TestIntegrationEveryAcceptedWriteFansOutOnceToEveryListener
+50-rejected-code-still-broadcasts|srv/api.go|\t\twriteError(w, http.StatusBadRequest, "code must not be empty: send the strudel pattern to play")\n\t\treturn\n\t}|\t\ts.broadcast(EventCode, s.Conductor.Snapshot())\n\t\twriteError(w, http.StatusBadRequest, "code must not be empty: send the strudel pattern to play")\n\t\treturn\n\t}|TestIntegrationRejectedAndStaleWritesBroadcastNothing
+51-connect-snapshot-not-the-live-state|srv/ws.go|s.encodeEvent(EventSnapshot, s.Conductor.Snapshot())|s.encodeEvent(EventSnapshot, Snapshot{})|TestIntegrationConnectReceivesTheLiveSnapshot
 EOF
 )
 

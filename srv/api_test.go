@@ -119,7 +119,7 @@ func TestAPIStateReflectsConductor(t *testing.T) {
 	s.Conductor.SetMessage("adding backbeat")
 	s.Conductor.SetPlaying(false)
 	s.Conductor.SetListenerCount(3)
-	if err := s.Conductor.RecordEvalResult(EvalResult{
+	if _, err := s.Conductor.RecordEvalResult(EvalResult{
 		Version: 2,
 		OK:      false,
 		Error:   "TypeError: x is not a function",

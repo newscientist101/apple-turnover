@@ -169,15 +169,26 @@ func (c *Conductor) SetListenerCount(n int) {
 // version and returns ErrUnknownVersion if no such version exists. Reports that
 // name an older version than the stored one are accepted but ignored, so a
 // straggling client cannot regress the agent's view of the newest version.
-func (c *Conductor) RecordEvalResult(res EvalResult) error {
+//
+// The bool reports whether the verdict was actually STORED, and it is the whole
+// point of the second return value. A nil error alone cannot express the
+// difference between "this changed the performance" and "this was understood
+// and deliberately dropped as stale": both return nil. The HTTP handler needs
+// the distinction because a stale report must NOT be broadcast to listeners —
+// announcing a verdict that was not stored would tell every listener the agent
+// knows something it does not, and no listener can tell that from the wire.
+//
+// Callers that only care whether the report was understood can ignore it.
+func (c *Conductor) RecordEvalResult(res EvalResult) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if res.Version <= 0 || res.Version > c.version {
-		return fmt.Errorf("%w: %d (latest is %d)", ErrUnknownVersion, res.Version, c.version)
+		return false, fmt.Errorf("%w: %d (latest is %d)", ErrUnknownVersion, res.Version, c.version)
 	}
 	if c.lastEval != nil && res.Version < c.lastEval.Version {
-		return nil
+		// Understood, valid, and deliberately not stored: nothing changed.
+		return false, nil
 	}
 	stored := EvalResult{
 		Version: res.Version,
@@ -187,7 +198,7 @@ func (c *Conductor) RecordEvalResult(res EvalResult) error {
 		EpochMS: time.Now().UnixMilli(),
 	}
 	c.lastEval = &stored
-	return nil
+	return true, nil
 }
 
 // Snapshot returns a copy of the current state.

@@ -121,9 +121,14 @@ type codeRequest struct {
 }
 
 // handleAPICode is the agent's only way to change what is playing: it stores
-// the new document, bumps the version by exactly one, and returns the resulting
-// snapshot, which the WebSocket hub (issue .3) fans out to every listener. The
-// server never parses or evaluates the JavaScript.
+// the new document, bumps the version by exactly one, broadcasts the result to
+// every listener, and returns the resulting snapshot. The server never parses
+// or evaluates the JavaScript.
+//
+// The broadcast happens AFTER the write succeeded and before the response, so a
+// listener is never told about a version that was rejected. The same snapshot
+// is both broadcast and returned, so the agent and the listeners can never
+// disagree about which version is live.
 func (s *Server) handleAPICode(w http.ResponseWriter, r *http.Request) {
 	var req codeRequest
 	if err := decodeBody(r, &req); err != nil {
@@ -135,7 +140,9 @@ func (s *Server) handleAPICode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, s.Conductor.Publish(req.Code, req.Message))
+	snap := s.Conductor.Publish(req.Code, req.Message)
+	s.broadcast(EventCode, snap)
+	writeJSON(w, http.StatusOK, snap)
 }
 
 // messageRequest is the POST /api/message body. An empty message is rejected
@@ -161,7 +168,9 @@ func (s *Server) handleAPIMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.Conductor.SetMessage(req.Message)
-	writeJSON(w, http.StatusOK, s.Conductor.Snapshot())
+	snap := s.Conductor.Snapshot()
+	s.broadcast(EventMessage, snap)
+	writeJSON(w, http.StatusOK, snap)
 }
 
 // evalResultRequest is the POST /api/eval-result body. Stats are opaque
@@ -180,6 +189,13 @@ type evalResultRequest struct {
 // this is pure bookkeeping. A report for a version that was never published is
 // rejected rather than stored, because accepting it would tell the agent a
 // version succeeded when no listener could have seen it.
+//
+// The broadcast is gated on `stored`, not on the error. A stale report — one
+// naming a version OLDER than the verdict already held — is understood and
+// deliberately discarded, so it answers 200 with accepted:true (the browser's
+// report was well-formed) but must NOT be broadcast: the state did not change,
+// and telling every listener a new verdict exists when none was stored is a lie
+// they cannot detect on the wire.
 func (s *Server) handleAPIEvalResult(w http.ResponseWriter, r *http.Request) {
 	var req evalResultRequest
 	if err := decodeBody(r, &req); err != nil {
@@ -188,9 +204,13 @@ func (s *Server) handleAPIEvalResult(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res := EvalResult{Version: req.Version, OK: req.OK, Error: req.Error, Stats: req.Stats}
-	if err := s.Conductor.RecordEvalResult(res); err != nil {
+	stored, err := s.Conductor.RecordEvalResult(res)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if stored {
+		s.broadcast(EventEvalResult, s.Conductor.Snapshot())
 	}
 
 	writeJSON(w, http.StatusOK, apiEvalAck{Accepted: true, Version: req.Version})
@@ -228,7 +248,9 @@ func (s *Server) handleAPITransport(w http.ResponseWriter, r *http.Request, play
 		return
 	}
 	s.Conductor.SetPlaying(playing)
-	writeJSON(w, http.StatusOK, s.Conductor.Snapshot())
+	snap := s.Conductor.Snapshot()
+	s.broadcast(EventTransport, snap)
+	writeJSON(w, http.StatusOK, snap)
 }
 
 // errBodyNotAllowed reports a body where none is accepted.

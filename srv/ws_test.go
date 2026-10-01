@@ -5,15 +5,17 @@ package srv
 // mounts) over a real loopback listener and over an in-process recorder, which
 // is the same two-mode discipline the rest of `integration_test.go` uses.
 //
-// Scope today (issues .3.2 and .3.4.2): mount `GET /ws`, accept the upgrade,
-// register the listener with the hub, relay every hub message to it as a text
-// frame, and unsubscribe on every exit path. There is still deliberately no
-// snapshot on connect, no /api fan-out, no ping/pong and no listener counting,
-// so a listener that connects hears nothing until the next broadcast. The
-// accept-and-close expectations issue .3.2 pinned here were REVISED on purpose
-// when the hub was wired in — a behaviour change made in the open, which is
-// what this file's history is for — and the connect/disconnect/close paths are
-// now asserted directly instead.
+// Scope today (issues .3.2, .3.4.2 and .3.4.3): mount `GET /ws`, accept the
+// upgrade, register the listener with the hub, send it the catch-up snapshot,
+// relay every hub message to it as a text frame, and unsubscribe on every exit
+// path. There is still deliberately no ping/pong and no listener counting, so
+// nothing detects a dead socket that has not closed. The accept-and-close
+// expectations issue .3.2 pinned here were REVISED on purpose when the hub was
+// wired in — a behaviour change made in the open, which is what this file's
+// history is for — and the connect/disconnect/close paths are now asserted
+// directly instead. The "nothing on connect" expectation was revised the same
+// way when snapshot-on-connect landed; both revisions inverted an assertion
+// rather than deleting it.
 //
 // Boundedness is a requirement, not a nicety: every dial and every read carries
 // an explicit deadline, and the test server is torn down with a timeout on a
@@ -23,6 +25,7 @@ package srv
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -194,6 +197,45 @@ func wsWaitForSubscribers(t *testing.T, h *Hub, want int) {
 	}
 }
 
+// wsReadConnectSnapshot reads the one frame every listener is sent on connect
+// and asserts it is a well-formed EventSnapshot whose payload equals wantSnap.
+//
+// It exists because "the first thing a listener sees" is now a load-bearing
+// part of the contract rather than an absence of one. Every test that goes on
+// to assert about LATER frames has to consume this one first, or it would read
+// the catch-up snapshot and mistake it for the broadcast it meant to check.
+//
+// wantSnap is compared field by field rather than as encoded bytes because the
+// snapshot is captured at a slightly different instant on each run (the anchor
+// carries a wall-clock epoch); the byte-identity with GET /api/state is proved
+// once, properly, in the integration harness.
+func wsReadConnectSnapshot(t *testing.T, conn *websocket.Conn, wantSnap Snapshot) Event {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), wsReadTimeout)
+	defer cancel()
+
+	typ, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("connect snapshot: no frame within %s: %v", wsReadTimeout, err)
+	}
+	if typ != websocket.MessageText {
+		t.Fatalf("connect snapshot: frame type = %v, want %v", typ, websocket.MessageText)
+	}
+
+	var ev Event
+	if err := json.Unmarshal(data, &ev); err != nil {
+		t.Fatalf("connect snapshot: frame is not a JSON Event (%v): %q", err, data)
+	}
+	if ev.Kind != EventSnapshot {
+		t.Fatalf("connect snapshot: kind = %q, want %q: the opening frame tells a client it has caught up, not that the performance changed", ev.Kind, EventSnapshot)
+	}
+	if ev.Snapshot.Version != wantSnap.Version || ev.Snapshot.Code != wantSnap.Code ||
+		ev.Snapshot.LastAgentMessage != wantSnap.LastAgentMessage || ev.Snapshot.Playing != wantSnap.Playing {
+		t.Fatalf("connect snapshot: got %+v, want %+v", ev.Snapshot, wantSnap)
+	}
+	return ev
+}
+
 // wsReadMessage reads one message from a client, bounded, and requires it to be
 // a text frame carrying EXACTLY want. Nothing about the payload is paraphrased:
 // the bytes a listener receives are compared to the bytes that were broadcast,
@@ -264,13 +306,23 @@ func TestWSUpgradeSucceedsAndStaysOpen(t *testing.T) {
 	// needs no sleep.
 	wsWaitForSubscribers(t, s.Hub, 1)
 
-	// The connection is still open: a read that is given a short, explicit
-	// window must expire with a timeout rather than with a close frame. A close
-	// here means the handler tore the listener down after subscribing.
+	// The first thing a listener receives is the catch-up snapshot, not silence.
+	// (This assertion INVERTS the one this test used to make. While the handler
+	// discarded the connection it was correct to require a timeout; wiring the
+	// hub in made "stays open" the real claim, and snapshot-on-connect made
+	// "sends nothing first" false. The old expectation is replaced rather than
+	// deleted, because a listener that connects mid-performance and gets no
+	// state would sit silent until the next change — possibly never.)
+	wsReadConnectSnapshot(t, conn, s.Conductor.Snapshot())
+
+	// And the connection is STILL open afterwards: the snapshot is not the
+	// prelude to an immediate close. A read given a short, explicit window must
+	// expire with a timeout rather than with a close frame. A close here means
+	// the handler tore the listener down after sending the catch-up.
 	shortCtx, cancel := context.WithTimeout(context.Background(), wsWriteBudget)
 	defer cancel()
 	if typ, data, err := conn.Read(shortCtx); err == nil {
-		t.Fatalf("a freshly connected listener received %v %q: this slice sends nothing on connect (no snapshot yet)", typ, data)
+		t.Fatalf("a subscribed listener received a second frame %v %q with nothing changing: the connection must stay open and quiet until something happens", typ, data)
 	} else if code := websocket.CloseStatus(err); code != -1 {
 		t.Fatalf("the listener's connection closed with %v (code %d), want it to stay open and subscribed", err, code)
 	} else if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
@@ -293,6 +345,8 @@ func TestWSBroadcastReachesTheListenerAsExactBytes(t *testing.T) {
 
 	conn, _ := wsDial(t, url, nil)
 	wsWaitForSubscribers(t, s.Hub, 1)
+	// Consume the catch-up snapshot so it cannot be mistaken for broadcast 1.
+	wsReadConnectSnapshot(t, conn, s.Conductor.Snapshot())
 
 	// Deliberately awkward payloads: a trailing newline, inner quotes and
 	// braces, a multi-byte UTF-8 rune and a NUL. Anything that prettifies, trims
@@ -324,6 +378,7 @@ func TestWSDisconnectUnsubscribesTheListener(t *testing.T) {
 
 	conn, _ := wsDial(t, url, nil)
 	wsWaitForSubscribers(t, s.Hub, 1)
+	wsReadConnectSnapshot(t, conn, s.Conductor.Snapshot())
 
 	// A live subscriber really is wired up: prove it before tearing it down.
 	first := []byte(`{"kind":"code","version":1}`)
@@ -353,6 +408,7 @@ func TestWSHubCloseEndsTheListenerWithACleanClose(t *testing.T) {
 
 	conn, _ := wsDial(t, url, nil)
 	wsWaitForSubscribers(t, s.Hub, 1)
+	wsReadConnectSnapshot(t, conn, s.Conductor.Snapshot())
 
 	// Broadcast once first, so this test also proves the close arrives on a
 	// connection that was demonstrably working, not merely one that was never
@@ -477,20 +533,37 @@ func TestWSWedgedListenerCannotHangTeardown(t *testing.T) {
 	wsWaitForSubscribers(t, s.Hub, 0)
 
 	// The server must have given up on this client rather than still be trying
-	// to write to it. Reading now cannot make the connection healthy: the write
-	// that was in flight has already been abandoned and the socket closed, so
-	// the read fails on the partially written frame. If the deadline were
-	// missing, this read would instead complete the whole frame — the client is
-	// finally draining, which is exactly what unblocks a write with no deadline
-	// — and succeed. (This client's read limit is disabled in wsDialWedged for
-	// precisely this reason: with the default limit the read would fail on size
-	// instead, and would pass whether or not the server had given up.)
+	// to write to it. The loop drains and inspects rather than reading once,
+	// because the connect snapshot is a small frame that this client had simply
+	// never read: it sits in the socket and a single read would return it,
+	// proving nothing about the doomed write.
+	//
+	// So the question is not "did any read succeed" but "did the 1 MiB frame
+	// ever arrive". Reading now cannot make the connection healthy: the write
+	// that was in flight has already been abandoned and the socket closed. If
+	// the deadline were missing, this handler would still be sitting in
+	// conn.Write, and draining the socket here — which is exactly what this
+	// loop does — would let the entire frame through, and the loop would see it
+	// and fail. That is the assertion a missing deadline breaks. (This client's
+	// read limit is disabled in wsDialWedged for precisely this reason: with the
+	// default limit the read would fail on size instead, and would pass whether
+	// or not the server had given up.)
 	readCtx, cancel := context.WithTimeout(context.Background(), wsReadTimeout)
 	defer cancel()
-	typ, data, err := conn.Read(readCtx)
-	if err == nil {
-		t.Fatalf("the wedged listener completed a %v message of %d bytes after the server's write budget had long passed: the write had no deadline, so the handler was still waiting on a client that never read",
-			typ, len(data))
+	for {
+		typ, data, err := conn.Read(readCtx)
+		if err != nil {
+			// The server abandoned the write and closed: this is the outcome
+			// the per-frame deadline exists to produce.
+			break
+		}
+		if len(data) == wsWedgedPayloadBytes {
+			t.Fatalf("the wedged listener completed a %v message of %d bytes after the server's write budget had long passed: the write had no deadline, so the handler was still waiting on a client that never read",
+				typ, len(data))
+		}
+		// Anything else (in practice the small connect snapshot) is drained and
+		// the loop keeps going, bounded by readCtx: the frame we are looking
+		// for must never arrive.
 	}
 }
 

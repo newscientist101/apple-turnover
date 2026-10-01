@@ -34,9 +34,14 @@ except `POST /api/eval-result`, which answers `{accepted, version}`. A fresh
 server starts at version 0 and already playing.
 
 `listenerCount` is the live number of connected `/ws` listeners, updated on
-connect and on disconnect (including a dropped dead socket). It is not a change
+connect, on disconnect, and when a dead socket is reaped. It is not a change
 to the performance, so it does not bump the version and does not send a frame of
 its own; it shows up in the next snapshot a listener or the agent reads.
+
+The server pings each listener every 30s and reaps it if it cannot answer within
+5s. This is what reclaims a listener that vanished without closing — a yanked
+cable or a killed tab — which the hub's own drop-on-overflow rule cannot catch
+on a quiet performance, since such a listener is sent nothing at all.
 
 Listeners get one frame shape: `{"kind": ..., "snapshot": {...}}`, where the
 snapshot is the same object `GET /api/state` returns. A listener that connects

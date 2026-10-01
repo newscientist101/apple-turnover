@@ -40,6 +40,14 @@ type Server struct {
 	// run. It is read by handlers and written only by New, before the server
 	// serves anything.
 	wsWriteTimeout time.Duration
+
+	// wsPingInterval is how often a listener is pinged, and wsPongTimeout how
+	// long it has to answer before it is declared dead (see wsPingListener and
+	// handleWS). They are fields for the same reason wsWriteTimeout is: the
+	// reaping tests must run in tens of milliseconds rather than the production
+	// 30s, and neither value may be baked into a test as a literal.
+	wsPingInterval time.Duration
+	wsPongTimeout  time.Duration
 }
 
 // New builds a Server with its Conductor and its Hub, and the wiring between
@@ -65,6 +73,8 @@ func New() *Server {
 		StaticDir:    filepath.Join(baseDir, "static"),
 
 		wsWriteTimeout: defaultWSWriteTimeout,
+		wsPingInterval: defaultWSPingInterval,
+		wsPongTimeout:  defaultWSPongTimeout,
 	}
 }
 

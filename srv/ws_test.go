@@ -23,8 +23,10 @@ package srv
 // waits for outstanding requests and would itself hang on a wedged handler.
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,6 +34,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
+	"os"
 	"strings"
 	"syscall"
 	"testing"
@@ -91,6 +95,15 @@ type wsTestServerOptions struct {
 	// writeTimeout overrides Server.wsWriteTimeout when non-zero, so the wedged
 	// listener test spends 250ms proving the bound instead of 5s.
 	writeTimeout time.Duration
+
+	// pingInterval and pongTimeout override the keepalive budgets when
+	// non-zero, so the reaping tests cost tens of milliseconds rather than the
+	// production 30s. They are separate knobs because the reaper's timing is a
+	// RATIO of the two: a client is declared dead only when it fails to answer
+	// within pongTimeout of an interval, so a test that scaled only one of them
+	// would be asserting a different policy than production runs.
+	pingInterval time.Duration
+	pongTimeout  time.Duration
 }
 
 // wsTestServer boots the real handler tree on a loopback listener (a real TCP
@@ -121,6 +134,12 @@ func wsTestServerWith(t *testing.T, opts wsTestServerOptions) (*Server, string, 
 	s := New()
 	if opts.writeTimeout > 0 {
 		s.wsWriteTimeout = opts.writeTimeout
+	}
+	if opts.pingInterval > 0 {
+		s.wsPingInterval = opts.pingInterval
+	}
+	if opts.pongTimeout > 0 {
+		s.wsPongTimeout = opts.pongTimeout
 	}
 	ts := httptest.NewServer(s.routes())
 
@@ -363,6 +382,241 @@ func wsWantStateListenerCount(t *testing.T, base string, want int) {
 			t.Fatalf("GET /api/state reports listenerCount=%d after %s, want %d", last, wsSubscriberTimeout, want)
 		}
 		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// wsDeadListener dials /ws with a raw net.Conn, completes the RFC 6455
+// handshake by hand, and then goes silent FOREVER: it never reads, never
+// answers a ping, and never sends a close frame.
+//
+// A coder/websocket client cannot be used for this. Its read goroutine answers
+// pings automatically, so such a client is always responsive and can never
+// reproduce a dead socket. Speaking the handshake directly is what makes the
+// silence a property of construction rather than of timing — the same
+// discipline the wedged-listener test uses for its write wedge.
+//
+// The returned conn is closed with the test.
+func wsDeadListener(t *testing.T, url string) net.Conn {
+	t.Helper()
+
+	u, err := neturl.Parse(url)
+	if err != nil {
+		t.Fatalf("parse %s: %v", url, err)
+	}
+	host := u.Host
+	if _, _, err := net.SplitHostPort(host); err != nil {
+		host = net.JoinHostPort(host, "80")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), wsDialTimeout)
+	defer cancel()
+
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", host)
+	if err != nil {
+		t.Fatalf("dial %s: %v", host, err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	// Any 16 bytes, base64'd, is a valid Sec-WebSocket-Key. The server echoes
+	// the accept token derived from it, which is what proves the handshake
+	// completed and this connection is a real listener.
+	key := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef"))
+	req := "GET " + u.Path + " HTTP/1.1\r\n" +
+		"Host: " + u.Host + "\r\n" +
+		"Connection: Upgrade\r\n" +
+		"Upgrade: websocket\r\n" +
+		"Sec-WebSocket-Version: 13\r\n" +
+		"Sec-WebSocket-Key: " + key + "\r\n" +
+		"\r\n"
+	if dl, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(dl)
+	}
+	if _, err := io.WriteString(conn, req); err != nil {
+		t.Fatalf("write handshake: %v", err)
+	}
+
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read handshake response: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("handshake status = %d, want 101 (this connection is not a listener, so the test would prove nothing)", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Sec-WebSocket-Accept"); got == "" {
+		t.Fatal("handshake response has no Sec-WebSocket-Accept")
+	}
+
+	// From here on the socket is silent forever. Clearing the handshake
+	// deadline is what makes this a DEAD client rather than a slow one: every
+	// later failure is the server failing to detect silence, never the test
+	// failing to wait.
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		t.Fatalf("clear handshake deadline: %v", err)
+	}
+	return conn
+}
+
+// wsWantSubscriberCount waits, bounded, for the hub to hold exactly want
+// subscribers.
+func wsWantSubscriberCount(t *testing.T, h *Hub, want int) {
+	t.Helper()
+	deadline := time.Now().Add(wsSubscriberTimeout)
+	last := -1
+	for {
+		got := hubSubscriberCount(t, h)
+		last = got
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("hub still holds %d subscribers after %s, want %d: a listener that stopped answering was never reaped", last, wsSubscriberTimeout, want)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// ---------- ping/pong keepalive and dead-client reaping (issue .3.6) ----------
+
+// TestWSDeadListenerIsReaped is the core of issue .3.6: a listener that stops
+// answering must be detected and reclaimed, rather than holding its handler
+// goroutine and its subscriber slot for the lifetime of the process.
+//
+// The client is wsDeadListener — a completed handshake followed by permanent
+// silence — so this is a property of construction, not of timing. Its pings go
+// into the kernel buffer and are never answered, so the pong deadline is the
+// only thing that can end it.
+//
+// The listener count is read back over HTTP rather than from Hub.SubscriberCount,
+// because the body is what the agent contract promises: a count that was correct
+// in the hub but never published would pass a hub-level assertion and fail every
+// real client. That reaping decrements the count at all is a load-bearing part of
+// this feature — a reaper that logged the client out of the hub but left the
+// published count stale would leak a phantom listener into /api/state forever.
+func TestWSDeadListenerIsReaped(t *testing.T) {
+	s, url, ts := wsTestServerWith(t, wsTestServerOptions{
+		pingInterval: 20 * time.Millisecond,
+		pongTimeout:  20 * time.Millisecond,
+	})
+
+	dead := wsDeadListener(t, url)
+
+	// It really is a listener first. A socket that never subscribed would
+	// satisfy "the count is 0 again" for entirely the wrong reason.
+	wsWaitForSubscribers(t, s.Hub, 1)
+	wsWantStateListenerCount(t, ts.URL, 1)
+
+	// Now it is silent forever, so the server must give up on it.
+	wsWantStateListenerCount(t, ts.URL, 0)
+	wsWaitForSubscribers(t, s.Hub, 0)
+
+	// The socket is closed, not merely forgotten: the subscriber is gone but the
+	// handler could still be holding the connection.
+	//
+	// The server legitimately sent frames before giving up (the connect
+	// snapshot, and any ping that fitted in the socket buffer), so this DRAINS
+	// until the socket errors rather than expecting the first read to fail.
+	// Draining is bounded by the read deadline, and the deadline firing — the
+	// server still holding the connection open — is the failure.
+	if err := dead.SetReadDeadline(time.Now().Add(wsReadTimeout)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	buf := make([]byte, 4096)
+	for {
+		if _, err := dead.Read(buf); err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Errorf("the dead listener's socket is still readable after %s: the server reaped the subscriber but never closed the connection", wsReadTimeout)
+			}
+			// Any other error (EOF, ECONNRESET) is the server having closed it.
+			break
+		}
+	}
+}
+
+// TestWSListenerSurvivesPingCycles is the other half of the keepalive, and the
+// half a reaper that fires too eagerly would break: a listener that is alive and
+// answering must NOT be reaped.
+//
+// A reaper that reaped the living would be indistinguishable from one that never
+// runs at the byte level — both end with an absent subscriber — so without this
+// test a mutation that inverted the ping result, or that ignored a pong, could
+// satisfy the reaping test above.
+func TestWSListenerSurvivesPingCycles(t *testing.T) {
+	const cycles = 5
+	s, url, _ := wsTestServerWith(t, wsTestServerOptions{
+		pingInterval: 10 * time.Millisecond,
+		pongTimeout:  10 * time.Millisecond,
+	})
+
+	conn, _ := wsDial(t, url, nil)
+	wsWaitForSubscribers(t, s.Hub, 1)
+	wsReadConnectSnapshot(t, conn, s.Conductor.Snapshot())
+
+	// A browser answers control frames in its network stack, with no
+	// JavaScript reading them. A coder/websocket client does NOT: it replies to
+	// a ping only while something is reading the connection. So a reader has to
+	// run for the whole test, or the server quite correctly reaps a client that
+	// is — from the library's point of view — as silent as a dead one.
+	//
+	// CloseRead would give that reader for free, but it also DISCARDS data
+	// frames and closes the connection on the first one, which makes the
+	// post-ping broadcast assertion below impossible. So this reads frames into
+	// a channel instead: it answers pings AND keeps the payloads.
+	//
+	// (This test failed first because it read nothing, which is worth recording:
+	// the failure looked like a reaper that killed the living, and the cause was
+	// entirely in the test.)
+	frames := make(chan []byte, 8)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			rctx, rcancel := context.WithTimeout(context.Background(), wsReadTimeout)
+			typ, data, err := conn.Read(rctx)
+			rcancel()
+			if err != nil || typ != websocket.MessageText {
+				return
+			}
+			select {
+			case frames <- data:
+			default:
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		_ = conn.CloseNow()
+		select {
+		case <-readerDone:
+		case <-time.After(wsReadTimeout):
+			t.Errorf("the client reader did not exit within %s after the socket was closed", wsReadTimeout)
+		}
+	})
+
+	// Sit through several ping intervals. The wait is generous on purpose (many
+	// times cycles x interval): the assertion is that the listener SURVIVES a
+	// long quiet period, not that it survives a fast one.
+	time.Sleep(cycles * 10 * time.Millisecond)
+
+	// Still subscribed, and still one.
+	if got := hubSubscriberCount(t, s.Hub); got != 1 {
+		t.Fatalf("hub holds %d subscribers after %d ping cycles, want 1: a listener that answered every ping was reaped anyway", got, cycles)
+	}
+
+	// And still WORKING: a survivor that had stopped being written to would pass
+	// the count check above. Broadcasting proves the relay is intact, and that
+	// this connection was never quietly reaped and resubscribed behind our back.
+	msg := []byte(`{"kind":"code","version":1}`)
+	s.Hub.Broadcast(msg)
+
+	select {
+	case got := <-frames:
+		if !bytes.Equal(got, msg) {
+			t.Fatalf("after %d ping cycles the listener received %q, want exactly %q", cycles, got, msg)
+		}
+	case <-time.After(wsReadTimeout):
+		t.Fatalf("after %d ping cycles no broadcast arrived within %s: the listener survived the reaper but stopped being served", cycles, wsReadTimeout)
 	}
 }
 
@@ -741,6 +995,14 @@ func TestWSHubCloseEndsTheListenerWithACleanClose(t *testing.T) {
 // Teardown of this test's own socket is bounded too (CloseNow in the cleanup),
 // so nothing here can hang whatever the handler did.
 func TestWSWedgedListenerCannotHangTeardown(t *testing.T) {
+	// NOTE (issue .3.6): this test deliberately does NOT shorten the keepalive
+	// budgets. It proves the per-write deadline, and the reaper added in .3.6 is
+	// a second mechanism that could end this same wedged connection — which
+	// would let the test pass for the wrong reason and quietly retire mutation
+	// 38-ws-write-deadline-removed. Leaving pingInterval at its 30s default
+	// keeps the write deadline the only thing that can end the connection inside
+	// a test measured in seconds. Do not add pingInterval here without re-running
+	// that mutation.
 	s, url, _ := wsTestServerWith(t, wsTestServerOptions{writeTimeout: wsWriteBudget})
 
 	conn := wsDialWedged(t, url)

@@ -39,8 +39,8 @@ These are easy to break and each has tests. Changes should expect failures until
 
 Do not assume these features work; they remain open work.
 
-* No ping/pong, dead-socket reaping, or additional message encoding beyond the
-  single `{"kind","snapshot"}` frame.
+* No additional message encoding beyond the single `{"kind","snapshot"}`
+  frame: the count change is still not an event of its own.
 * No browser client/audio playback exists yet. `/` and `srv/static/` are still the template content.
 * The verified fan-out path stops at the API: nothing yet proves a listener
   renders what it receives, because there is no browser client.
@@ -79,6 +79,21 @@ Recorded here so the "not yet wired" list above cannot quietly become wrong.
     handler happened to wake. A broadcast that drops nobody publishes nothing.
   The count is deliberately NOT broadcast as an event: that is a wire-contract
   change, tracked separately.
+* **Keepalive and dead-client reaping** (`srv/ws.go`, `srv/server.go`): each
+  listener is pinged every `wsPingInterval` (30s) and reaped if it cannot answer
+  within `wsPongTimeout` (5s). Two properties are load-bearing:
+  - **The pong deadline is what distinguishes slow from dead.** This is the only
+    path that ends a connection the hub would otherwise keep forever: a listener
+    on a quiet performance is sent nothing, so neither the hub's drop-on-overflow
+    nor the per-write deadline ever fires for it. Reaping on ping failure alone
+    (no deadline) would hang; reaping without pinging would never fire.
+  - **Reaping decrements the listener count for free.** The reaper ends the
+    handler, and the handler's deferred `Unsubscribe` publishes the new count
+    through the hook above. There is deliberately no counting code in `ws.go`,
+    so the reaped client cannot leave a phantom listener in `/api/state`.
+  Both budgets live on `Server` as fields, like `wsWriteTimeout`, so the tests
+  exercise the real policy in milliseconds. Mutation 63 removes the pong
+  deadline and wedges instead of failing.
 
 ## Verification conventions
 

@@ -82,6 +82,23 @@ trap 'restore_all; rm -rf "$BACKUP_DIR"' EXIT
 # 200 with a truncated body) and keeps the row load-bearing on pageData being a
 # struct: against nil data the same mutation renders empty and SURVIVES, so the
 # grid fails loudly if anyone "simplifies" pageData away.
+#
+# Rows 61-64 cover the keepalive reaper (issue strudel-agent-3vo.3.6), and they
+# constrain an EXISTING row in a way worth recording. Row 38 proves the per-write
+# deadline using TestWSWedgedListenerCannotHangTeardown: it removes the deadline
+# and requires the test to fail. Now that the handler also reaps clients that
+# stop answering, that reaper is a SECOND way the same wedged test could start
+# passing — the keepalive would give up on the client for the reaper's reasons
+# while the write deadline was gone. That is the failure mode this repo calls a
+# bound making a hang pass: coverage that looks intact because some other
+# mechanism now supplies the outcome the assertion was there to prove.
+#
+# It is prevented structurally rather than by assertion: the wedged test runs at
+# the DEFAULT ping interval (30s), so the reaper cannot plausibly fire inside a
+# test measured in seconds, leaving the write deadline as the only possible
+# cause. Rows 38 and 61-64 are therefore complementary and both must stay caught.
+# If a future change makes the wedged test install a short ping interval, row 38
+# must be re-examined before that change is accepted.
 MUTATIONS=$(cat <<'EOF'
 01-empty-code-accepted|srv/api.go|strings.TrimSpace(req.Code) == ""|false
 02-unknown-json-field-allowed|srv/api.go|dec.DisallowUnknownFields()|_ = dec
@@ -143,6 +160,10 @@ MUTATIONS=$(cat <<'EOF'
 58-count-published-when-nothing-changed|srv/hub.go|\t\t\tif len(subs) != before {\n\t\t\t\tpublishCount()\n\t\t\t}\n|\t\t\tpublishCount()\n\t\t\t_ = before\n|TestHubCountHookReportsEveryTransition
 59-negative-listener-count-not-clamped|srv/conductor.go|\tif n < 0 {\n\t\tn = 0\n\t}\n\tc.mu.Lock()\n\tdefer c.mu.Unlock()\n\tc.listeners = n|\tc.mu.Lock()\n\tdefer c.mu.Unlock()\n\tc.listeners = n|TestConductorSetListenerCountClampsAndLeavesTheVersionAlone
 60-listener-count-bumps-the-version|srv/conductor.go|\tc.mu.Lock()\n\tdefer c.mu.Unlock()\n\tc.listeners = n|\tc.mu.Lock()\n\tdefer c.mu.Unlock()\n\tc.listeners = n\n\tc.version++|TestConductorListenerCountDoesNotBumpVersion
+61-no-keepalive-at-all|srv/ws.go|\t\tcase <-ping.C:|\t\tcase <-time.After(time.Duration(1<<62)):|TestWSDeadListenerIsReaped
+62-keepalive-failure-ignored|srv/ws.go|\t\t\tif err := s.wsPingListener(conn); err != nil {|\t\t\tif err := s.wsPingListener(conn); false {|TestWSDeadListenerIsReaped
+63-pong-deadline-removed|srv/ws.go|ctx, cancel := context.WithTimeout(context.Background(), s.wsPongTimeout)|ctx, cancel := context.WithCancel(context.Background())|TestWSDeadListenerIsReaped
+64-keepalive-reaps-the-living|srv/ws.go|\t\t\tif err := s.wsPingListener(conn); err != nil {|\t\t\tif err := s.wsPingListener(conn); err == nil {|TestWSListenerSurvivesPingCycles
 EOF
 )
 

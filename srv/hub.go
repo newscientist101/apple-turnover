@@ -58,10 +58,12 @@ package srv
 //     change (see the "listener-count" follow-up). Subscribe hands back a
 //     channel and nothing else.
 //   - no ping/pong, no write deadline and no dead-socket reaping (issue .3.6):
-//     wire liveness is that subtask's business. What lives here is the bounded
-//     send guarantee it depends on: a client that cannot keep up with the
-//     hub's buffer is dropped and its channel closed, which is all a reaper
-//     needs to close the socket and log the client out.
+//     wire liveness is that subtask's business, and it lives entirely in ws.go.
+//     What lives here is the bounded send guarantee it depends on: a client that
+//     cannot keep up with the hub's buffer is dropped and its channel closed.
+//     A reaper needs no help from this file — it ends the handler, and the
+//     handler's deferred Unsubscribe is what publishes the decremented count
+//     through the hook above.
 //   - no encoding and no message framing: the hub moves opaque bytes, so the
 //     event vocabulary stays in the Conductor's layer.
 

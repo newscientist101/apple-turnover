@@ -18,6 +18,24 @@ import (
 // production timeout.
 const defaultWSWriteTimeout = 5 * time.Second
 
+// defaultWSPingInterval is how often a listener is asked to prove it is still
+// there, and defaultWSPongTimeout how long it then has to answer.
+//
+// The two are a policy, not two independent numbers: a listener is declared
+// dead only if it fails to answer within wsPongTimeout of a ping sent every
+// wsPingInterval, so the ratio is what decides how patient the server is. 30s
+// between probes with 5s to answer is a ~6:1 ratio — generous enough that a
+// listener on a slow link or a loaded machine is never reaped for being slow,
+// while a genuinely dead socket is reclaimed well inside a minute rather than
+// holding its handler goroutine and subscriber slot until the process exits.
+//
+// Neither value may be a test literal: both live on Server so the reaping
+// tests can run this same policy in milliseconds.
+const (
+	defaultWSPingInterval = 30 * time.Second
+	defaultWSPongTimeout  = 5 * time.Second
+)
+
 // This file owns the listener-facing WebSocket endpoint: the `GET /ws` route,
 // the handshake, and the loop that turns this listener into a hub subscriber.
 //
@@ -150,6 +168,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// CloseRead's goroutine ends with it, so nothing is left behind here either.
 	clientGone := conn.CloseRead(context.Background())
 
+	// The keepalive ticker. It is stopped on every exit path below, so a
+	// handler that returns cannot leave the runtime holding a timer for a
+	// listener that is gone.
+	ping := time.NewTicker(s.wsPingInterval)
+	defer ping.Stop()
+
 	for {
 		select {
 		case <-clientGone.Done():
@@ -190,8 +214,52 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				slog.Debug("websocket write", "path", r.URL.Path, "bytes", len(msg), "error", err)
 				return
 			}
+
+		case <-ping.C:
+			// Liveness check (issue .3.6). The hub and the write path both
+			// report a listener that has stopped reading — the hub by
+			// dropping it once its send buffer fills — but a listener on a
+			// quiet performance is sent nothing at all, so neither ever
+			// notices it. A half-open socket (a yanked cable, a killed
+			// phone, a tab suspended by the OS) is exactly that case: no
+			// error, no traffic, no end.
+			//
+			// The pong deadline is what distinguishes a slow listener from a
+			// dead one, which is why this may block the loop for up to
+			// wsPongTimeout: a listener that has not answered by then is
+			// treated as gone. That is the same shape as the per-write
+			// budget above, and it is why the "/ws never blocks on a
+			// client" invariant survives this addition.
+			if err := s.wsPingListener(conn); err != nil {
+				// It did not answer in time, or the socket is already
+				// broken. Both mean the same thing here: this listener
+				// cannot be reached, so release it and let the deferred
+				// Unsubscribe — which is what publishes the decremented
+				// listener count — and the deferred CloseNow clean up.
+				slog.Debug("websocket keepalive", "path", r.URL.Path, "error", err)
+				return
+			}
 		}
 	}
+}
+
+// wsPingListener asks one listener to prove it is still there, and waits a
+// bounded time for the answer.
+//
+// A nil return means the listener answered; an error means it is gone. It is
+// deliberately a QUESTION rather than a policy: the loop above owns what happens
+// next, because only it knows the surrounding exit paths.
+//
+// The pong is read by the goroutine CloseRead already started, not by a read
+// here — that is what makes this safe to call from the relay loop. The library
+// documents that CloseRead answers ping, pong and close frames, so a ping sent
+// here is answered on that goroutine and this call only waits for the outcome.
+// Starting a second reader would be a concurrent-read violation and could
+// corrupt the frame stream.
+func (s *Server) wsPingListener(conn *websocket.Conn) error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.wsPongTimeout)
+	defer cancel()
+	return conn.Ping(ctx)
 }
 
 // sendSnapshot sends one listener the current state as an EventSnapshot frame,

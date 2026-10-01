@@ -1504,6 +1504,31 @@ func (l *fanoutListener) expectNone(t *testing.T, what string) {
 	}
 }
 
+// drainListenerCounts consumes the listener-count frames caused by other
+// listeners connecting while this one was already watching, and checks each one
+// names the count that arrival produced (issue .3.7).
+//
+// A listener is sent one frame per peer that connects AFTER it, and never one
+// for its own arrival — it was handed that count in its catch-up snapshot. So
+// listener i of n, attached in order, has n-1-i frames waiting, the first of
+// which reports i+2.
+//
+// It asserts the kind and the count of everything it consumes on purpose: a
+// drain that silently swallowed a performance frame would hide exactly the
+// defect the tests using it are here to find.
+func (l *fanoutListener) drainListenerCounts(t *testing.T, n, firstCount int, what string) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		ev := l.next(t, fmt.Sprintf("%s: listener-count frame %d of %d", what, i+1, n))
+		if ev.Kind != EventListenerCount {
+			t.Fatalf("%s: frame %d of %d has kind %q, want %q: only listener-count frames are drained here, and swallowing anything else would hide it", what, i+1, n, ev.Kind, EventListenerCount)
+		}
+		if want := firstCount + i; ev.Snapshot.ListenerCount != want {
+			t.Fatalf("%s: listener-count frame %d of %d reports %d listeners, want %d", what, i+1, n, ev.Snapshot.ListenerCount, want)
+		}
+	}
+}
+
 // fanoutReadEvent reads one frame from a listener and decodes it, bounded.
 func fanoutReadEvent(t *testing.T, conn *websocket.Conn, what string) Event {
 	t.Helper()
@@ -1722,6 +1747,16 @@ func TestIntegrationEveryAcceptedWriteFansOutOnceToEveryListener(t *testing.T) {
 		ls[i] = fanoutAttach(t, fmt.Sprintf("listener %d", i), conn, s.Conductor.Snapshot())
 	}
 
+	// Connecting is itself a change listeners hear about (issue .3.7), so each
+	// one is holding a frame for every peer that connected after it. Draining
+	// them here is what keeps the table below measuring the API write and not
+	// the setup: a fan-out that doubled a frame, or lost one of these, would
+	// fail on the wrong case if the backlog were not accounted for.
+	for i, l := range ls {
+		l.drainListenerCounts(t, listeners-1-i, i+2,
+			fmt.Sprintf("listener %d catching up with the listeners that connected after it", i))
+	}
+
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			status, respBody := fanoutPost(t, base, tc.path, tc.body)
@@ -1865,6 +1900,10 @@ func TestIntegrationAPIFeedbackLoopReachesListeners(t *testing.T) {
 	wsWaitForSubscribers(t, s.Hub, 2)
 	lsRep := fanoutAttach(t, "reporter", reporter, s.Conductor.Snapshot())
 	lsObs := fanoutAttach(t, "observer", observer, s.Conductor.Snapshot())
+
+	// The reporter was already watching when the observer connected, so it is
+	// owed exactly that one count frame before the push below (issue .3.7).
+	lsRep.drainListenerCounts(t, 1, 2, "reporter, told the observer arrived")
 
 	if status, b := fanoutPost(t, base, "/api/code", `{"code":"s(\"bd*2, ~ cp\")"}`); status != http.StatusOK {
 		t.Fatalf("POST /api/code: %d %q", status, b)
@@ -2176,12 +2215,25 @@ func TestIntegrationSocketsAreLoopbackOnly(t *testing.T) {
 // precedent of TestIntegrationListenAddrIsHonoured (assert on the shipped text)
 // rather than adding a throwaway script, which the README's own convention
 // forbids.
+//
+// AGENT_API.md is held to the SAME rule, in both directions. It is the document
+// an agent is told to code against, so a table there that names an endpoint the
+// server does not mount (or omits one it does) is worse than no table at all —
+// it is a contract that is wrong rather than one that is missing. A missing
+// AGENT_API.md FAILS rather than skips: it is a shipped document, and a skipped
+// check here would be exactly the vacuous pass this test exists to prevent.
 func TestReadmeAPITableMatchesRoutes(t *testing.T) {
 	src, err := os.ReadFile(filepath.Join("..", "README.md"))
 	if err != nil {
 		t.Skipf("cannot read README.md: %v", err)
 	}
 	readme := string(src)
+
+	apiSrc, err := os.ReadFile(filepath.Join("..", "AGENT_API.md"))
+	if err != nil {
+		t.Fatalf("cannot read AGENT_API.md: %v", err)
+	}
+	agentAPI := string(apiSrc)
 
 	// Collect the mounted routes by walking the same tree the server mounts.
 	// ServeMux does not expose its patterns, so parse routes()' source: the
@@ -2215,18 +2267,20 @@ func TestReadmeAPITableMatchesRoutes(t *testing.T) {
 		t.Fatal("parsed no routes out of api.go; the regexp no longer matches routes()' shape")
 	}
 
-	// Every mounted endpoint must be documented.
-	for pattern := range mounted {
-		if !strings.Contains(readme, "`"+pattern+"`") {
-			t.Errorf("route %q is mounted in routes() but not named in README.md's API section", pattern)
+	// Every mounted endpoint must be documented, in BOTH documents.
+	for _, doc := range []struct {
+		name string
+		text string
+	}{{"README.md", readme}, {"AGENT_API.md", agentAPI}} {
+		for pattern := range mounted {
+			if !strings.Contains(doc.text, "`"+pattern+"`") {
+				t.Errorf("route %q is mounted in routes() but not named in %s's API section", pattern, doc.name)
+			}
 		}
-	}
-
-	// Every endpoint the README names must be mounted. Guard against a table
-	// row that documents something that does not exist.
-	for _, m := range regexp.MustCompile("`(GET|POST) (/[a-z/-]*)`").FindAllStringSubmatch(readme, -1) {
-		if !mounted[m[1]+" "+m[2]] {
-			t.Errorf("README.md documents %q but routes() does not mount it", m[1]+" "+m[2])
+		for _, m := range regexp.MustCompile("`(GET|POST) (/[a-z/-]*)`").FindAllStringSubmatch(doc.text, -1) {
+			if !mounted[m[1]+" "+m[2]] {
+				t.Errorf("%s documents %q but routes() does not mount it", doc.name, m[1]+" "+m[2])
+			}
 		}
 	}
 }

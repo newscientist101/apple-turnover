@@ -34,9 +34,11 @@ except `POST /api/eval-result`, which answers `{accepted, version}`. A fresh
 server starts at version 0 and already playing.
 
 `listenerCount` is the live number of connected `/ws` listeners, updated on
-connect, on disconnect, and when a dead socket is reaped. It is not a change
-to the performance, so it does not bump the version and does not send a frame of
-its own; it shows up in the next snapshot a listener or the agent reads.
+connect, on disconnect, and when a dead socket is reaped. It is not a change to
+the performance, so it does not bump the version — but it does reach the
+listeners that are already watching, as a `listener-count` frame. The listener
+that caused the change is not sent it: one that just connected has that exact
+count in the snapshot it opened with.
 
 The server pings each listener every 30s and reaps it if it cannot answer within
 5s. This is what reclaims a listener that vanished without closing — a yanked
@@ -46,9 +48,13 @@ on a quiet performance, since such a listener is sent nothing at all.
 Listeners get one frame shape: `{"kind": ..., "snapshot": {...}}`, where the
 snapshot is the same object `GET /api/state` returns. A listener that connects
 receives a `snapshot` frame immediately, so it lands mid-performance. Accepted
-writes then arrive as `code`, `message`, `transport` or `eval-result` frames.
+writes then arrive as `code`, `message`, `transport` or `eval-result` frames,
+and a listener arriving or leaving produces a `listener-count` frame.
 A rejected request — or a stale eval result that is accepted but not stored —
 sends nothing at all.
+
+`AGENT_API.md` is the full contract: the endpoints, the snapshot, the loop an
+agent should run, and the complete frame vocabulary.
 
 `GET /` serves the page and `/static/` the assets.
 
@@ -96,5 +102,6 @@ and a listener count. Nothing is persisted and there is no set saving.
 - `scripts/mutation-check.sh`: sabotage check proving the tests are non-vacuous
 - `scripts/mutation-bench.sh` + `docs/mutation-bench/`: grid timing baselines and
   audit reports
+- `AGENT_API.md`: the agent/listener wire contract
 
 The invariants these files must hold are in `AGENTS.md`.

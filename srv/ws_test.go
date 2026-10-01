@@ -5,17 +5,21 @@ package srv
 // mounts) over a real loopback listener and over an in-process recorder, which
 // is the same two-mode discipline the rest of `integration_test.go` uses.
 //
-// Scope today (issues .3.2, .3.4.2 and .3.4.3): mount `GET /ws`, accept the
-// upgrade, register the listener with the hub, send it the catch-up snapshot,
-// relay every hub message to it as a text frame, and unsubscribe on every exit
-// path. There is still deliberately no ping/pong and no listener counting, so
-// nothing detects a dead socket that has not closed. The accept-and-close
-// expectations issue .3.2 pinned here were REVISED on purpose when the hub was
-// wired in — a behaviour change made in the open, which is what this file's
-// history is for — and the connect/disconnect/close paths are now asserted
-// directly instead. The "nothing on connect" expectation was revised the same
-// way when snapshot-on-connect landed; both revisions inverted an assertion
-// rather than deleting it.
+// Scope today (issues .3.2, .3.4, .3.5, .3.6 and .3.7): mount `GET /ws`, accept
+// the upgrade, register the listener with the hub, send it the catch-up
+// snapshot, relay every hub message to it as a text frame, unsubscribe on every
+// exit path, reap it if it goes quiet, and prove the listener count end to end
+// — including that a count change reaches the listeners already watching as a
+// `listener-count` frame.
+//
+// The accept-and-close expectations issue .3.2 pinned here were REVISED on
+// purpose when the hub was wired in — a behaviour change made in the open,
+// which is what this file's history is for — and the connect/disconnect/close
+// paths are now asserted directly instead. The "nothing on connect" expectation
+// was revised the same way when snapshot-on-connect landed, and
+// TestWSListenerCountIsNotBroadcastAsAnEvent was INVERTED (not deleted) when
+// the count became an event of its own; every revision here replaced an
+// assertion rather than dropping one.
 //
 // Boundedness is a requirement, not a nicety: every dial and every read carries
 // an explicit deadline, and the test server is torn down with a timeout on a
@@ -274,6 +278,61 @@ func wsReadMessage(t *testing.T, conn *websocket.Conn, what string, want []byte)
 	}
 	if !bytes.Equal(data, want) {
 		t.Fatalf("%s: message = %q, want exactly %q", what, data, want)
+	}
+}
+
+// wsReadEvent reads exactly ONE frame from a listener, bounded, and decodes it.
+// It is the read used when the assertion is about WHAT a frame says (its kind,
+// the state it carries) rather than about the exact bytes on the wire.
+//
+// A read that returns nothing is a failure, never a pass: every use of this is a
+// frame the test has established must arrive, so silence is the defect.
+func wsReadEvent(t *testing.T, conn *websocket.Conn, what string) Event {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), wsReadTimeout)
+	defer cancel()
+
+	typ, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("%s: no frame within %s: %v", what, wsReadTimeout, err)
+	}
+	if typ != websocket.MessageText {
+		t.Fatalf("%s: frame type = %v, want %v", what, typ, websocket.MessageText)
+	}
+	var ev Event
+	if err := json.Unmarshal(data, &ev); err != nil {
+		t.Fatalf("%s: frame is not a JSON Event (%v): %q", what, err, data)
+	}
+	return ev
+}
+
+// wsExpectQuiet requires that NOTHING at all arrives from conn within d.
+//
+// It is the negative assertion, so its failure mode matters: it fails when a
+// frame arrives (the defect) and also when the connection breaks (a different
+// defect, named differently), rather than treating an error as silence.
+//
+// IT CONSUMES THE CONNECTION, and that is a property of the library rather than
+// of this helper: coder/websocket documents that "on any error from any method,
+// the connection is closed with an appropriate reason — this applies to context
+// expirations as well". The read below is bounded by d, so it ends in exactly
+// that kind of error, and the server sees the client disconnect afterwards
+// (measured: the hub's subscriber count falls to 0). So this is the LAST thing a
+// test may do with conn. A quiet window in the middle of a test is expressed
+// instead by the exact frame sequence — asserting the next N frames one by one
+// already fails on any extra or missing frame — or by a background reader, which
+// is what the reaping and ping tests use.
+func wsExpectQuiet(t *testing.T, conn *websocket.Conn, what string, d time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	defer cancel()
+
+	typ, data, err := conn.Read(ctx)
+	switch {
+	case err == nil:
+		t.Fatalf("%s: a %v frame arrived: %q", what, typ, data)
+	case ctx.Err() == nil:
+		t.Fatalf("%s: reading for silence failed with %v, so this says nothing about whether a frame was sent", what, err)
 	}
 }
 
@@ -718,80 +777,154 @@ func TestWSConnectSnapshotCountsTheConnectingListener(t *testing.T) {
 	}
 }
 
-// TestWSListenerCountIsNotBroadcastAsAnEvent pins the deliberate scope limit of
-// this issue: the count reaches /api/state and every snapshot, but a listener
-// ARRIVING or LEAVING sends no frame of its own.
+// TestWSListenerCountIsBroadcastAsAnEvent is the positive half of issue .3.7,
+// and it INVERTS the scope limit this bead removed. Until now a listener
+// arriving or leaving produced no frame at all, and that was pinned by
+// TestWSListenerCountIsNotBroadcastAsAnEvent. The bead decided the count should
+// reach listeners, which is a wire-contract change: it adds a sixth kind
+// (listener-count) to a vocabulary clients switch on.
 //
-// This is asserted rather than assumed, because "the count changed" is exactly
-// the kind of thing a later change would helpfully add a frame for — and adding
-// an event kind is a wire-contract change that deserves a decision made on
-// purpose rather than arriving by accident. If this test ever starts failing
-// because a listener-count event WAS added, that is the moment to make the
-// decision deliberately; see the listener-count follow-up bead.
+// What is asserted here is that the frame is exactly one per change, to the
+// listeners who were ALREADY watching, naming the count that change produced —
+// not merely that "something" was sent.
 //
-// The negative assertion is a bounded WAIT, not a non-blocking peek: a peek
-// cannot distinguish "nothing yet" from "nothing ever", so it would pass for a
-// merely slow delivery. The reader runs on its own goroutine so the connection
-// stays healthy and a later failure elsewhere cannot be masked by a dead socket.
-func TestWSListenerCountIsNotBroadcastAsAnEvent(t *testing.T) {
-	_, url, _ := wsTestServerWith(t, wsTestServerOptions{})
+// The reads are ordered against the hub, not against a sleep: the count is
+// published (and the frame queued) before the hub acknowledges the command that
+// changed the set, so once SubscriberCount reports the new value the frame is
+// already in the watcher's buffer.
+func TestWSListenerCountIsBroadcastAsAnEvent(t *testing.T) {
+	s, url, _ := wsTestServerWith(t, wsTestServerOptions{})
+
+	// The watcher is the listener already watching when the changes below happen.
+	watcher, _ := wsDial(t, url, nil)
+	wsWaitForSubscribers(t, s.Hub, 1)
+	wsReadConnectSnapshot(t, watcher, s.Conductor.Snapshot())
+	versionBefore := s.Conductor.Snapshot().Version
+
+	// Somebody arrives.
+	other, _ := wsDial(t, url, nil)
+	wsWaitForSubscribers(t, s.Hub, 2)
+
+	ev := wsReadEvent(t, watcher, "the other listener arriving")
+	if ev.Kind != EventListenerCount {
+		t.Fatalf("a listener arriving produced a %q frame, want %q: a count change is not a change to the performance, so it needs its own kind", ev.Kind, EventListenerCount)
+	}
+	if ev.Snapshot.ListenerCount != 2 {
+		t.Errorf("arrival frame carries listenerCount=%d, want 2", ev.Snapshot.ListenerCount)
+	}
+	if ev.Snapshot.Version != versionBefore {
+		t.Errorf("arrival frame carries version=%d, want %d: the version belongs to the code document, and nobody pushed code", ev.Snapshot.Version, versionBefore)
+	}
+
+	// And somebody leaves, cleanly. The watcher is told the count fell; the
+	// departing listener is told nothing, because it has gone.
+	if err := other.Close(websocket.StatusNormalClosure, ""); err != nil {
+		t.Fatalf("client clean close: %v", err)
+	}
+	wsWaitForSubscribers(t, s.Hub, 1)
+
+	ev = wsReadEvent(t, watcher, "the other listener leaving")
+	if ev.Kind != EventListenerCount {
+		t.Fatalf("a listener leaving produced a %q frame, want %q", ev.Kind, EventListenerCount)
+	}
+	if ev.Snapshot.ListenerCount != 1 {
+		t.Errorf("departure frame carries listenerCount=%d, want 1", ev.Snapshot.ListenerCount)
+	}
+	if ev.Snapshot.Version != versionBefore {
+		t.Errorf("departure frame carries version=%d, want %d", ev.Snapshot.Version, versionBefore)
+	}
+
+	// Exactly one frame each: a second frame for either change, or any other
+	// kind, would mean the count is announced more than once per change.
+	wsExpectQuiet(t, watcher, "after both listener changes", 250*time.Millisecond)
+}
+
+// TestWSListenerCountFrameIsNotSentToTheListenerThatCausedIt pins the other half
+// of the contract, and is the reason it is not the mirror image of the test
+// above.
+//
+// The listener that just connected is handed the new count directly, in the
+// catch-up snapshot it reads FIRST. Sending it the same count again as a frame
+// would put a second copy of state it already holds immediately after the one
+// frame every client decodes on connect, and every client would grow a case for
+// "the frame right after my snapshot is always about me".
+//
+// This is a bounded WAIT rather than a peek: a non-blocking read cannot tell
+// "nothing yet" from "nothing ever", so it would pass for a merely slow
+// delivery.
+func TestWSListenerCountFrameIsNotSentToTheListenerThatCausedIt(t *testing.T) {
+	s, url, _ := wsTestServerWith(t, wsTestServerOptions{})
 
 	conn, _ := wsDial(t, url, nil)
-	// Consume the catch-up frame first: it is expected, and counting it as an
-	// unexpected event would make this test fail for the right reason by the
-	// wrong route.
-	ctx, cancel := context.WithTimeout(context.Background(), wsReadTimeout)
-	if _, _, err := conn.Read(ctx); err != nil {
-		cancel()
-		t.Fatalf("connect snapshot: no frame within %s: %v", wsReadTimeout, err)
+	wsWaitForSubscribers(t, s.Hub, 1)
+
+	// The snapshot this listener opened with already counts it.
+	ev := wsReadConnectSnapshot(t, conn, s.Conductor.Snapshot())
+	if ev.Snapshot.ListenerCount != 1 {
+		t.Fatalf("the connect snapshot counts %d listeners, want 1: that is the copy of the count the listener must not be sent again", ev.Snapshot.ListenerCount)
 	}
-	cancel()
 
-	// Drain anything that arrives from here on.
-	frames := make(chan string, 8)
-	readerDone := make(chan struct{})
-	go func() {
-		defer close(readerDone)
-		for {
-			rctx, rcancel := context.WithTimeout(context.Background(), wsReadTimeout)
-			_, data, err := conn.Read(rctx)
-			rcancel()
-			if err != nil {
-				return
-			}
-			var ev Event
-			if err := json.Unmarshal(data, &ev); err != nil {
-				return
-			}
-			select {
-			case frames <- ev.Kind:
-			default:
-			}
+	wsExpectQuiet(t, conn, "a listener's own arrival", 250*time.Millisecond)
+}
+
+// TestWSListenerCountFramesCoverABurstOfConnects is the churn case the bead asked
+// to be settled: a performance with a crowd opening tabs would produce a frame
+// per connect, and the question is whether those need coalescing.
+//
+// They do not, and this pins why. Every change is published before the hub
+// acknowledges it, so the frames are already queued, in order, by the time the
+// count reaches its final value — a client can apply them one at a time and end
+// up exactly where the server is, with no intermediate state invented and none
+// dropped. Coalescing would save a handful of small frames and cost that, so
+// they are not coalesced.
+func TestWSListenerCountFramesCoverABurstOfConnects(t *testing.T) {
+	const burst = 10
+	s, url, _ := wsTestServerWith(t, wsTestServerOptions{})
+
+	watcher, _ := wsDial(t, url, nil)
+	wsWaitForSubscribers(t, s.Hub, 1)
+	wsReadConnectSnapshot(t, watcher, s.Conductor.Snapshot())
+
+	// A crowd arrives.
+	others := make([]*websocket.Conn, 0, burst)
+	for i := 0; i < burst; i++ {
+		c, _ := wsDial(t, url, nil)
+		others = append(others, c)
+	}
+	wsWaitForSubscribers(t, s.Hub, burst+1)
+
+	// One frame per arrival, counting up, none merged and none missing. The
+	// exact sequence is the "no extras" assertion: any additional frame would
+	// shift the counts the loop reads next, so a quiet window here would add
+	// nothing (and see wsExpectQuiet for why it cannot be used mid-test).
+	for i := 1; i <= burst; i++ {
+		ev := wsReadEvent(t, watcher, fmt.Sprintf("listener %d of %d arriving", i, burst))
+		if ev.Kind != EventListenerCount {
+			t.Fatalf("arrival %d produced a %q frame, want %q", i, ev.Kind, EventListenerCount)
 		}
-	}()
-	defer func() {
-		_ = conn.CloseNow()
-		select {
-		case <-readerDone:
-		case <-time.After(wsReadTimeout):
-			t.Errorf("the background reader did not exit within %s after the socket was closed", wsReadTimeout)
-		}
-	}()
-
-	// Somebody arrives and somebody leaves. Neither is a change to the
-	// performance, so neither may produce a frame here.
-	other, _ := wsDial(t, url, nil)
-	_ = other.CloseNow()
-
-	quiet := time.After(250 * time.Millisecond)
-	for {
-		select {
-		case kind := <-frames:
-			t.Fatalf("a listener connecting or leaving produced a %q frame for an already-connected listener; this issue publishes the count through /api/state only, and a count event is a separate wire-contract decision", kind)
-		case <-quiet:
-			return
+		if ev.Snapshot.ListenerCount != i+1 {
+			t.Fatalf("arrival %d carries listenerCount=%d, want %d", i, ev.Snapshot.ListenerCount, i+1)
 		}
 	}
+
+	// And the same in reverse when they all leave at once.
+	for _, c := range others {
+		if err := c.CloseNow(); err != nil {
+			t.Fatalf("client CloseNow: %v", err)
+		}
+	}
+	wsWaitForSubscribers(t, s.Hub, 1)
+
+	for k := 1; k <= burst; k++ {
+		ev := wsReadEvent(t, watcher, fmt.Sprintf("listener %d of %d leaving", k, burst))
+		if ev.Kind != EventListenerCount {
+			t.Fatalf("departure %d produced a %q frame, want %q", k, ev.Kind, EventListenerCount)
+		}
+		if want := burst + 1 - k; ev.Snapshot.ListenerCount != want {
+			t.Fatalf("departure %d carries listenerCount=%d, want %d", k, ev.Snapshot.ListenerCount, want)
+		}
+	}
+	wsExpectQuiet(t, watcher, "the departure burst", 250*time.Millisecond)
 }
 
 // TestWSUpgradeSucceedsAndStaysOpen is this slice's first behaviour, over a

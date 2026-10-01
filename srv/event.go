@@ -61,6 +61,21 @@ const (
 	// (POST /api/eval-result). A stale or rejected report is deliberately NOT
 	// broadcast: see Server.broadcast's caller contract below.
 	EventEvalResult = "eval-result"
+
+	// EventListenerCount is a change to how many listeners are attached to this
+	// performance (issue .3.7): somebody connected or left, or the hub dropped
+	// somebody for not keeping up. It is a SIXTH kind rather than a fold into
+	// one of the five above because a count change is not a change to the
+	// performance: no new code, no new narration, no transport move, no new
+	// verdict. Folding it in would force every client to infer "nothing about
+	// the music changed" from a kind that otherwise means the opposite.
+	//
+	// It never bumps the version (the version belongs to the code document) and
+	// it never tells the listener that caused it — the listener that just
+	// connected has already been handed this exact count in its catch-up
+	// snapshot, so a second copy of the same state would be noise on the one
+	// frame every client reads first. See Hub's fanOut for the exclusion.
+	EventListenerCount = "listener-count"
 )
 
 // Event is the single frame shape sent to listeners. Snapshot holds the full
@@ -85,6 +100,13 @@ type Event struct {
 // Broadcasting does not block on any subscriber: the Hub drops a client that
 // cannot keep up rather than waiting for it, so a wedged listener can never
 // delay an API response.
+//
+// There is exactly ONE caller of this helper per accepted mutation, and one
+// caller that is not this at all: the listener-count frame (issue .3.7) is
+// built by the Conductor's count hook and handed to the hub, which fans it out
+// itself. See hub.go for why that indirection exists — it is what lets the
+// count reach listeners without the hook ever re-entering the hub it is running
+// on.
 func (s *Server) broadcast(kind string, snap Snapshot) {
 	s.Hub.Broadcast(s.encodeEvent(kind, snap))
 }

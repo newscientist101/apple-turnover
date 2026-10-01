@@ -41,22 +41,42 @@ package srv
 // changes, which the hub goroutine is the only place that knows exactly; the ws
 // handler does not, because a subscriber the hub DROPPED for falling behind is
 // removed without the handler's involvement and is only observed as a closed
-// channel. Keeping this a func(int) rather than a Conductor means the hub still
-// does not know what a Conductor is.
+// channel. Keeping this a plain function rather than a Conductor means the hub
+// still does not know what a Conductor is.
+//
+// The hook RETURNS an optional frame (issue .3.7), and the hub fans that frame
+// out itself. That shape is load-bearing, and it is the whole reason the
+// listener count can reach listeners at all:
+//
+//   - The hook runs ON THE HUB GOROUTINE. If the count frame were broadcast by
+//     calling Hub.Broadcast from inside the hook, the send would be to the
+//     unbuffered h.broadcast channel of the goroutine that is currently
+//     executing the hook — a goroutine that cannot reach its own select until
+//     the hook returns. It would deadlock, and every listener would hang with
+//     it. Handing the bytes back and delivering them inline cannot deadlock,
+//     because delivery is the same non-blocking fan-out every broadcast uses.
+//   - It also costs NO ordering. The frame is queued before the command that
+//     caused it is replied to, so count frames and performance frames are
+//     totally ordered by this one goroutine. A hook that instead dispatched the
+//     broadcast onto a goroutine of its own would put the count frames in a
+//     different order from the performance frames they interleave with.
 //
 // The hook runs ON THE HUB GOROUTINE and must not block. That is what makes the
 // publish-before-reply ordering in run() safe to rely on: by the time Subscribe
 // or Unsubscribe returns, the count has already been published, so a caller that
 // reads state straight afterwards sees a count consistent with what it just did.
-// It also means a slow hook stalls the hub, so it has to stay cheap.
+// It also means a slow hook stalls the hub, so it has to stay cheap: encoding
+// one snapshot is bounded work, waiting on anything is not.
 //
 // Deliberately absent, and owned by later subtasks of .3:
 //
 //   - no Conductor interaction at all: the hub publishes a count and never
-//     attaches a snapshot to a new subscriber (issue .3.4), and it does not
-//     BROADCAST a count change to listeners, which is its own wire-contract
-//     change (see the "listener-count" follow-up). Subscribe hands back a
+//     attaches a snapshot to a new subscriber (issue .3.4). Subscribe hands back a
 //     channel and nothing else.
+//   - no encoding and no message framing: the hub moves opaque bytes, so the
+//     event vocabulary stays in the Conductor's layer. The count hook is not an
+//     exception — it is handed the count and returns bytes, and the hub has no
+//     idea what those bytes mean (issue .3.7).
 //   - no ping/pong, no write deadline and no dead-socket reaping (issue .3.6):
 //     wire liveness is that subtask's business, and it lives entirely in ws.go.
 //     What lives here is the bounded send guarantee it depends on: a client that
@@ -64,8 +84,6 @@ package srv
 //     A reaper needs no help from this file — it ends the handler, and the
 //     handler's deferred Unsubscribe is what publishes the decremented count
 //     through the hook above.
-//   - no encoding and no message framing: the hub moves opaque bytes, so the
-//     event vocabulary stays in the Conductor's layer.
 
 import (
 	"errors"
@@ -140,7 +158,11 @@ type Hub struct {
 	// written once, by the constructor, before the hub goroutine is started, and
 	// only ever READ by that goroutine — so it needs no lock and cannot race.
 	// A nil hook means the hub reports nothing, which is what NewHub gives.
-	onCount func(int)
+	//
+	// A non-nil return value is a frame the hub delivers to every subscriber
+	// except the one that caused the change (issue .3.7); a nil return means
+	// "the count changed, publish it, but there is nothing to say to anyone".
+	onCount func(int) []byte
 }
 
 type subscribeReq struct {
@@ -174,10 +196,15 @@ func NewHub(sendBuffer int) *Hub {
 // a listener is sent on connect could therefore report a count that excludes the
 // listener reading it.
 //
+// Whatever frame onCount returns is delivered by the hub itself, to every
+// subscriber EXCEPT the one whose arrival or departure caused the change (see
+// the file header for why the hub, and only the hub, does the delivering).
+//
 // onCount must not block: it runs on the one goroutine that owns the subscriber
 // set, so a slow hook stalls fan-out for every listener. It must also not call
-// back into the Hub, which would deadlock against the command being served.
-func NewHubWithCountHook(sendBuffer int, onCount func(int)) *Hub {
+// back into the Hub, which would deadlock against the command being served —
+// returning the frame is how it avoids having to.
+func NewHubWithCountHook(sendBuffer int, onCount func(int) []byte) *Hub {
 	if sendBuffer <= 0 {
 		sendBuffer = HubDefaultSendBuffer
 	}
@@ -324,17 +351,78 @@ func (h *Hub) Close() {
 // imply "the published count already includes this subscriber", so the catch-up
 // snapshot a listener reads on connect cannot report a count that excludes it.
 // Publishing after the reply would leave exactly that window open.
+//
+// The cause argument is the subscriber whose arrival or departure changed the
+// set, and nil for a change the hub decided on itself (a drop, a close). It is
+// excluded from the delivered count frame: the listener that just connected has
+// already been handed this count in its snapshot, and one that just left has a
+// closed channel to read it from.
 func (h *Hub) run() {
 	defer close(h.done)
 
 	subs := make(map[*Subscriber]struct{})
 
-	// publishCount reports the live count to the hook, if there is one. It is
-	// the single place the count leaves the hub, so the four transitions below
-	// cannot drift apart in how — or whether — they report.
-	publishCount := func() {
-		if h.onCount != nil {
-			h.onCount(len(subs))
+	// fanOut delivers one frame to the whole set minus skip, dropping any
+	// subscriber that cannot keep up, and publishes the new count for each drop
+	// it causes (issue .3.7) — a dropped subscriber is a count change like any
+	// other, and its peers are owed the same frame a clean disconnect produces.
+	//
+	// A drop during the delivery of a count frame drops another subscriber,
+	// whose drop is a further count change. Re-publishing until the set stops
+	// shrinking is not recursion and cannot run away: every round either
+	// returns or strictly shrinks a finite set, so it terminates after at most
+	// one round per subscriber.
+	//
+	// There is no blocking send anywhere in here, which is the whole slow-client
+	// guarantee; skip is compared by identity and needs no lock, because only
+	// this goroutine can remove anybody from the set.
+	fanOut := func(msg []byte, skip *Subscriber) {
+		for {
+			before := len(subs)
+			for sub := range subs {
+				if sub == skip {
+					continue
+				}
+				// The subscriber's buffer is full: it is not keeping up, so
+				// it is dropped here and now rather than allowed to slow the
+				// hub down. removeSubscriber closes its channel exactly once.
+				if !h.deliver(sub, msg) {
+					removeSubscriber(subs, sub)
+				}
+			}
+			// Guarded on an actual change, so a delivery nobody was dropped
+			// from publishes nothing: a hook call on every message would be
+			// noise, and would make "the count was published" indistinguishable
+			// from "the count changed".
+			if len(subs) == before {
+				return
+			}
+			if h.onCount == nil {
+				return
+			}
+			// The drop is a further count change, so it gets its own frame. The
+			// subscriber the whole chain started for is still skipped: the
+			// contract is that a listener never receives a count frame as a
+			// consequence of its OWN arrival, however many drops happened to
+			// land in the same breath. It learns the lower count from the next
+			// event, which carries the count like every other frame does.
+			msg = h.onCount(len(subs))
+			if msg == nil {
+				return
+			}
+		}
+	}
+
+	// publishCount reports the live count to the hook, if there is one, and
+	// delivers whatever frame the hook answers with. It is the single place the
+	// count leaves the hub, so the four transitions below cannot drift apart in
+	// how — or whether — they report.
+	publishCount := func(cause *Subscriber) {
+		if h.onCount == nil {
+			return
+		}
+		if frame := h.onCount(len(subs)); frame != nil {
+			fanOut(frame, cause)
 		}
 	}
 
@@ -343,7 +431,7 @@ func (h *Hub) run() {
 		case req := <-h.subscribe:
 			sub := &Subscriber{ch: make(chan []byte, h.sendBuffer)}
 			subs[sub] = struct{}{}
-			publishCount()
+			publishCount(sub)
 			req.reply <- sub
 
 		case req := <-h.unsubscribe:
@@ -353,7 +441,7 @@ func (h *Hub) run() {
 			// one racing a drop) must not publish a value that implies a
 			// change nobody made.
 			if removed {
-				publishCount()
+				publishCount(req.sub)
 			}
 			req.reply <- removed
 
@@ -361,28 +449,7 @@ func (h *Hub) run() {
 			reply <- len(subs)
 
 		case msg := <-h.broadcast:
-			before := len(subs)
-			for sub := range subs {
-				if !h.deliver(sub, msg) {
-					// The subscriber's buffer is full: it is not keeping up, so
-					// it is dropped here and now rather than allowed to slow the
-					// hub down. removeSubscriber closes its channel exactly once.
-					removeSubscriber(subs, sub)
-				}
-			}
-			// A drop is invisible to the listener's own handler — it only ever
-			// learns its channel closed — so this is the ONLY place the count
-			// can learn about it. Published once after the loop rather than per
-			// drop, so N dropped subscribers produce one publish of the final
-			// count rather than N publishes of intermediate ones.
-			//
-			// Guarded on an actual change, so a broadcast nobody was dropped
-			// from publishes nothing: a hook call on every message would be
-			// noise, and would make "the count was published" indistinguishable
-			// from "the count changed".
-			if len(subs) != before {
-				publishCount()
-			}
+			fanOut(msg, nil)
 
 		case reply := <-h.closeReq:
 			for sub := range subs {
@@ -390,8 +457,9 @@ func (h *Hub) run() {
 			}
 			// The final count is 0, and it is published before Done closes, so
 			// a caller that has waited for Hub.Close knows the count is already
-			// 0 without polling for it.
-			publishCount()
+			// 0 without polling for it. Nobody is left to hear it, so the frame
+			// the hook may answer with has nowhere to go.
+			publishCount(nil)
 			close(reply)
 			return
 		}

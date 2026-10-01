@@ -16,6 +16,7 @@ These are easy to break and each has tests. Changes should expect failures until
 
 * One goroutine exclusively owns the subscriber set.
 * It is independent of the Conductor and wire format and broadcasts one encoded `[]byte` to subscribers.
+* The optional count hook is `func(int) []byte`: it is handed the count and returns a frame the HUB delivers, to every subscriber except the one that caused the change. It must not call back into the Hub — it runs on the hub goroutine, so that deadlocks.
 * `SubscriberCount` is a synchronous round-trip and can block forever if the hub wedges.
 * Slow subscribers are dropped and their channel is closed exactly once; a double close would panic (mutation `28-hub-double-close-allowed`).
 * Hub shutdown and subscriber drop both appear as channel closure.
@@ -39,8 +40,6 @@ These are easy to break and each has tests. Changes should expect failures until
 
 Do not assume these features work; they remain open work.
 
-* No additional message encoding beyond the single `{"kind","snapshot"}`
-  frame: the count change is still not an event of its own.
 * No browser client/audio playback exists yet. `/` and `srv/static/` are still the template content.
 * The verified fan-out path stops at the API: nothing yet proves a listener
   renders what it receives, because there is no browser client.
@@ -64,8 +63,8 @@ Recorded here so the "not yet wired" list above cannot quietly become wrong.
   error)`: a nil error alone cannot tell "stored" from "understood and dropped as
   stale", and the stale case must not broadcast.
 * **Listener count** (`srv/hub.go`, `srv/server.go`): the hub goroutine owns the
-  subscriber set, so it publishes the count through an optional `func(int)` hook
-  that `New` wires to `Conductor.SetListenerCount`. Two properties are
+  subscriber set, so it publishes the count through an optional `func(int) []byte`
+  hook that `New` wires to `Server.listenerCountFrame`. Two properties are
   load-bearing and each has a mutation:
   - **The hook fires BEFORE the command is acknowledged.** `srv/ws.go` subscribes
     and then immediately snapshots, so publishing afterwards would let a
@@ -77,8 +76,30 @@ Recorded here so the "not yet wired" list above cannot quietly become wrong.
   - **A drop publishes too.** The hub drops a slow subscriber from its own
     goroutine, so a count maintained by the ws handler would go stale until that
     handler happened to wake. A broadcast that drops nobody publishes nothing.
-  The count is deliberately NOT broadcast as an event: that is a wire-contract
-  change, tracked separately.
+* **Listener-count frames** (`srv/event.go`, `srv/hub.go`, `srv/server.go`): a
+  connect, a disconnect and a drop each send one `listener-count` frame to
+  every OTHER listener. Three decisions are load-bearing, and each is a place a
+  later change could quietly undo:
+  - **The hook RETURNS the frame; the hub delivers it.** The hook runs on the hub
+    goroutine, so a hook that called `Hub.Broadcast` would send on the unbuffered
+    channel of the goroutine executing it — a deadlock that takes every listener
+    with it. Handing the bytes back keeps delivery on the one goroutine that owns
+    the set, which is also why count frames stay totally ordered with performance
+    frames instead of racing a goroutine of their own. Mutations 65 and 68 break
+    each half of this (never built, built and thrown away).
+  - **The listener that caused the change is excluded.** `srv/ws.go` snapshots
+    AFTER `Subscribe` returns, so the connecting listener already holds this
+    exact count; a second copy right after the frame every client decodes on
+    connect would be noise, and the count frame would need a per-client special
+    case. Mutation 67 sends it anyway.
+  - **No coalescing.** A burst of N connects produces N frames, in order. That is
+    affordable because the frames are queued before the hub acknowledges each
+    change, so by the time `/api/state` shows the final count every frame is
+    already delivered and a client applying them in order lands exactly where the
+    server is.
+  The count frame never bumps the version (`SetListenerCount` does not touch it,
+  mutation 60) and is documented in `AGENT_API.md`, which is where a new kind has
+  to be recorded.
 * **Keepalive and dead-client reaping** (`srv/ws.go`, `srv/server.go`): each
   listener is pinged every `wsPingInterval` (30s) and reaped if it cannot answer
   within `wsPongTimeout` (5s). Two properties are load-bearing:

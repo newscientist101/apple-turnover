@@ -189,10 +189,15 @@ type hubCountLog struct {
 	counts []int
 }
 
-func (l *hubCountLog) record(n int) {
+func (l *hubCountLog) record(n int) []byte {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.counts = append(l.counts, n)
+	// No frame: this log exists to test the PUBLICATION half of the hook, and a
+	// hook that answered with bytes would have them fanned out to the other
+	// subscribers these tests also hold. hubFramedCountedHub covers the
+	// delivery half.
+	return nil
 }
 
 func (l *hubCountLog) all() []int {
@@ -216,7 +221,33 @@ func (l *hubCountLog) last() (int, bool) {
 func hubCountedHub(t *testing.T, sendBuffer int) (*Hub, *hubCountLog) {
 	t.Helper()
 	log := &hubCountLog{}
-	h := NewHubWithCountHook(sendBuffer, log.record)
+	return hubFramedCountedHubWith(t, sendBuffer, log.record), log
+}
+
+// hubCountFramePrefix marks the bytes a framed hook answers with, so a test can
+// tell a count frame apart from any other message its subscriber also receives.
+const hubCountFramePrefix = "count-frame:"
+
+// hubFramedCountedHub is hubCountedHub with a hook that also ANSWERS: it returns
+// a frame naming the count it was given, exactly as the Server's real hook does
+// (issue .3.7). It exists so the hub's DELIVERY half can be tested without a
+// Conductor or a socket, and so the bytes are recognisable.
+func hubFramedCountedHub(t *testing.T, sendBuffer int) (*Hub, *hubCountLog) {
+	t.Helper()
+	log := &hubCountLog{}
+	hook := func(n int) []byte {
+		log.record(n)
+		return []byte(fmt.Sprintf("%s%d", hubCountFramePrefix, n))
+	}
+	return hubFramedCountedHubWith(t, sendBuffer, hook), log
+}
+
+// hubFramedCountedHubWith builds a counted hub from an arbitrary hook, with the
+// shared bounded teardown. It is the one place a counted hub is constructed, so
+// every variant below gets the same wedge-detecting cleanup.
+func hubFramedCountedHubWith(t *testing.T, sendBuffer int, onCount func(int) []byte) *Hub {
+	t.Helper()
+	h := NewHubWithCountHook(sendBuffer, onCount)
 
 	t.Cleanup(func() {
 		closed := make(chan struct{})
@@ -227,7 +258,39 @@ func hubCountedHub(t *testing.T, sendBuffer int) (*Hub, *hubCountLog) {
 			t.Errorf("Hub.Close did not return within %s: the hub goroutine is wedged", hubShutdownTimeout)
 		}
 	})
-	return h, log
+	return h
+}
+
+// hubWantCountFrame requires sub's next message to be the count frame naming
+// want. It is a positive assertion, not a quiet window: the frame is already
+// queued by the time the count that caused it has been published, so a silent
+// channel here is the defect.
+func hubWantCountFrame(t *testing.T, sub *Subscriber, want int, what string) {
+	t.Helper()
+	want2 := []byte(fmt.Sprintf("%s%d", hubCountFramePrefix, want))
+	got, closed, ok := hubRecvWithin(sub, hubRecvTimeout)
+	switch {
+	case !ok:
+		t.Fatalf("%s: no frame within %s, want %q", what, hubRecvTimeout, want2)
+	case closed:
+		t.Fatalf("%s: the subscriber's channel is closed, want %q", what, want2)
+	case !bytes.Equal(got, want2):
+		t.Fatalf("%s: frame = %q, want %q", what, got, want2)
+	}
+}
+
+// hubWantNoMessage requires that sub receives NO message within d. It is the
+// bounded negative counterpart to hubWantCountFrame: a non-blocking peek cannot
+// distinguish "nothing yet" from "nothing ever".
+func hubWantNoMessage(t *testing.T, sub *Subscriber, d time.Duration, what string) {
+	t.Helper()
+	got, closed, ok := hubRecvWithin(sub, d)
+	switch {
+	case ok && closed:
+		t.Fatalf("%s: the subscriber's channel is closed, which is a different defect from being sent nothing", what)
+	case ok:
+		t.Fatalf("%s: the subscriber received %q, want nothing at all", what, got)
+	}
 }
 
 // hubWantPublished requires the hook's most recent published count to be want,
@@ -276,6 +339,95 @@ func hubWantNoPublish(t *testing.T, log *hubCountLog, d time.Duration) {
 	if after := len(log.all()); after != before {
 		t.Fatalf("the count hook published %d extra value(s) in %s with no subscriber-set change: %v", after-before, d, log.all()[before:])
 	}
+}
+
+// TestHubCountHookFrameReachesEveryoneExceptTheCause is the hub's half of issue
+// .3.7: the bytes the count hook answers with are delivered by the hub, to
+// everyone it has to tell and to nobody it does not.
+//
+// The exclusion is the part that is easy to get wrong in both directions. A hub
+// that sent the frame to the listener that just connected would put a second
+// copy of the count that listener was just handed in its snapshot; a hub that
+// sent it to nobody would make the whole mechanism decorative. So both halves
+// are asserted, per transition, here at the level where the decision is made.
+func TestHubCountHookFrameReachesEveryoneExceptTheCause(t *testing.T) {
+	h, log := hubFramedCountedHub(t, HubDefaultSendBuffer)
+
+	// The first subscriber causes the first count change. There is nobody else
+	// to tell, and it is excluded anyway, so it is told nothing.
+	first := hubSub(t, h)
+	hubWantPublished(t, log, 1)
+	hubWantNoMessage(t, first, 50*time.Millisecond, "the first subscriber, told about its own arrival")
+
+	// The second arrives: the FIRST is told, and the second is not.
+	second := hubSub(t, h)
+	hubWantPublished(t, log, 2)
+	hubWantCountFrame(t, first, 2, "the first subscriber, told that a second listener arrived")
+	hubWantNoMessage(t, second, 50*time.Millisecond, "the second subscriber, told about its own arrival")
+
+	// A clean disconnect reaches whoever is left. The departing subscriber is
+	// already out of the set, so its exclusion is not what keeps the frame away
+	// from it — the closed channel is — and that is asserted too.
+	if !h.Unsubscribe(second) {
+		t.Fatal("Unsubscribe of a live subscriber returned false, want true")
+	}
+	hubWantPublished(t, log, 1)
+	hubWantCountFrame(t, first, 1, "the first subscriber, told that a listener left")
+	hubWantClosed(t, second)
+	hubWantNoMessage(t, first, 50*time.Millisecond, "the first subscriber, told nothing further")
+}
+
+// TestHubCountHookFrameReachesTheSurvivorsOfADrop covers the transition the
+// dropped listener's own handler cannot report on its own.
+//
+// A subscriber dropped for not keeping up is removed from the hub goroutine's
+// map without anything in its handler running, so a count maintained by the
+// handler would go stale and — worse — its peers would never be told. The
+// survivor must learn the count fell, with the same frame a clean disconnect
+// produces.
+//
+// The buffer here is deliberately tiny (2) rather than the production 64: the
+// survivor has to keep up BY CONSTRUCTION, because a survivor fed by a draining
+// goroutine can still lose a race against a fast burst and be dropped alongside
+// the slow one — and then this test would pass for the wrong reason. Draining
+// the survivor in the test goroutine between broadcasts, with a buffer of 2,
+// makes "only the slow one is dropped" a fact about the arithmetic rather than
+// about scheduling.
+func TestHubCountHookFrameReachesTheSurvivorsOfADrop(t *testing.T) {
+	const sendBuffer = 2
+	h, log := hubFramedCountedHub(t, sendBuffer)
+
+	fast := hubSub(t, h)
+	slow := hubSub(t, h)
+	hubWantPublished(t, log, 2)
+	hubWantCountFrame(t, fast, 2, "the survivor, told that a second subscriber arrived")
+
+	// Two broadcasts fill the slow subscriber's buffer; the third cannot fit and
+	// it is dropped. The survivor is drained after each, so it never fills.
+	broadcast := []byte(`{"kind":"code"}`)
+	for i := 1; i <= sendBuffer; i++ {
+		h.Broadcast(broadcast)
+		hubWantMessage(t, fast, broadcast)
+	}
+	h.Broadcast(broadcast)
+
+	// The round-trip below is what makes the drop a fact rather than a race.
+	// Broadcast returns as soon as the hub has TAKEN the message, so without it
+	// the assertion that follows would run CONCURRENTLY with the fan-out — and
+	// hubWantClosed drains the channel it is checking, which empties the very
+	// buffer the drop depends on. Read that race the wrong way and the slow
+	// subscriber is handed a free slot, keeps its messages, and the test fails
+	// (or passes) on scheduling alone. Measured: exactly that, 5 runs out of 5.
+	if got := hubSubscriberCount(t, h); got != 1 {
+		t.Fatalf("the hub holds %d subscribers after the third broadcast, want 1: the slow subscriber's buffer was not full, so no drop — and no count change — happened at all", got)
+	}
+	hubWantClosed(t, slow)
+
+	// The count fell, and the survivor was told: the last broadcast it took is
+	// still ahead of the count frame the drop produced.
+	hubWantMessage(t, fast, broadcast)
+	hubWantCountFrame(t, fast, 1, "the survivor, told the count fell after a drop")
+	hubWantNoMessage(t, fast, 50*time.Millisecond, "the survivor, told nothing further")
 }
 
 // TestHubCountHookReportsEveryTransition is the hub's half of issue .3.5: the
@@ -362,9 +514,12 @@ func TestHubCountHookIsPublishedBeforeTheCommandIsAnswered(t *testing.T) {
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 
-	h := NewHubWithCountHook(HubDefaultSendBuffer, func(n int) {
+	h := NewHubWithCountHook(HubDefaultSendBuffer, func(n int) []byte {
 		entered <- n
 		<-release
+		// No frame: this test is about WHEN the hook runs, and a frame would
+		// be delivered to subscribers this hub has not got.
+		return nil
 	})
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })

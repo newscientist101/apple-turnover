@@ -89,6 +89,11 @@ del "static 'still the template assets'"   "still the template.s assets"
 # and was deliberately removed from README by owner decision, not relocated.
 del "Authorization proxy headers"          "## Authorization"
 del "X-ExeDev-UserID header"               "X-ExeDev-UserID"
+# The Go module was renamed off the template's srv.exe.dev path when epic
+# strudel-agent-rka closed, so that identity cannot drift back into user-facing
+# docs. (docs/mutation-bench/ still quotes the old name: those are recorded
+# measurements taken at a named commit, not live configuration.)
+del "old exe.dev module path"              "srv\.exe\.dev"
 
 echo "== (D) KEEP in README =="
 keep "title Strudel Agent"      "^# Strudel Agent|Strudel Agent"

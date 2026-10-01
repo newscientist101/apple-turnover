@@ -1,4 +1,4 @@
-module srv.exe.dev
+module strudelagent
 
 go 1.27.1
 

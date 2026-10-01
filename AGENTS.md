@@ -116,6 +116,31 @@ Recorded here so the "not yet wired" list above cannot quietly become wrong.
   exercise the real policy in milliseconds. Mutation 63 removes the pong
   deadline and wedges instead of failing.
 
+* **The agent contract doc is machine-checked** (`AGENT_API.md`,
+  `srv/agent_api_doc_test.go`, issue strudel-agent-3vo.9.2): the document an
+  external agent codes against is held to the source and to a running server, in
+  both directions, and a check that cannot find what it is looking for FAILS
+  rather than skips. Three things are load-bearing, and each was proved by a RED
+  before being believed:
+  - **The payload shapes are compared to a LIVE server, not to the source.**
+    `TestReadmeAPITableMatchesRoutes` and the event-kind check both read source,
+    so a json tag renamed in `srv/conductor.go` leaves them perfectly happy while
+    every agent reading the doc breaks. Only driving the real handler tree and
+    diffing live bytes catches that.
+  - **Request shapes are pinned from both sides.** A body with exactly the
+    documented fields must be accepted AND the same body plus one undocumented
+    field must be rejected, which is what stops the doc from under-claiming
+    (a field the server accepts but nobody wrote down).
+  - **The frame-table parse is anchored.** The snapshot's field table is written
+    in the same markdown shape as the frame-kind table, so an unscoped row scan
+    reports `version` and `code` as frame kinds the server never sends — a check
+    that cries wolf on the document's own tables trains the next agent to ignore
+    it. `<!-- frame-kinds -->` scopes it.
+  The anchors (`<!-- shape:NAME -->`, `<!-- frame-kinds -->`) are load-bearing:
+  a document with several ```json fences is otherwise ambiguous, and a check
+  that binds to the wrong block is a coin flip. `TestAgentAPIDocShapesAreStable`
+  asserts the anchor set, so the set of checked shapes cannot quietly shrink.
+
 ## Verification conventions
 
 `make verify` is the repo gate:

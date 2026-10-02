@@ -63,6 +63,13 @@ pull/push does:
   last-write-wins on issue cells). Anything beyond those is **never**
   auto-resolved.
 
+**Git hooks.** The bd gate is installed via `bd hooks install --shared`, which
+writes the five shims to the *committed* `.beads-hooks/` directory and points
+`core.hooksPath` at it (local config, so each clone re-runs the install). The
+shims are marker-managed (`# --- BEGIN/END BEADS INTEGRATION ---`) and delegate
+to `bd hooks run <hook>`, so a bd upgrade changes behavior without a reinstall
+and any non-bd content outside the markers is preserved.
+
 Branch on the exit code rather than parsing output:
 
 | code | meaning | action |
@@ -99,6 +106,12 @@ Repeated runs keep halting the same way for exit 2 — it is not self-healing.
   when an agent crashed mid-task, with `--older-than` as a grace window past
   expiry (roughly 2x the claim TTL) so a worker briefly paused by GC or clock
   skew is not robbed of live work.
+* **Verify the claim/close, not the sync.** A clean `bd sync` (exit 0) only
+  reports on the sync; it does **not** mean a preceding `--claim` or `close`
+  applied. Assert on the claim/close exit code *and* on `bd show <id> --json`
+  state (`status`/`assignee`), never on `bd sync`'s exit code. The read can also
+  lag the write by an instant, so confirm the transition rather than trusting a
+  single read taken the moment the write returns.
 
 `bd update --force` overrides another actor's **live** `in_progress` claim. Use
 it only for genuinely abandoned claims, and prefer `bd reclaim`, which

@@ -102,12 +102,51 @@
     }
   }
 
+  // showCode routes every version through the live code view adapter
+  // (window.strudelEditor, issue .3vo.6) when it exists, falling back to the
+  // plain textarea when the editor module has not loaded. The adapter owns
+  // the CodeMirror instance or the textarea value; nothing here touches
+  // either directly, so the human-edit path can be added inside the adapter
+  // without reworking this flow.
+  //
+  // A version that has just arrived replaces what is on screen, so any
+  // eval-error highlight left from the PREVIOUS version no longer describes
+  // the document in view: it is cleared here, and re-applied by
+  // showEvalError only if this version fails in turn. The landed-version
+  // flash is emitted here too, so the cue is tied to the arrival rather than
+  // to the verdict.
   function showCode(snapshot) {
-    var editor = document.getElementById("editor");
-    if (editor && snapshot && typeof snapshot.code === "string") {
+    if (!snapshot || typeof snapshot.code !== 'string') {
+      return;
+    }
+    var ed = (typeof window !== 'undefined' && window.strudelEditor) || null;
+    if (ed && typeof ed.setCode === 'function') {
+      ed.setCode(snapshot.code);
+      if (typeof ed.flashUpdate === 'function') {
+        ed.flashUpdate();
+      }
+      clearEvalError();
+      return;
+    }
+    var editor = document.getElementById('editor');
+    if (editor) {
       if (document.activeElement !== editor) {
         editor.value = snapshot.code;
       }
+    }
+  }
+
+  function showEvalError(message) {
+    var ed = (typeof window !== 'undefined' && window.strudelEditor) || null;
+    if (ed && typeof ed.markError === 'function') {
+      ed.markError(message);
+    }
+  }
+
+  function clearEvalError() {
+    var ed = (typeof window !== 'undefined' && window.strudelEditor) || null;
+    if (ed && typeof ed.clearError === 'function') {
+      ed.clearError();
     }
   }
 
@@ -144,6 +183,7 @@
         ? String((evalError && evalError.message) || evalError)
         : "evaluation produced no pattern";
       console.warn("[session] version " + version + " failed validation:", message);
+      showEvalError(message);
       return postEvalResult(version, false, message, { haps: 0 });
     }
 
@@ -156,6 +196,7 @@
     } catch (err) {
       var commitMessage = String((err && err.message) || err);
       console.warn("[session] version " + version + " failed to commit:", commitMessage);
+      showEvalError(commitMessage);
       return postEvalResult(version, false, commitMessage, { haps: 0 });
     }
     currentPattern = pattern;
@@ -195,11 +236,17 @@
       }
       // Transport / message / eval-result / listener-count frames carry the
       // same snapshot shape: keep panels fresh, but only new code versions
-      // go through validate-then-commit.
+      // go through validate-then-commit. A failing eval-result verdict for
+      // the version on screen also highlights the view, so a failure
+      // reported by another listener is visible here too.
       showMessage(snapshot);
       if (frame.kind !== "code" && frame.kind !== "snapshot") {
         if (typeof snapshot.version === "number") {
           lastVersion = Math.max(lastVersion, snapshot.version);
+        }
+        if (frame.kind === "eval-result" && snapshot.lastEvalResult &&
+            !snapshot.lastEvalResult.ok && snapshot.lastEvalResult.error) {
+          showEvalError(snapshot.lastEvalResult.error);
         }
         return;
       }

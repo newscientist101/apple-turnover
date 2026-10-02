@@ -83,6 +83,16 @@ trap 'restore_all; rm -rf "$BACKUP_DIR"' EXIT
 # struct: against nil data the same mutation renders empty and SURVIVES, so the
 # grid fails loudly if anyone "simplifies" pageData away.
 #
+# The anchor itself was re-pointed in issue strudel-agent-3vo.6: it had named an
+# `<h1>Strudel Agent</h1>` that the three-region shell (commit 2450f53) deleted,
+# so the row had been reporting BROKEN — the grid could no longer see the defect
+# it exists to catch, and only running it end to end said so. The anchor is now
+# the agent-message TEXT node (the `<h1>`'s closest surviving analogue: body
+# content, before </main>, appearing exactly once), which the same substitution
+# turns into an unresolvable field reference. An unresolvable ACTION is what
+# aborts the render, so the replacement must keep the `{{...}}` braces — a
+# mutation that merely deleted the text would render fine and SURVIVE.
+#
 # Rows 61-64 cover the keepalive reaper (issue strudel-agent-3vo.3.6), and they
 # constrain an EXISTING row in a way worth recording. Row 38 proves the per-write
 # deadline using TestWSWedgedListenerCannotHangTeardown: it removes the deadline
@@ -113,7 +123,7 @@ MUTATIONS=$(cat <<'EOF'
 11-message-bumps-version|srv/api.go|s.Conductor.SetMessage(req.Message)|s.Conductor.Publish(req.Message, req.Message)
 12-transport-accepts-any-body|srv/api.go|if err := rejectUnexpectedBody(r); err != nil {|if err := error(nil); false {
 13-hush-plays-instead|srv/api.go|s.handleAPITransport(w, r, false)|s.handleAPITransport(w, r, true)
-14-shell-render-silently-truncates|srv/templates/welcome.html|      <h1>Strudel Agent</h1>|      <h1>{{.NoSuchField}}</h1>
+14-shell-render-silently-truncates|srv/templates/welcome.html|System initialized. Awaiting agent input...|{{.NoSuchField}}
 15-eval-accepts-future-version|srv/conductor.go|res.Version > c.version {|res.Version > c.version+1 {
 16-eval-result-not-stored|srv/conductor.go|c.lastEval = &stored|_ = stored
 17-stale-report-regresses|srv/conductor.go|if c.lastEval != nil && res.Version < c.lastEval.Version {|if false {
@@ -173,6 +183,11 @@ MUTATIONS=$(cat <<'EOF'
 71-cli-swalows-the-servers-reason|cmd/agentcli/client.go|\treturn probe.Error|\treturn "request failed" // deliberately: the server's exact reason is replaced by a generic one|TestRejectionIsReportedVerbatimAndFails|TestOversizedDocumentIsRejectedByTheServer
 72-cli-reports-a-stale-verdict-as-stored|cmd/agentcli/commands.go|\tstale := before.LastEvalResult != nil && *ver < before.LastEvalResult.Version|\tstale := false // deliberately: "accepted" is reported as "stored"|TestEvalResultDistinguishesStoredFromIgnored
 73-cli-hush-noop-reported-as-a-change|cmd/agentcli/commands.go|\tif before.Playing == playing {|\tif before.Playing != playing && false { // deliberately: an idempotent no-op is reported as a change|TestTransportReportsANoopAsANoop
+74-livecode-editor-adapter-not-loaded|srv/templates/welcome.html|    <script src="/static/editor.js" defer></script>|    <!-- deliberately: the editor adapter is never loaded -->|TestLiveCodeEditorView
+75-livecode-view-writable|srv/templates/welcome.html|spellcheck="false" readonly aria-readonly="true"|spellcheck="false" aria-readonly="false"|TestLiveCodeEditorView
+76-livecode-error-region-not-highlighted|srv/static/editor.js|cm.addLineClass(line, 'background', 'editor-error-line');|void line; // deliberately: the failing region is not highlighted|TestLiveCodeEditorView
+77-livecode-flash-cue-dropped|srv/static/editor.js|root.classList.add('editor-flash');|void root; // deliberately: no landed-version flash|TestLiveCodeEditorView
+78-livecode-code-never-shown|srv/static/session.js|      ed.setCode(snapshot.code);|      // deliberately: the arriving version is not shown|TestLiveCodeEditorView
 EOF
 )
 

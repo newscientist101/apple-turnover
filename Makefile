@@ -52,12 +52,17 @@ verify:
 #
 # The outer timeout bounds the whole grid: each mutation costs one full test run
 # (and the deliberate wedge/binary-search mutations cost the go test timeout),
-# so the wall time grows with the number of mutations. It is ~582 seconds for
-# 69 mutations, measured end to end on an otherwise idle machine (9m42.2s real,
-# 69 caught / 0 survived / 0 weak / 0 broken, issue strudel-agent-3vo.3.7, which
-# added rows 65-69 and re-anchored six older ones). That leaves 2400s of
-# headroom — over 4x, because a loaded machine is exactly the case the bound
-# exists for. Raise it when the grid grows; do not lower it toward the measured
-# figure.
+# so the wall time grows with the number of mutations. It is ~581 seconds for
+# 78 mutations, measured end to end on this machine (WALL_SECONDS=581, rc=0,
+# 78 caught / 0 survived / 0 weak / 0 broken, issue strudel-agent-3vo.6, which
+# added rows 74-78 for the live code view and re-anchored row 14). The previous
+# figure was ~582 seconds for 69 rows (issue strudel-agent-3vo.3.7, which added
+# rows 65-69 and re-anchored six older ones). The nine rows added since then
+# (70-78) cost about nothing extra because every one is ROUTED to a narrow -run
+# regex: of the 78 rows, 45 are routed and only 33 pay for a whole-suite run,
+# and the whole-suite runs are the ones the wall time is made of.
+# 2400s is still over 4x the measured figure, because a loaded machine is
+# exactly the case the bound exists for. Raise it when the grid grows; do not
+# lower it toward the measured figure.
 mutation-check:
 	timeout 2400 ./scripts/mutation-check.sh

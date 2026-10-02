@@ -1117,7 +1117,7 @@ func tailOf(s string, n int) string {
 func TestIntegrationStaticAssets(t *testing.T) {
 	s := newIntegrationSession(t)
 
-	for _, path := range []string{"/static/style.css", "/static/session.js"} {
+	for _, path := range []string{"/static/style.css", "/static/session.js", "/static/editor.js"} {
 		t.Run(path, func(t *testing.T) {
 			w := s.get(path)
 			wantStatus(t, w, http.StatusOK)
@@ -1133,7 +1133,7 @@ func TestIntegrationStaticAssets(t *testing.T) {
 	// The shell references the stylesheet, so a renamed file would break the page
 	// even though the static mount itself still works.
 	shell := body(s.get("/"))
-	for _, ref := range []string{"/static/style.css", "/static/session.js"} {
+	for _, ref := range []string{"/static/style.css", "/static/session.js", "/static/editor.js"} {
 		wantContains(t, shell, ref, "GET / body")
 	}
 }

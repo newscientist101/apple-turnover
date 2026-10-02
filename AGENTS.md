@@ -4,10 +4,10 @@ Do not put build/run instructions here, and do not put invariants in the README.
 
 ## Task tracking: beads (`bd`)
 
-Tasks live in a beads database (embedded Dolt, database `strudel_agent`). **On a
-fresh clone the database does not exist** — the Dolt history is published to the
-git origin under `refs/dolt/data`, which a plain `git clone` does not fetch.
-Bootstrap it before doing anything else:
+Tasks live in a beads database (embedded Dolt, database `strudel_agent`, schema
+v66). **On a fresh clone the database does not exist** — the Dolt history is
+published to the git origin under `refs/dolt/data`, which a plain `git clone`
+does not fetch. Bootstrap it before doing anything else:
 
 ```bash
 bd bootstrap      # clones refs/dolt/data from origin and wires the Dolt remote
@@ -15,6 +15,23 @@ bd bootstrap      # clones refs/dolt/data from origin and wires the Dolt remote
 
 `bd bootstrap` is non-destructive and idempotent; on an already-bootstrapped
 workspace `bd dolt pull` is the cheaper way to catch up.
+
+**Keep bd versions aligned across machines.** The schema is part of the shared
+contract: bd refuses in-place migration on a remote-backed database precisely
+because two clones migrating independently fork the schema so that
+`bd dolt pull` can no longer merge — silently and unrecoverably. So migrations
+run once, by a single designated migrator, who then publishes:
+
+```bash
+bd dolt push      # publish a migrated schema (see `bd migrate` --force)
+```
+
+An installer that takes *latest* bd will pull a version whose bootstrap rewrites
+`.beads/config.yaml` and `.beads/.gitignore`, which dirties the tree in a way
+that looks like a setup failure. `sync.remote` is nested under `sync:` in the
+current format; a clone whose bootstrap prints "Smart gate (BD_SMART_GATE):
+auto-applying N pending schema migrations" is running an out-of-date binary
+against a newer schema — upgrade rather than resetting the tree.
 
 **Sync discipline.** The database is shared, so a task you close is visible to
 everyone and a claim you take is respected:

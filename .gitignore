@@ -8,6 +8,13 @@ bin/
 db.sqlite3
 *.sqlite3
 
+# Beads runtime locks written at the REPO ROOT, not under .beads/. A pattern in
+# .beads/.gitignore cannot cover these: that file's scope is the .beads/
+# directory, and bd writes these beside the repo root. Seen with the bd 1.3.x
+# schema gate (BD_SMART_GATE), which creates .beads.gate.lock during migration.
+*.gate.lock
+.beads.gate.lock
+
 # If you prefer the allow list template instead of the deny list, see community template:
 # https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
 #

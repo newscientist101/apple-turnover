@@ -19,6 +19,7 @@
           System initialized. Awaiting agent input...
         </div>
         <button id="play-btn" class="play-btn" aria-label="Play/Pause Audio">Play</button>
+        <button id="sample-toggle-btn" class="sample-toggle-btn" aria-label="Toggle Sample Pack">Samples: Off</button>
       </section>
 
       <!-- Main Workspace Split: Canvas (Left) and Code Editor (Right) -->
@@ -81,6 +82,53 @@
                 console.warn('Error starting REPL:', e);
               }
               updateButtonUI(true);
+            }
+          });
+        }
+
+        let samplesLoaded = false;
+        let samplesLoading = false;
+        const sampleToggleBtn = document.getElementById('sample-toggle-btn');
+
+        if (sampleToggleBtn) {
+          sampleToggleBtn.addEventListener('click', function() {
+            if (samplesLoading) return;
+
+            if (!samplesLoaded) {
+              samplesLoading = true;
+              sampleToggleBtn.textContent = 'Samples: Loading...';
+              sampleToggleBtn.classList.add('loading');
+              sampleToggleBtn.classList.remove('error');
+
+              const samplesFn = window.samples || (window.strudel && window.strudel.samples);
+              let loadPromise;
+              if (samplesFn) {
+                loadPromise = samplesFn('github:tidalcycles/dirt-samples');
+              } else if (replInstance && replInstance.evaluate) {
+                loadPromise = replInstance.evaluate('samples("github:tidalcycles/dirt-samples")');
+              } else {
+                loadPromise = Promise.reject(new Error('Samples function unavailable'));
+              }
+
+              loadPromise
+                .then(function() {
+                  samplesLoaded = true;
+                  samplesLoading = false;
+                  sampleToggleBtn.classList.remove('loading');
+                  sampleToggleBtn.classList.add('active');
+                  sampleToggleBtn.textContent = 'Samples: On';
+                })
+                .catch(function(err) {
+                  console.warn('Failed to load sample pack:', err);
+                  samplesLoading = false;
+                  sampleToggleBtn.classList.remove('loading');
+                  sampleToggleBtn.classList.add('error');
+                  sampleToggleBtn.textContent = 'Samples: Error';
+                });
+            } else {
+              samplesLoaded = false;
+              sampleToggleBtn.classList.remove('active', 'error');
+              sampleToggleBtn.textContent = 'Samples: Off';
             }
           });
         }

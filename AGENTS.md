@@ -70,6 +70,15 @@ shims are marker-managed (`# --- BEGIN/END BEADS INTEGRATION ---`) and delegate
 to `bd hooks run <hook>`, so a bd upgrade changes behavior without a reinstall
 and any non-bd content outside the markers is preserved.
 
+**Auto-push.** `dolt.auto-push: true` (committed) makes bd push the Dolt store to
+the `origin` remote after any write, including a claim, debounced by
+`dolt.auto-push-interval` (60s here; the default is 5m). This build does not
+auto-enable on the mere presence of an `origin` remote — the flag is required.
+It is **push-only**: it publishes your claims but does not pull others', so it is
+not by itself a cross-machine double-claim guard. That still needs a pull before
+claiming, or an external `bd sync` timer (the loop `bd sync --help` documents).
+Auto-push state lives in the local, gitignored `.beads/push-state.json`.
+
 Branch on the exit code rather than parsing output:
 
 | code | meaning | action |

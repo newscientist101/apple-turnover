@@ -68,3 +68,7 @@
 sync:
     remote: "git+https://github.com/newscientist101/apple-turnover.git"
 no-git-ops: false
+dolt:
+    auto-push: true
+    auto-push-interval: 60s
+

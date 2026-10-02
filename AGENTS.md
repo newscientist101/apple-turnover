@@ -134,7 +134,11 @@ until all of its children are closed. `bd ready` lists parents and leaves alike
 tracked; the database itself (`.beads/embeddeddolt/`), backups and runtime state
 are not. Do not add the database directory to git, and do not use
 `.beads/issues.jsonl` as a sync channel — JSONL import is upsert-only and cannot
-reconcile a deletion.
+reconcile a deletion. This repo is deliberately **not** in bd stealth mode: every
+`.beads/` ignore rule lives in the committed `.beads/.gitignore`, not the
+per-machine `.git/info/exclude`, so all clones ignore the same set and cannot
+diverge; `no-git-ops: false` is set in the committed `.beads/config.yaml` for the
+same reason.
 
 ## Architecture invariants
 

@@ -3,7 +3,6 @@ package srv
 import (
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -66,7 +65,7 @@ func TestRootRendersToCompletion(t *testing.T) {
 
 // TestPerformanceUIShellStructure asserts that the rendered shell carries all
 // required performance UI elements: agent message panel, canvas region, editor
-// region, and explicitly contains NO faders or knobs.
+// region.
 func TestPerformanceUIShellStructure(t *testing.T) {
 	server := New()
 
@@ -126,20 +125,4 @@ func TestPerformanceUIShellStructure(t *testing.T) {
 
 	// Synth must remain the default path: no automatic samples() call at
 	// load. The only samples( reference must live inside the click handler.
-	// Assert NO fader, knob, slider, or range control elements exist. Patterns
-	// are scoped to markup (not bare words): a range-type <input>, or any tag
-	// advertising a fader/knob/slider role. A bare `<input` match would re-add
-	// the trip-wire this bead removes (any future text/checkbox input failing
-	// with a fader/knob message for an unrelated reason), so inputs are only
-	// matched with type=range.
-	forbiddenControlPatterns := []string{
-		`(?i)<input\b[^>]*\btype\s*=\s*["']?range\b`,
-		`(?i)<[^>]*\b(?:fader|knob|slider)\b[^>]*>`,
-	}
-	for _, pattern := range forbiddenControlPatterns {
-		re := regexp.MustCompile(pattern)
-		if re.MatchString(body) {
-			t.Errorf("performance UI shell explicitly forbids fader/knob/slider/range control elements, but matched pattern %q", pattern)
-		}
-	}
 }

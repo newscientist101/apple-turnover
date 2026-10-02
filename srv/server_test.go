@@ -3,6 +3,7 @@ package srv
 import (
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -79,7 +80,23 @@ func TestPerformanceUIShellStructure(t *testing.T) {
 
 	body := w.Body.String()
 
-	// Assert three regions exist
+	// Assert end-of-document markers to prove rendering completed without mid-template aborts.
+	for _, want := range []string{
+		"</main>",
+		"</html>",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("template did not render to completion: body is missing %q (len=%d)", want, len(body))
+		}
+	}
+	if !strings.HasSuffix(strings.TrimSpace(body), "</html>") {
+		t.Errorf("body does not END with </html>; the template aborted mid-render (len=%d)", len(body))
+	}
+	if strings.Index(body, "</main>") > strings.Index(body, "</html>") {
+		t.Error("body has </main> after </html>; unexpected document order")
+	}
+
+	// Assert required regions exist
 	requiredElements := []string{
 		`id="agent-panel"`,
 		`id="agent-message"`,
@@ -109,17 +126,20 @@ func TestPerformanceUIShellStructure(t *testing.T) {
 
 	// Synth must remain the default path: no automatic samples() call at
 	// load. The only samples( reference must live inside the click handler.
-	// Assert NO fader or knob controls exist
-	forbiddenTerms := []string{
-		"fader",
-		"knob",
-		"slider",
-		"range",
+	// Assert NO fader, knob, slider, or range control elements exist. Patterns
+	// are scoped to markup (not bare words): a range-type <input>, or any tag
+	// advertising a fader/knob/slider role. A bare `<input` match would re-add
+	// the trip-wire this bead removes (any future text/checkbox input failing
+	// with a fader/knob message for an unrelated reason), so inputs are only
+	// matched with type=range.
+	forbiddenControlPatterns := []string{
+		`(?i)<input\b[^>]*\btype\s*=\s*["']?range\b`,
+		`(?i)<[^>]*\b(?:fader|knob|slider)\b[^>]*>`,
 	}
-	bodyLower := strings.ToLower(body)
-	for _, forbidden := range forbiddenTerms {
-		if strings.Contains(bodyLower, forbidden) {
-			t.Errorf("performance UI shell explicitly forbids fader/knob controls, but contains %q", forbidden)
+	for _, pattern := range forbiddenControlPatterns {
+		re := regexp.MustCompile(pattern)
+		if re.MatchString(body) {
+			t.Errorf("performance UI shell explicitly forbids fader/knob/slider/range control elements, but matched pattern %q", pattern)
 		}
 	}
 }

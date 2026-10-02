@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "strudel_agent",
+  "project_id": "54082359-3c4a-40b8-b7f0-9bfc96c718a3"
+}

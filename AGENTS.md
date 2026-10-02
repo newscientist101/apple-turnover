@@ -2,6 +2,45 @@
 
 Do not put build/run instructions here, and do not put invariants in the README.
 
+## Task tracking: beads (`bd`)
+
+Tasks live in a beads database (embedded Dolt, database `strudel_agent`). **On a
+fresh clone the database does not exist** — the Dolt history is published to the
+git origin under `refs/dolt/data`, which a plain `git clone` does not fetch.
+Bootstrap it before doing anything else:
+
+```bash
+bd bootstrap      # clones refs/dolt/data from origin and wires the Dolt remote
+```
+
+`bd bootstrap` is non-destructive and idempotent; on an already-bootstrapped
+workspace `bd dolt pull` is the cheaper way to catch up.
+
+**Sync discipline.** The database is shared, so a task you close is visible to
+everyone and a claim you take is respected:
+
+* `bd dolt pull` **before** you read the task list, so you do not work from a
+  stale view or re-do a bead another agent already closed.
+* `bd dolt push` **after** you finish a unit of work. Unpushed work exists only
+  on your machine — this is the failure mode that loses a session's claims.
+* `bd dolt commit` first if you hit `cannot merge with uncommitted changes` on a
+  pull. Never reach for `--force` to resolve a conflict you have not read; Dolt
+  merges cell-level and the losing side is usually the stale one.
+* Claims are advisory across agents, not locks. Two agents can hold the same
+  bead; the second push to merge is what surfaces it, so keep the sync cadence
+  above rather than assuming exclusivity.
+
+**Dispatch convention.** Three levels: epic `.3vo`, task `.3`/`.4`, subtask
+`.3.2`/`.4.1`. Dispatch only leaf subtasks (two-dot IDs), and keep a parent open
+until all of its children are closed. `bd ready` lists parents and leaves
+alike — filter to the leaves.
+
+`.beads/config.yaml`, `metadata.json`, `README.md` and `.beads/.gitignore` are
+tracked; the database itself (`.beads/embeddeddolt/`), backups and runtime state
+are not. Do not add the database directory to git, and do not use
+`.beads/issues.jsonl` as a sync channel — JSONL import is upsert-only and cannot
+reconcile a deletion.
+
 ## Architecture invariants
 
 These are easy to break and each has tests. Changes should expect failures until the invariant is preserved.

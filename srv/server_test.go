@@ -92,6 +92,23 @@ func TestPerformanceUIShellStructure(t *testing.T) {
 		}
 	}
 
+	// Jules session 7393488358784355191 added the sample-pack toggle: it must
+	// default to OFF (synth-only, no automatic fetch), reference the
+	// dirt-samples pack, and degrade without breaking playback state.
+	// Assert the rendered shell carries the toggle and its default state.
+	sampleToggleMarkers := []string{
+		`id="sample-toggle-btn"`,
+		`Samples: Off`,
+		`github:tidalcycles/dirt-samples`,
+	}
+	for _, want := range sampleToggleMarkers {
+		if !strings.Contains(body, want) {
+			t.Errorf("sample pack toggle is missing expected marker %q", want)
+		}
+	}
+
+	// Synth must remain the default path: no automatic samples() call at
+	// load. The only samples( reference must live inside the click handler.
 	// Assert NO fader or knob controls exist
 	forbiddenTerms := []string{
 		"fader",

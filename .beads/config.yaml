@@ -71,4 +71,3 @@ no-git-ops: false
 dolt:
     auto-push: true
     auto-push-interval: 60s
-

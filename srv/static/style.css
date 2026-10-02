@@ -82,6 +82,35 @@ html, body {
   letter-spacing: 0.02em;
 }
 
+.play-btn {
+  background-color: var(--bg-color);
+  color: var(--accent-cyan);
+  border: 1px solid var(--accent-cyan);
+  border-radius: 4px;
+  padding: 4px 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.play-btn:hover {
+  background-color: var(--accent-cyan);
+  color: var(--bg-color);
+}
+
+.play-btn.playing {
+  border-color: var(--accent-magenta);
+  color: var(--accent-magenta);
+}
+
+.play-btn.playing:hover {
+  background-color: var(--accent-magenta);
+  color: var(--bg-color);
+}
+
 /* Main Workspace: Split Canvas (Left) and Editor (Right) */
 .workspace {
   display: flex;

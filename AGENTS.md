@@ -4,6 +4,11 @@ Do not put build/run instructions here, and do not put invariants in the README.
 
 ## Task tracking: beads (`bd`)
 
+Run `bd prime` for the current workflow context and this project's persistent
+memories (it needs a project that has memories, and auto-injects via
+`bd hooks install`). The notes below cover what `bd prime` does not: the Dolt
+sync and lease contract specific to this repo.
+
 Tasks live in a beads database (embedded Dolt, database `strudel_agent`, schema
 v66). **On a fresh clone the database does not exist** — the Dolt history is
 published to the git origin under `refs/dolt/data`, which a plain `git clone`
@@ -14,7 +19,7 @@ bd bootstrap      # clones refs/dolt/data from origin and wires the Dolt remote
 ```
 
 `bd bootstrap` is non-destructive and idempotent; on an already-bootstrapped
-workspace `bd dolt pull` is the cheaper way to catch up.
+workspace `bd sync` is the cheaper way to catch up.
 
 **Keep bd versions aligned across machines.** The schema is part of the shared
 contract: bd refuses in-place migration on a remote-backed database precisely
@@ -34,23 +39,83 @@ auto-applying N pending schema migrations" is running an out-of-date binary
 against a newer schema — upgrade rather than resetting the tree.
 
 **Sync discipline.** The database is shared, so a task you close is visible to
-everyone and a claim you take is respected:
+everyone and a claim you take is respected. Use `bd sync`, which runs the whole
+cycle for you:
 
-* `bd dolt pull` **before** you read the task list, so you do not work from a
-  stale view or re-do a bead another agent already closed.
-* `bd dolt push` **after** you finish a unit of work. Unpushed work exists only
-  on your machine — this is the failure mode that loses a session's claims.
+```bash
+bd sync            # pull -> check conflicts -> recompute is_blocked -> push
+```
+
+`bd sync` is the supported way to do this by hand. It exists because the loop is
+easy to get subtly wrong, and two of its steps are not what a hand-rolled
+pull/push does:
+
+* Conflicts are checked **positively**, from the merge's own conflict rows and
+  from Dolt's conflict tables — never inferred from the pull's exit status,
+  which is not a trustworthy conflict signal in either direction. A zero exit
+  does not mean the merge was clean.
+* `is_blocked` is recomputed after the pull, so dependency edges merged in from
+  another replica do not leave `bd ready` stale. Skipping this is how you end up
+  working a bead that is actually blocked.
+* Push retries a bounded number of times when another replica wins the race.
+* The pull underneath does auto-settle the conflict classes it can settle
+  convergently (machine-local metadata, audit-only dependency rows,
+  last-write-wins on issue cells). Anything beyond those is **never**
+  auto-resolved.
+
+Branch on the exit code rather than parsing output:
+
+| code | meaning | action |
+| ---- | ------- | ------ |
+| 0 | synced, or nothing to do | continue |
+| 1 | error (transport, auth, storage) | investigate; do not assume it synced |
+| 2 | merge conflict — halted, nothing pushed | **operator** resolves by hand |
+| 3 | retries exhausted (push race, or a concurrent writer's dirty working set) | transient, nothing pushed; retry next tick |
+| 4 | dirty working set is *stuck*, not busy | nothing pushed; no later tick will publish until an operator clears it |
+
+Repeated runs keep halting the same way for exit 2 — it is not self-healing.
+
+* `bd sync` **before** you read the task list, so you do not work from a stale
+  view or re-do a bead another agent already closed.
+* `bd sync` **after** you finish a unit of work. Unpushed work exists only on
+  your machine — this is the failure mode that loses a session's claims.
 * `bd dolt commit` first if you hit `cannot merge with uncommitted changes` on a
   pull. Never reach for `--force` to resolve a conflict you have not read; Dolt
   merges cell-level and the losing side is usually the stale one.
-* Claims are advisory across agents, not locks. Two agents can hold the same
-  bead; the second push to merge is what surfaces it, so keep the sync cadence
-  above rather than assuming exclusivity.
+
+**Claims are leases, not advisory hints.** Claiming takes a lease with a TTL:
+
+* `bd update <id> --claim` claims atomically: sets assignee to you and status to
+  `in_progress`. Idempotent if you already hold it. Exclusivity is real on the
+  node that granted the lease, so two agents no longer silently hold the same
+  bead.
+* `bd heartbeat <id>` pushes `lease_expires_at` forward while you work. Without
+  it a long task loses its claim to expiry. Heartbeats write no Dolt commit, so
+  any cadence comfortably below the TTL is fine.
+* `bd unclaim <id>` releases a claim you are abandoning (clears assignee, resets
+  to `open`). Only the current assignee may release its own claim.
+* `bd reclaim` reverts `in_progress` issues whose lease has gone **stale** back
+  to `ready`, recording a recovery event. This is the dead-worker reaper: use it
+  when an agent crashed mid-task, with `--older-than` as a grace window past
+  expiry (roughly 2x the claim TTL) so a worker briefly paused by GC or clock
+  skew is not robbed of live work.
+
+`bd update --force` overrides another actor's **live** `in_progress` claim. Use
+it only for genuinely abandoned claims, and prefer `bd reclaim`, which
+distinguishes an expired lease from a live one. Leases are only enforceable on
+the node that granted them; cross-machine claim visibility rides the issue's
+`status` and `assignee`, which do commit.
 
 **Dispatch convention.** Three levels: epic `.3vo`, task `.3`/`.4`, subtask
 `.3.2`/`.4.1`. Dispatch only leaf subtasks (two-dot IDs), and keep a parent open
-until all of its children are closed. `bd ready` lists parents and leaves
-alike — filter to the leaves.
+until all of its children are closed. `bd ready` lists parents and leaves alike
+— filter to the leaves with `bd ready --exclude-type=epic`.
+
+`bd ready` uses blocker-aware ready-work semantics (the same as
+`bd list --ready`) and excludes `in_progress`, `blocked`, `deferred`, and
+`hooked` issues, so it shows only genuinely claimable work. Add
+`--include-deferred` or `--include-ephemeral` when you need those, and
+`--explain` to see why something is or is not ready.
 
 `.beads/config.yaml`, `metadata.json`, `README.md` and `.beads/.gitignore` are
 tracked; the database itself (`.beads/embeddeddolt/`), backups and runtime state

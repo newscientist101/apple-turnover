@@ -79,3 +79,12 @@ bd.db
 # Added by bd (missing required patterns)
 *.gate.lock*
 dolt-server-config.yaml
+
+# Local artifacts previously hidden by bd stealth mode's per-machine
+# .git/info/exclude. They live here (committed) so every clone ignores the same
+# set and two machines cannot diverge. This repo is no longer in stealth mode.
+dolt-backup.json
+dolt-backup-state.json
+interactions.jsonl
+issues.pre-remote.jsonl
+issues.jsonl

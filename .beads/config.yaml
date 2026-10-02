@@ -67,3 +67,5 @@
 
 sync:
     remote: "git+https://github.com/newscientist101/apple-turnover.git"
+
+no-git-ops: false

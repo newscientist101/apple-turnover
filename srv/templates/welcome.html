@@ -7,13 +7,30 @@
     <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
-    <main>
-      <h1>Strudel Agent</h1>
+    <main class="app-shell">
+      <!-- Top Region: Single-Line Agent Message Panel -->
+      <section class="agent-panel" id="agent-panel">
+        <div class="status-indicator">
+          <span class="status-dot"></span>
+          <span class="status-text">LIVE</span>
+        </div>
+        <div class="agent-message" id="agent-message">
+          System initialized. Awaiting agent input...
+        </div>
+      </section>
 
-      <p class="intro">
-        The server is running. The browser client is not built yet: nothing
-        plays audio here yet.
-      </p>
+      <!-- Main Workspace Split: Canvas (Left) and Code Editor (Right) -->
+      <div class="workspace">
+        <!-- Left Region: Visualization Canvas -->
+        <section class="canvas-region" id="canvas-region">
+          <canvas id="canvas"></canvas>
+        </section>
+
+        <!-- Right Region: Live Code Editor -->
+        <section class="editor-region" id="editor-region">
+          <textarea id="editor" placeholder="// Live code editor..." spellcheck="false"></textarea>
+        </section>
+      </div>
     </main>
   </body>
 </html>

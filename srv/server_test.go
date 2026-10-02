@@ -62,3 +62,47 @@ func TestRootRendersToCompletion(t *testing.T) {
 		t.Error("body has </main> after </html>; unexpected document order")
 	}
 }
+
+// TestPerformanceUIShellStructure asserts that the rendered shell carries all
+// required performance UI elements: agent message panel, canvas region, editor
+// region, and explicitly contains NO faders or knobs.
+func TestPerformanceUIShellStructure(t *testing.T) {
+	server := New()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	server.HandleRoot(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	body := w.Body.String()
+
+	// Assert three regions exist
+	requiredElements := []string{
+		`id="agent-panel"`,
+		`id="agent-message"`,
+		`id="canvas"`,
+		`id="editor"`,
+	}
+	for _, want := range requiredElements {
+		if !strings.Contains(body, want) {
+			t.Errorf("performance UI shell is missing required element %q", want)
+		}
+	}
+
+	// Assert NO fader or knob controls exist
+	forbiddenTerms := []string{
+		"fader",
+		"knob",
+		"slider",
+		"range",
+	}
+	bodyLower := strings.ToLower(body)
+	for _, forbidden := range forbiddenTerms {
+		if strings.Contains(bodyLower, forbidden) {
+			t.Errorf("performance UI shell explicitly forbids fader/knob controls, but contains %q", forbidden)
+		}
+	}
+}

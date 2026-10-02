@@ -1,75 +1,140 @@
+:root {
+  --bg-color: #0d0e15;
+  --panel-bg: #131520;
+  --border-color: #232738;
+  --text-main: #00ffaa;
+  --text-muted: #5a658a;
+  --accent-cyan: #00f3ff;
+  --accent-magenta: #ff0055;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Consolas', 'Courier New', monospace;
+}
+
 * {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
 }
 
-html {
-  overflow-x: hidden;
+html, body {
+  width: 100%;
+  height: 100vh;
+  overflow: hidden;
+  background-color: var(--bg-color);
+  color: var(--text-main);
+  font-family: var(--font-mono);
+  font-size: 14px;
 }
 
-body {
-  background-color: #fffff8;
-  background-image: repeating-linear-gradient(
-    0deg,
-    rgba(0, 0, 0, 0.035) 0px,
-    rgba(0, 0, 0, 0.035) 2px,
-    transparent 2px,
-    transparent 4px
-  );
-  background-size: 4px 4px;
-  font-family: Georgia, 'Times New Roman', serif;
-  font-size: 18px;
-  overflow-x: hidden;
+.app-shell {
   display: flex;
   flex-direction: column;
+  width: 100vw;
+  height: 100vh;
+  padding: 12px;
+  gap: 12px;
+}
+
+/* Top Region: Single-Line Agent Message Panel */
+.agent-panel {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 40px;
+  padding: 0 16px;
+  background-color: var(--panel-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: bold;
+  letter-spacing: 0.08em;
+  color: var(--accent-cyan);
+  flex-shrink: 0;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--accent-cyan);
+  box-shadow: 0 0 8px var(--accent-cyan);
+  animation: pulse 2s infinite ease-in-out;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.85); }
+}
+
+.agent-message {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #e0e6f8;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+
+/* Main Workspace: Split Canvas (Left) and Editor (Right) */
+.workspace {
+  display: flex;
+  flex: 1;
+  gap: 12px;
+  min-height: 0;
+}
+
+/* Left Region: Visualization Canvas */
+.canvas-region {
+  flex: 1;
+  background-color: var(--panel-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  overflow: hidden;
+  position: relative;
+  display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 100vh;
-  padding: 40px 20px;
-  text-align: center;
 }
 
-main {
-  max-width: 900px;
+#canvas {
   width: 100%;
-  overflow-x: hidden;
-  margin: 0 auto;
+  height: 100%;
+  display: block;
+  background-color: #090a0f;
 }
 
-/* Header: tagline first */
-h1 {
-  font-size: clamp(30px, 6vw, 50px);
-  line-height: 1.2;
-  color: #000;
-  margin-bottom: 30px;
-  font-weight: normal;
-  letter-spacing: -0.01em;
+/* Right Region: Live Code Editor */
+.editor-region {
+  flex: 1;
+  background-color: var(--panel-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  overflow: hidden;
+  display: flex;
 }
 
-/* Intro paragraph */
-.intro {
-  max-width: 780px;
-  margin: 0 auto 30px;
-  line-height: 1.7;
-  color: #333;
-  text-align: left;
-  font-size: 16px;
+#editor {
+  width: 100%;
+  height: 100%;
+  padding: 16px;
+  background-color: transparent;
+  color: var(--text-main);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.6;
+  border: none;
+  outline: none;
+  resize: none;
+  caret-color: var(--accent-magenta);
 }
 
-/* Mobile responsive */
-@media (max-width: 600px) {
-  body {
-    padding: 20px 10px;
-  }
-
-  h1 {
-    margin-bottom: 20px;
-  }
-
-  .intro {
-    font-size: 14px;
-    margin-bottom: 20px;
-    padding: 0 10px;
-  }
+#editor::placeholder {
+  color: var(--text-muted);
 }

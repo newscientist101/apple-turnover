@@ -527,6 +527,11 @@ Controls:
 * `GO_TEST_TIMEOUT` — `go test -timeout`.
 * `MUTATION_TEST_ARGS` — extra test arguments.
 
+The full grid (all 41 mutations) takes a few minutes. Start it in the background
+with its output redirected to a log file, then STOP — do not poll or sleep-wait
+for it. Tell the user the run has started and that they should prompt you again
+once it has finished; on that prompt, read the log and report the verdicts.
+
 Mutations must:
 
 * actually modify the intended source;

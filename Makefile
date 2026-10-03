@@ -10,6 +10,23 @@ build:
 clean:
 	rm -f srv/srv bin/agentcli
 
+# These drive the systemd unit installed from srv.service, the deployment
+# documented in the README. `sudo` is required: a bare `systemctl start srv`
+# fails with "Interactive authentication required" rather than starting
+# anything, which reads like a broken unit instead of a missing privilege.
+#
+# Every recipe fails LOUDLY. systemctl exits non-zero when the unit is not
+# installed, and make stops at the first failing line, so a typo'd unit name
+# can never be mistaken for a server that started.
+start:
+	sudo systemctl start srv
+
+stop:
+	sudo systemctl stop srv
+
+restart:
+	sudo systemctl restart srv
+
 test:
 	go test ./...
 

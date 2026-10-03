@@ -4,10 +4,23 @@ A live, multi-user algorithmic music performance. The Go server is the conductor
 holding the one live performance state; an external AI agent drives it by pushing
 strudel code over HTTP.
 
-The browser side is not built yet: `GET /` still renders a minimal welcome
-page and nothing plays audio. The listener WebSocket endpoint, the hub that
-feeds it, and the fan-out from the agent API are all wired, so a push reaches
-connected listeners — `AGENTS.md` lists what is still unwired.
+Today, `GET /` serves a fully wired browser client: `srv/static/session.js` runs
+a real `strudel.repl`, evaluates each pushed pattern in its own sandbox, and
+defers commits to the shared bar line; `srv/static/viz.js` renders custom pattern
+visualizations; the page carries a CodeMirror live code view (`srv/static/editor.js`)
+and a per-client sync status region (`#sync-status`).
+
+However, the system maintains explicit operational limits:
+- Audio is real in the browser, but timing is bar-accurate, never sample-accurate.
+- There is no common clock across machines; two browsers align to the shared
+  timeline anchor only, so residual drift within a bar is real and reported under
+  `#sync-status`.
+- Nothing plays audio on the server, and nothing ever will: a verdict reaches
+  the agent only because a browser evaluated the pattern and posted the result,
+  so a performance with no connected listener produces no `eval-result` at all.
+- The page loads CodeMirror and `@strudel/web` from public CDNs
+  (jsdelivr, unpkg), so a listener needs network access at page load. The Go
+  server has no vendored copy and no offline mode: no network, no audio.
 
 ## Building and Running
 
@@ -138,13 +151,17 @@ and a listener count. Nothing is persisted and there is no set saving.
 - `srv/hub.go`: the listener hub core — fan-out to every subscriber
 - `srv/ws.go`: the listener WebSocket endpoint (`GET /ws`)
 - `srv/event.go`: the listener frame shape and the broadcast helper
+- `srv/coherence_test.go`: executes the served `session.js`/`sync.js` in goja, so
+  the client's own arithmetic is proved rather than a reimplementation of it
+- `srv/agent_api_doc_test.go`: machine-checks `AGENT_API.md` against running server and route definitions
 - `srv/integration_test.go`: the end-to-end verification harness
-- `srv/ws_test.go`, `srv/hub_test.go`: its WebSocket and hub slices
-- `srv/templates`: Go HTML templates
-- `srv/static`: the stylesheet
+- `srv/ws_test.go`, `srv/hub_test.go`: its WebSocket and hub test slices
+- `srv/templates`: Go HTML templates (`welcome.html`)
+- `srv/static`: browser assets (`session.js`, `editor.js`, `viz.js`, `sync.js`, `style.css`)
 - `scripts/mutation-check.sh`: sabotage check proving the tests are non-vacuous
 - `scripts/mutation-bench.sh` + `docs/mutation-bench/`: grid timing baselines and
   audit reports
+- `AGENTS.md`: developer instructions, architecture invariants, and verification standards
 - `AGENT_API.md`: the agent/listener wire contract
 
 The invariants these files must hold are in `AGENTS.md`.

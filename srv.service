@@ -5,8 +5,10 @@ Description=Go web server
 Type=simple
 User=exedev
 Group=exedev
-WorkingDirectory=/home/exedev
-ExecStart=/home/exedev/srv/srv
+# WorkingDirectory and ExecStart track this checkout and `make build` output:
+# srv/ is a package directory, so `go build -o srv` writes srv/srv inside it.
+WorkingDirectory=/home/exedev/strudel-agent
+ExecStart=/home/exedev/strudel-agent/srv/srv
 Restart=always
 RestartSec=5
 Environment=HOME=/home/exedev

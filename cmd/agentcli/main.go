@@ -109,19 +109,19 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	switch command {
 	case "state":
-		err = cmdState(ctx, c, cmdArgs, stdout)
+		err = cmdState(ctx, c, cmdArgs, stdout, stderr)
 	case "push":
-		err = cmdPush(ctx, c, cmdArgs, stdin, stdout)
+		err = cmdPush(ctx, c, cmdArgs, stdin, stdout, stderr)
 	case "message":
-		err = cmdMessage(ctx, c, cmdArgs, stdout)
+		err = cmdMessage(ctx, c, cmdArgs, stdout, stderr)
 	case "hush":
-		err = cmdTransport(ctx, c, "hush", false, cmdArgs, stdout)
+		err = cmdTransport(ctx, c, "hush", false, cmdArgs, stdout, stderr)
 	case "play":
-		err = cmdTransport(ctx, c, "play", true, cmdArgs, stdout)
+		err = cmdTransport(ctx, c, "play", true, cmdArgs, stdout, stderr)
 	case "eval-result":
-		err = cmdEvalResult(ctx, c, cmdArgs, stdout)
+		err = cmdEvalResult(ctx, c, cmdArgs, stdout, stderr)
 	case "anchor":
-		err = cmdAnchor(ctx, c, cmdArgs, stdout)
+		err = cmdAnchor(ctx, c, cmdArgs, stdout, stderr)
 	case "help", "-h", "--help":
 		fs.Usage()
 		return exitOK
@@ -136,8 +136,19 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // report maps an error onto an exit code and prints it. The mapping is the
 // contract: a usage mistake is 2 and a server refusal is 1, so a script can tell
 // "you called me wrong" from "the server said no" without reading the text.
+//
+// errHelpRequested is checked FIRST and is the one error that prints nothing: the
+// usage text was already written by parseFlags (or printFlaglessUsage) before the
+// sentinel was returned, so printing it again here would duplicate it. It exits 0
+// rather than 2 because asking a subcommand for help is a request that SUCCEEDED —
+// the same distinction the top-level flagset draws when fs.Parse returns
+// flag.ErrHelp. Treating help as a mistake is what made the per-subcommand flags
+// undiscoverable in the first place (strudel-agent-uvj.12).
 func report(stderr io.Writer, err error) int {
 	if err == nil {
+		return exitOK
+	}
+	if errors.Is(err, errHelpRequested) {
 		return exitOK
 	}
 	var usage *usageError

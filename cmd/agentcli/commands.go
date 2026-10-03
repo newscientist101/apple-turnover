@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -14,10 +15,86 @@ import (
 	"strings"
 )
 
+// errHelpRequested is returned by a subcommand when the caller asked for its help
+// rather than for the endpoint.
+//
+// It exists so that the SAME distinction the top-level flagset already makes —
+// flag.ErrHelp is a successful request, every other parse error is a usage
+// mistake — is available to the per-subcommand flagsets, which cannot report it
+// through Go's own printing because they discard their output (strudel-agent-uvj.12).
+//
+// It is deliberately NOT a usageError: help is a request that succeeded, so it
+// must exit 0, and folding it into usageError is precisely the defect being fixed.
+// report() in main.go maps it to exitOK without printing anything, because the
+// usage text has already been written by then.
+var errHelpRequested = errors.New("help requested")
+
+// parseFlags parses a subcommand's own flags and reports both outcomes through
+// the CLI's exit-code contract rather than Go's.
+//
+// Two properties, and the first is why this helper exists at all:
+//
+//  1. fs.SetOutput(io.Discard) means Go prints NOTHING here, neither a parse error
+//     nor usage. That is deliberate for errors — run() owns the message and the
+//     exit code — but it also means the flag definitions, which are the ONLY
+//     documentation of -f/-m/-version/-ok/-error/-stats/-epoch-ms/-cps, had no way
+//     to reach the user. Asking a subcommand for help used to print Go's raw
+//     "flag: help requested" string and exit 2, telling the caller nothing.
+//
+//  2. flag.ErrHelp is returned for -h and --help AFTER fs.Usage has run. So the
+//     usage text is written here, and the sentinel tells run() this was a
+//     successful request. Every OTHER parse error stays a usageError, which
+//     report() still maps to exit 2: help is 0, a bad flag is a mistake.
+func parseFlags(fs *flag.FlagSet, args []string, stderr io.Writer) error {
+	fs.Usage = func() {
+		fmt.Fprintf(stderr, "usage: agentcli %s [flags]\n\nflags:\n", fs.Name())
+		// Output is discarded, so PrintDefaults is pointed at stderr explicitly;
+		// otherwise the definitions the user asked for are printed nowhere.
+		fs.SetOutput(stderr)
+		fs.PrintDefaults()
+		fs.SetOutput(io.Discard)
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return errHelpRequested
+		}
+		return &usageError{msg: err.Error()}
+	}
+	return nil
+}
+
+// wantsFlaglessHelp reports whether args is exactly a request for help from a
+// subcommand that has no flags of its own.
+//
+// The check is deliberately narrow — one argument, and that argument the help
+// flag — because these commands treat their arguments as meaningful: `message
+// "-h"` is narration the user wants SPOKEN, not a request for help, and it
+// reaches the server as text today. Only an args slice that is exactly the help
+// flag is unambiguous, so only that is answered with help; anything else keeps
+// falling through to the existing "takes no arguments" usage error.
+func wantsFlaglessHelp(args []string) bool {
+	if len(args) != 1 {
+		return false
+	}
+	return args[0] == "-h" || args[0] == "--help"
+}
+
+// printFlaglessUsage describes a subcommand that takes no flags. There is no
+// FlagSet to print defaults from, so the one-line summary from the top-level
+// usage is repeated here — a caller who asked this specific command deserves to
+// be told what it does, not merely that it exists.
+func printFlaglessUsage(stderr io.Writer, name, summary string) {
+	fmt.Fprintf(stderr, "usage: agentcli %s\n  %s\n  (this command takes no flags)\n", name, summary)
+}
+
 // cmdState prints the snapshot: the document, the version, the playing flag, the
 // last agent message and the listener count, which is the whole read path an
 // agent needs before deciding what to push next.
-func cmdState(ctx context.Context, c *client, args []string, out io.Writer) error {
+func cmdState(ctx context.Context, c *client, args []string, out, stderr io.Writer) error {
+	if wantsFlaglessHelp(args) {
+		printFlaglessUsage(stderr, "state", "print the current snapshot")
+		return errHelpRequested
+	}
 	if len(args) > 0 {
 		return usagef("state takes no arguments, got %q", strings.Join(args, " "))
 	}
@@ -59,13 +136,13 @@ type codeRequest struct {
 // It reports the NEW VERSION rather than the whole snapshot, because the version
 // is the one thing a caller must read back to close the loop: it is what a later
 // eval-result has to name.
-func cmdPush(ctx context.Context, c *client, args []string, stdin io.Reader, out io.Writer) error {
+func cmdPush(ctx context.Context, c *client, args []string, stdin io.Reader, out, stderr io.Writer) error {
 	fs := flag.NewFlagSet("push", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	file := fs.String("f", "", "read the document from this file (\"-\" or omitted means stdin)")
 	message := fs.String("m", "", "narration shown to listeners beside the code")
-	if err := fs.Parse(args); err != nil {
-		return &usageError{msg: err.Error()}
+	if err := parseFlags(fs, args, stderr); err != nil {
+		return err
 	}
 	if fs.NArg() > 0 {
 		return usagef("push takes no positional arguments (use -f for a file, or pipe on stdin), got %q",
@@ -96,7 +173,11 @@ type messageRequest struct {
 }
 
 // cmdMessage records narration without touching the document or the version.
-func cmdMessage(ctx context.Context, c *client, args []string, out io.Writer) error {
+func cmdMessage(ctx context.Context, c *client, args []string, out, stderr io.Writer) error {
+	if wantsFlaglessHelp(args) {
+		printFlaglessUsage(stderr, "message", "set the agent narration")
+		return errHelpRequested
+	}
 	if len(args) == 0 {
 		return usagef("message needs the text to say: agentcli message \"four on the floor\"")
 	}
@@ -133,7 +214,15 @@ func cmdMessage(ctx context.Context, c *client, args []string, out io.Writer) er
 // version 3") rather than promising what the server holds now. A no-op is still
 // SUCCESS (the request was accepted), so the exit code is 0; the distinct
 // wording is what stops a caller reading it as a change.
-func cmdTransport(ctx context.Context, c *client, name string, playing bool, args []string, out io.Writer) error {
+func cmdTransport(ctx context.Context, c *client, name string, playing bool, args []string, out, stderr io.Writer) error {
+	if wantsFlaglessHelp(args) {
+		summary := "stop the performance"
+		if playing {
+			summary = "resume the performance"
+		}
+		printFlaglessUsage(stderr, name, summary)
+		return errHelpRequested
+	}
 	if len(args) > 0 {
 		return usagef("%s takes no arguments, got %q", name, strings.Join(args, " "))
 	}
@@ -191,15 +280,15 @@ type evalResultRequest struct {
 // a browser-shaped report relayed by an operator, and the pre-read is what makes
 // its output trustworthy; the alternative was printing a success the response
 // does not support.
-func cmdEvalResult(ctx context.Context, c *client, args []string, out io.Writer) error {
+func cmdEvalResult(ctx context.Context, c *client, args []string, out, stderr io.Writer) error {
 	fs := flag.NewFlagSet("eval-result", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	ver := fs.Int64("version", 0, "the published version this verdict is about (required)")
 	ok := fs.Bool("ok", true, "report whether the version evaluated")
 	errText := fs.String("error", "", "the error text, when the evaluation threw")
 	stats := fs.String("stats", "", "opaque stats JSON, e.g. '{\"haps\":64}'")
-	if err := fs.Parse(args); err != nil {
-		return &usageError{msg: err.Error()}
+	if err := parseFlags(fs, args, stderr); err != nil {
+		return err
 	}
 	if fs.NArg() > 0 {
 		return usagef("eval-result takes no positional arguments, got %q", strings.Join(fs.Args(), " "))
@@ -267,13 +356,13 @@ type anchorRequest struct {
 // to paper over here — the uncertainty is the other way round, in the
 // comparison, which is a report of what was OBSERVED rather than a guarantee
 // about what the server holds now (another agent could re-anchor in between).
-func cmdAnchor(ctx context.Context, c *client, args []string, out io.Writer) error {
+func cmdAnchor(ctx context.Context, c *client, args []string, out, stderr io.Writer) error {
 	fs := flag.NewFlagSet("anchor", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	epoch := fs.Int64("epoch-ms", 0, "the shared timeline's epoch, in Unix milliseconds (default: the current epoch)")
 	cps := fs.Float64("cps", 0, "cycles per second, greater than 0 and at most 1000 (default: the current rate)")
-	if err := fs.Parse(args); err != nil {
-		return &usageError{msg: err.Error()}
+	if err := parseFlags(fs, args, stderr); err != nil {
+		return err
 	}
 	if fs.NArg() > 0 {
 		return usagef("anchor takes no positional arguments, got %q", strings.Join(fs.Args(), " "))

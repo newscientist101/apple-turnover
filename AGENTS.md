@@ -208,6 +208,27 @@ Assert response **bodies**, not just status codes.
 
 Prefer tests that drive the real route tree and served bytes over tests that reproduce the implementation in the test harness.
 
+### Agent CLI exit codes
+
+The CLI is a documented agent interface, so its exit codes are a contract:
+
+- `0` success, including a **help request** at both the top level and per
+  subcommand.
+- `1` the server refused or could not be reached.
+- `2` the command line was wrong; nothing was sent.
+
+Help is a successful request, not a usage mistake. Each subcommand parses its own
+`FlagSet` with output discarded so that `run()` owns every message and code, which
+also suppresses Go's automatic usage printing — so each subcommand installs its own
+usage function and maps `flag.ErrHelp` to a sentinel that `report()` turns into
+`exitOK`. Folding that sentinel into `usageError` re-creates the defect: the flags
+become undiscoverable and a valid request is mislabelled as a mistake. Every other
+parse error must remain a `usageError`.
+
+The flagless subcommands (`state`, `message`, `hush`, `play`) answer help only when
+their args are **exactly** the help flag; their arguments are otherwise meaningful
+(`message "-h"` is narration), so a wider check would swallow real usage errors.
+
 ## Boundedness in tests
 
 A hang is a test failure, not a waiting strategy.

@@ -805,6 +805,182 @@ func TestHelpExitsZero(t *testing.T) {
 	}
 }
 
+// TestSubcommandHelpPrintsItsOwnFlags is the counterpart of TestHelpExitsZero for
+// the per-subcommand flagsets (strudel-agent-uvj.12).
+//
+// These flagsets are the ONLY documentation of -f, -m, -version, -ok, -error,
+// -stats, -epoch-ms and -cps: each one sets its output to io.Discard so that a
+// parse error is reported through the CLI's own exit-code contract rather than
+// Go's, which also suppresses Go's automatic usage printing. So if -h is not
+// handled here, the flags are undiscoverable except by reading the Go source.
+//
+// Help is also a SUCCESSFUL request, exactly as it is for the top-level flags,
+// where main.go already maps flag.ErrHelp to exitOK. A bare "flag: help
+// requested" error with exit 2 told the user nothing and mislabelled a valid
+// request as a mistake.
+//
+// A dead port is used on purpose: help is a local answer to a local question, so
+// it must succeed without reaching a server at all.
+func TestSubcommandHelpPrintsItsOwnFlags(t *testing.T) {
+	dead := "http://" + reserveClosedPort(t)
+
+	tests := []struct {
+		command string
+		// wantFlags are the flag names that must appear. These are the strings a
+		// user would otherwise have to grep the source for.
+		wantFlags []string
+		// wantText are the usage strings that explain what the flags mean.
+		wantText []string
+	}{
+		{
+			command:   "push",
+			wantFlags: []string{"-f", "-m"},
+			wantText:  []string{"read the document from this file", "narration shown to listeners"},
+		},
+		{
+			command:   "eval-result",
+			wantFlags: []string{"-version", "-ok", "-error", "-stats"},
+			wantText:  []string{"the published version this verdict is about", "opaque stats JSON"},
+		},
+		{
+			command:   "anchor",
+			wantFlags: []string{"-epoch-ms", "-cps"},
+			wantText:  []string{"the shared timeline's epoch", "cycles per second"},
+		},
+	}
+
+	for _, tc := range tests {
+		for _, helpFlag := range []string{"-h", "--help"} {
+			t.Run(tc.command+" "+helpFlag, func(t *testing.T) {
+				got := runCLI(t, dead, "", tc.command, helpFlag)
+				if got.code != exitOK {
+					t.Fatalf("exit %d, want 0 — help is a successful request, not a usage mistake\nstdout: %q\nstderr: %q",
+						got.code, got.stdout, got.stderr)
+				}
+				// The usage line, so the text says which command it belongs to.
+				if !strings.Contains(got.stderr, "usage: agentcli "+tc.command) {
+					t.Errorf("stderr %q, want the usage line for %q", got.stderr, tc.command)
+				}
+				for _, flag := range tc.wantFlags {
+					if !strings.Contains(got.stderr, flag) {
+						t.Errorf("stderr does not document %q — the flag is undiscoverable\nstderr:\n%s", flag, got.stderr)
+					}
+				}
+				for _, text := range tc.wantText {
+					if !strings.Contains(got.stderr, text) {
+						t.Errorf("stderr does not explain %q\nstderr:\n%s", text, got.stderr)
+					}
+				}
+				// The old behaviour printed Go's raw error string. It must be gone,
+				// or a caller grepping for it would still be misled about the cause.
+				if strings.Contains(got.stderr, "flag: help requested") {
+					t.Errorf("stderr still reports help as a Go parse error:\n%s", got.stderr)
+				}
+				// Nothing was sent, so nothing may be claimed on stdout.
+				if strings.TrimSpace(got.stdout) != "" {
+					t.Errorf("stdout %q, want nothing: help touches no endpoint", got.stdout)
+				}
+			})
+		}
+	}
+}
+
+// TestFlaglessSubcommandHelpExitsZero covers the subcommands that have no flags
+// of their own (strudel-agent-uvj.12). They reject extra arguments, so `state -h`
+// used to be reported as "takes no arguments, got \"-h\"" with exit 2 — a valid
+// request for help answered as a mistake, the same defect as on the flag-taking
+// commands.
+//
+// The check is deliberately narrow: an args slice that is EXACTLY the help flag.
+// `state extra` remains the usage error the exit-code contract promises, so this
+// cannot be satisfied by simply ignoring a subcommand's arguments.
+func TestFlaglessSubcommandHelpExitsZero(t *testing.T) {
+	dead := "http://" + reserveClosedPort(t)
+
+	for _, command := range []string{"state", "message", "hush", "play"} {
+		for _, helpFlag := range []string{"-h", "--help"} {
+			t.Run(command+" "+helpFlag, func(t *testing.T) {
+				got := runCLI(t, dead, "", command, helpFlag)
+				if got.code != exitOK {
+					t.Errorf("exit %d, want 0 for a help request (stderr %q)", got.code, got.stderr)
+				}
+				if !strings.Contains(got.stderr, "usage: agentcli "+command) {
+					t.Errorf("stderr %q, want the usage line for %q", got.stderr, command)
+				}
+				if strings.TrimSpace(got.stdout) != "" {
+					t.Errorf("stdout %q, want nothing: help touches no endpoint", got.stdout)
+				}
+			})
+		}
+	}
+}
+
+// TestSubcommandParseErrorsAreNotHelpRequests is the half of the contract that
+// must NOT move: help is a successful request, a bad flag is a usage mistake,
+// and the two must stay distinguishable by exit code (0 versus 2).
+//
+// Without this the obvious "fix" — treating every parse error as help — would
+// pass the help tests above while silently reclassifying real mistakes as
+// success, so a script could no longer tell a bad invocation from a good one.
+func TestSubcommandParseErrorsAreNotHelpRequests(t *testing.T) {
+	base := newTestServer(t)
+
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"unknown flag on anchor", []string{"anchor", "-tempo", "2"}, "not defined"},
+		{"unknown flag on eval-result", []string{"eval-result", "-verdict", "1"}, "not defined"},
+		{"unknown flag on push", []string{"push", "-file", "x.js"}, "not defined"},
+		{"non-numeric version", []string{"eval-result", "-version", "notanumber"}, "invalid value"},
+		{"non-numeric rate", []string{"anchor", "-cps", "quick"}, "invalid value"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runCLI(t, base, "", tc.args...)
+			if got.code != exitUsage {
+				t.Errorf("exit %d, want %d — a bad flag is a usage mistake, not a help request\nstderr: %q",
+					got.code, exitUsage, got.stderr)
+			}
+			if !strings.Contains(got.stderr, tc.want) {
+				t.Errorf("stderr %q does not explain the problem (want %q)", got.stderr, tc.want)
+			}
+			// A parse error must still be REPORTED as one. It is acceptable — and
+			// is Go's own convention — that the usage text accompanies it, so the
+			// proof that this was not treated as help is the diagnostic line, not
+			// the absence of usage. Without that line, the "fix" of calling every
+			// parse error help would satisfy the exit-code check above by luck.
+			if !strings.Contains(got.stderr, "agentcli: ") {
+				t.Errorf("a genuine parse error was not reported as a mistake:\n%s", got.stderr)
+			}
+		})
+	}
+}
+
+// TestSubcommandHelpDoesNotWeakenTheExitCodeContract re-proves the two mappings
+// that surround the change: a server refusal is still 1 and a usage mistake is
+// still 2, when a subcommand flagset is in play. It guards the fix against
+// "solving" the help bug by widening what counts as a success.
+func TestSubcommandHelpDoesNotWeakenTheExitCodeContract(t *testing.T) {
+	base := newTestServer(t)
+
+	// A refusal from a subcommand with flags: exit 1, not 2, not 0.
+	refused := runCLI(t, base, "", "anchor", "-cps", "0")
+	if refused.code != exitError {
+		t.Errorf("a refused re-anchor exited %d, want %d (stderr %q)", refused.code, exitError, refused.stderr)
+	}
+	if !strings.Contains(refused.stderr, "cps must be greater than 0") {
+		t.Errorf("stderr %q, want the server's verbatim reason", refused.stderr)
+	}
+
+	// And a bad flag on the same subcommand is still 2, not 1.
+	mistake := runCLI(t, base, "", "anchor", "-tempo", "2")
+	if mistake.code != exitUsage {
+		t.Errorf("a bad flag exited %d, want %d", mistake.code, exitUsage)
+	}
+}
+
 // TestBaseURLComesFromTheEnvironment proves the env var is honoured, since that
 // is how a harness points every invocation at one server without repeating a flag.
 func TestBaseURLComesFromTheEnvironment(t *testing.T) {

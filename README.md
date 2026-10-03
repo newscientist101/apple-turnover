@@ -121,6 +121,8 @@ http://localhost:8000 default
 
 `anchor` can update either half of the anchor; the omitted half is taken from the current state.
 
+Every subcommand documents itself: `bin/agentcli <command> -h` (or `--help`) prints that command's own flags and defaults and exits `0`, without contacting the server. `state`, `message`, `hush` and `play` take no flags and say so. A genuine mistake — an unknown flag or an unparseable value — still exits `2`, so help (`0`) and a bad flag (`2`) remain distinguishable by exit code alone.
+
 ## Verification
 
 The normal gate is:

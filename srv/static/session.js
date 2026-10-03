@@ -38,6 +38,18 @@
   var lastVersion = -1;
   // Latest live Pattern committed via setPattern (for viz hooks).
   var currentPattern = null;
+  // Handle for the commit scheduled at the next cycle boundary, so a NEWER
+  // version can supersede a PENDING one (issue .3vo.8.2). Null when nothing is
+  // pending.
+  var pendingCommit = null;
+
+  // window.strudelSync (sync.js, issue .3vo.8.2) owns the shared bar grid.
+  // Resolved per call rather than captured at load: the module is loaded with
+  // defer alongside this one, and a client served a cached session.js must still
+  // commit immediately rather than throw if sync.js 404s.
+  function sync() {
+    return window.strudelSync || null;
+  }
 
   // Build the sandbox repl: a SEPARATE repl whose scheduler never starts, so
   // evaluate() parses and compiles without touching audio. getTime:()=>0
@@ -187,12 +199,71 @@
       return postEvalResult(version, false, message, { haps: 0 });
     }
 
-    // (2) Success: commit to the live repl. setPattern(pattern, false)
-    // hot-swaps audio without a gap; false means "do not autostart", so a
-    // listener that has not clicked play yet is not force-started.
+    // (2) Success: the commit is DEFERRED to the shared cycle boundary
+    // (issue .3vo.8.2), not applied here. Committing the instant a frame lands
+    // is what made two listeners on the same anchor diverge: each committed at
+    // whatever moment its own frame arrived, so they landed on different bars.
+    // strudelSync maps snapshot.anchor onto the shared bar grid and runs this at
+    // the next boundary, so the commit lands on the SAME bar everywhere.
+    //
+    // Everything above stays immediate on purpose: validation and the
+    // POST /api/eval-result report are the agent's feedback loop, and delaying
+    // them behind a bar line would stall the loop for no coherence gain. Only
+    // the audio commit waits for the bar.
     var stats = collectStats(pattern);
+    var anchor = snapshot.anchor || null;
+
+    // A newer version supersedes a pending commit: cancel before scheduling, so
+    // a superseded pattern can never land after the version that replaced it.
+    if (pendingCommit) {
+      pendingCommit.cancel();
+      pendingCommit = null;
+    }
+
+    pendingCommit = scheduleCommit(function () {
+      pendingCommit = null;
+      // setPattern(pattern, false) hot-swaps audio without a gap; false means
+      // "do not autostart", so a listener that has not clicked play yet is not
+      // force-started.
+      return live.setPattern(pattern, false);
+    }, anchor, version, stats, pattern);
+
+    return postEvalResult(version, true, "", stats);
+  }
+
+  // Schedule one validated pattern for the next shared cycle boundary and
+  // record the resulting drift for the sync status UI (.8.5).
+  //
+  // With no usable anchor there is no grid to align to, so the commit happens
+  // immediately rather than at a NaN boundary: drifting is strictly better than
+  // silence, and the observation is marked unscheduled so the UI can say so
+  // honestly instead of reporting a fake aligned commit.
+  function scheduleCommit(commit, anchor, version, stats, pattern) {
+    if (!sync() || !sync().usableAnchor(anchor)) {
+      if (sync()) {
+        sync().observe({ version: version, unscheduled: true });
+      }
+      return commitNow(commit, version, stats, pattern);
+    }
+    return sync().scheduleAtBoundary(function (at) {
+      sync().observe({
+        version: version,
+        cycle: sync().cyclePosition(anchor, at.actualMs),
+        targetMs: at.targetMs,
+        actualMs: at.actualMs,
+        driftMs: at.driftMs,
+      });
+      return commitNow(commit, version, stats, pattern);
+    }, anchor, Date.now(), sync().LEAD_MS);
+  }
+
+  // The commit itself, plus everything that describes it: the viz hook, the log
+  // line, and the failure report. setPattern is the only call here that can
+  // fail now that it is deferred, and a failure must still reach the agent as
+  // an eval-result for THIS version rather than being swallowed at the boundary.
+  async function commitNow(commit, version, stats, pattern) {
     try {
-      await live.setPattern(pattern, false);
+      await commit();
     } catch (err) {
       var commitMessage = String((err && err.message) || err);
       console.warn("[session] version " + version + " failed to commit:", commitMessage);
@@ -202,7 +273,7 @@
     currentPattern = pattern;
     if (window.strudelViz && typeof window.strudelViz.setPattern === "function") { window.strudelViz.setPattern(pattern); }
     console.info("[session] version " + version + " live (" + stats.haps + " haps)");
-    return postEvalResult(version, true, "", stats);
+    return undefined;
   }
 
   function isNewCodeVersion(snapshot) {
@@ -299,14 +370,18 @@
   // postEvalResult are exposed so the headless harness can drive the full
   // validate-then-commit path (success commits, failure leaves live alone)
   // with stub repls and assert on the POST /api/eval-result bodies.
+  // scheduleCommit is exposed for the same reason (issue .3vo.8.2): bar
+  // alignment is only observable from outside if the scheduling step is.
   window.strudelSession = {
     buildSandbox: buildSandbox,
     collectStats: collectStats,
     isNewCodeVersion: isNewCodeVersion,
     applyVersion: applyVersion,
     postEvalResult: postEvalResult,
+    scheduleCommit: scheduleCommit,
     getLastVersion: function () { return lastVersion; },
     getCurrentPattern: function () { return currentPattern; },
+    getPendingCommit: function () { return pendingCommit; },
   };
 
   if (document.readyState === "loading") {

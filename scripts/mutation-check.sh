@@ -196,6 +196,10 @@ MUTATIONS=$(cat <<'EOF'
 83-anchor-frame-never-built|srv/api.go|	s.broadcast(EventAnchor, snap)|	_ = snap // deliberately: the anchor is stored but nobody is told|TestAnchorRouteAcceptedBroadcastsOneAnchorFrame|TestAnchorRouteRejectedBroadcastsNothing
 84-anchor-frame-wrong-kind|srv/api.go|	s.broadcast(EventAnchor, snap)\n\twriteJSON(w, http.StatusOK, snap)\n}|	s.broadcast(EventTransport, snap)\n\twriteJSON(w, http.StatusOK, snap)\n}|TestAnchorRouteAcceptedBroadcastsOneAnchorFrame
 85-refused-anchor-still-broadcast|srv/api.go|	if err := s.Conductor.SetAnchor(req.EpochMS, req.CPS); err != nil {\n\t\twriteError(w, http.StatusBadRequest, err.Error())\n\t\treturn\n\t}|	if err := s.Conductor.SetAnchor(req.EpochMS, req.CPS); err != nil {\n\t\tdefer s.broadcast(EventAnchor, s.Conductor.Snapshot())\n\t\twriteError(w, http.StatusBadRequest, err.Error())\n\t\treturn\n\t} // deliberately: a rejected re-anchor is announced to every listener|TestAnchorRouteRejectedBroadcastsNothing
+86-sync-js-never-loaded|srv/templates/welcome.html|    <script src="/static/sync.js" defer></script>|    <!-- deliberately: the cycle-alignment module is never loaded -->|TestSyncModuleIsServedAndCarriesTheContract
+87-commit-not-boundary-deferred|srv/static/session.js|    return sync().scheduleAtBoundary(function (at) {|    return commitNow(commit, version, stats, pattern), sync().scheduleAtBoundary(function (at) { // deliberately: the commit is ALSO applied on arrival, which is the drift being fixed|TestSessionDefersTheCommitToTheBoundary
+88-sync-lead-removed|srv/static/sync.js|    return anchor.epochMs + nextIndex * cycleMs + lead;|    return anchor.epochMs + nextIndex * cycleMs; // deliberately: commits at the raw boundary, so a late frame rounds to a different bar|TestTheLeadIsWhatAlignsTheLateClient|TestTwoClientsOnTheSameAnchorCommitOnTheSameBar
+89-pending-commit-not-cancelled|srv/static/session.js|      pendingCommit.cancel();|      // deliberately: a superseded pattern still lands after the version that replaced it|TestSyncModuleIsServedAndCarriesTheContract|TestANewerVersionSupersedesAPendingCommit
 EOF
 )
 

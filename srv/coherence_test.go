@@ -339,6 +339,18 @@ const syncJSPrelude = `
 // ReferenceError. sync.js only ever assigns window.strudelSync, so an empty
 // object is the whole host surface it needs.
 var window = {};
+// A browser window has addEventListener, and session.js registers its teardown
+// hook on it. Modelling it here (rather than guarding the call in session.js)
+// keeps the served bytes honest: the production file can use the real API, and
+// the fake host fails loudly on anything it does not model instead of silently
+// letting an untested code path through.
+var __listeners = {};
+window.addEventListener = function (name, fn) {
+  (__listeners[name] = __listeners[name] || []).push(fn);
+};
+window.__fireEvent = function (name) {
+  (__listeners[name] || []).forEach(function (fn) { fn(); });
+};
 var __now = 0;
 var __timers = [];
 var __nextTimerId = 1;
@@ -369,8 +381,29 @@ var setTimeout = function (fn, ms) {
 var clearTimeout = function (id) {
   __timers = __timers.filter(function (t) { return t.id !== id; });
 };
+// A browser setInterval RE-ARMS itself; a one-shot push would mean the harness
+// silently cannot observe the countdown ticking, and the pagehide teardown
+// would have nothing to stop. Re-queueing on fire is what makes the interval
+// testable, and the bounded __advance loop is what stops a re-arming timer from
+// hanging the suite.
+var setInterval = function (fn, ms) {
+  var id = __nextTimerId++;
+  var period = Math.max(1, ms);
+  __timers.push({
+    id: id, at: __now + period, seq: id, period: period, fn: function () {
+      __timers.push({ id: id, at: __now + period, seq: id, period: period, fn: fn });
+      fn();
+    }
+  });
+  return id;
+};
+var clearInterval = function (id) {
+  clearTimeout(id);
+};
 window.setTimeout = setTimeout;
 window.clearTimeout = clearTimeout;
+window.setInterval = setInterval;
+window.clearInterval = clearInterval;
 Date.now = function () { return __now; };
 window.__setNow = function (ms) { __now = ms; };
 window.__advance = function (ms) {
@@ -963,6 +996,46 @@ func TestAnUnusableAnchorCommitsImmediatelyRatherThanNever(t *testing.T) {
 	}
 }
 
+// flexShorthandHasShrink reports whether a rule body sets a non-zero shrink
+// factor, accepting either the longhand (flex-shrink: N) or the `flex` shorthand
+// (flex: <grow> <shrink> <basis>). It looks for the SHORTHAND only as a
+// three-number form, because the keyword shorthands (auto, none, initial) carry
+// no explicit shrink and must not be mistaken for one.
+func flexShorthandHasShrink(rule string) bool {
+	for _, line := range strings.Split(rule, ";") {
+		decl := strings.TrimSpace(line)
+		if !strings.HasPrefix(decl, "flex:") {
+			continue
+		}
+		fields := strings.Fields(strings.TrimPrefix(decl, "flex:"))
+		if len(fields) != 3 {
+			continue
+		}
+		if _, err := strconv.ParseFloat(fields[1], 64); err == nil {
+			return fields[1] != "0"
+		}
+	}
+	return false
+}
+
+// cssRuleBody returns the declaration block of the first rule whose selector is
+// exactly selector, or "" if there is none. It lets a test assert a PROPERTY of
+// one rule (does it shrink? does it collapse when empty?) instead of grepping
+// the whole stylesheet for one declaration string, which cannot tell a working
+// rule from a working comment.
+func cssRuleBody(css, selector string) string {
+	idx := strings.Index(css, selector+" {")
+	if idx < 0 {
+		return ""
+	}
+	rest := css[idx+len(selector)+2:]
+	end := strings.Index(rest, "}")
+	if end < 0 {
+		return ""
+	}
+	return rest[:end]
+}
+
 // servedSyncJS fetches /static/sync.js through the REAL handler tree and fails
 // the test if it is not served intact. Every client assertion below runs against
 // these bytes rather than against the file on disk, so a sync.js that is not
@@ -1016,9 +1089,48 @@ func TestSyncModuleIsServedAndCarriesTheContract(t *testing.T) {
 	if !strings.Contains(w.Body.String(), `<script src="/static/sync.js"`) {
 		t.Error(`shell is missing <script src="/static/sync.js": the cycle-aligned commit module is never loaded`)
 	}
+	shellBody := w.Body.String()
+	if !strings.Contains(shellBody, `id="sync-status"`) || !strings.Contains(shellBody, `class="sync-status"`) || !strings.Contains(shellBody, `aria-live="polite"`) {
+		t.Error(`shell is missing #sync-status region with class="sync-status" and aria-live="polite"`)
+	}
 
-	// session.js must route its commit through the module, and must NOT have
-	// quietly reverted to committing the instant a frame lands.
+	// CSS must carry .sync-status and .sync-drift styles.
+	req = httptest.NewRequest(http.MethodGet, "/static/style.css", nil)
+	w = httptest.NewRecorder()
+	server.routes().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /static/style.css status = %d, want 200", w.Code)
+	}
+	cssBody := w.Body.String()
+	for _, wantClass := range []string{".sync-status", ".sync-drift {"} {
+		if !strings.Contains(cssBody, wantClass) {
+			t.Errorf("style.css is missing required class %q", wantClass)
+		}
+	}
+	// The status line shares the agent panel's flex row with the message and the
+	// buttons, so it must be the thing that gives way when space is tight.
+	// Asserted as a PROPERTY (shrinkable, and allowed to reach zero width)
+	// rather than as one literal declaration: pinning "flex: 0 100 auto" would
+	// fail on an equivalent rewrite while passing on a rule that does nothing,
+	// which is trivia, not coverage.
+	//
+	// Either spelling counts. The `flex` SHORTHAND carries shrink as its middle
+	// component (flex: <grow> <shrink> <basis>), so demanding the longhand
+	// `flex-shrink` would reject a correct rule written the short way.
+	syncRule := cssRuleBody(cssBody, ".sync-status")
+	if syncRule == "" {
+		t.Fatal("style.css has no .sync-status rule body to inspect")
+	}
+	setsShrink := strings.Contains(syncRule, "flex-shrink") || flexShorthandHasShrink(syncRule)
+	if !setsShrink {
+		t.Errorf(".sync-status rule does not set a flex shrink factor, so it cannot yield space to the message: %q", syncRule)
+	}
+	if !strings.Contains(syncRule, "min-width: 0") && !strings.Contains(syncRule, "min-width:0") {
+		t.Errorf(".sync-status rule does not set min-width: 0, so it cannot shrink below its content: %q", syncRule)
+	}
+
+	// session.js must route its commit through the module, drive the status UI,
+	// and must NOT have quietly reverted to committing the instant a frame lands.
 	req = httptest.NewRequest(http.MethodGet, "/static/session.js", nil)
 	w = httptest.NewRecorder()
 	server.routes().ServeHTTP(w, req)
@@ -1031,9 +1143,12 @@ func TestSyncModuleIsServedAndCarriesTheContract(t *testing.T) {
 		"scheduleAtBoundary",
 		"cyclePosition",
 		"pendingCommit.cancel()",
+		"updateSyncStatusUI",
+		"sync-status",
+		"sync-drift",
 	} {
 		if !strings.Contains(session, want) {
-			t.Errorf("session.js is missing cycle-alignment marker %q", want)
+			t.Errorf("session.js is missing cycle-alignment / status marker %q", want)
 		}
 	}
 
@@ -1041,5 +1156,169 @@ func TestSyncModuleIsServedAndCarriesTheContract(t *testing.T) {
 	// grown a second path that evaluates unvalidated code.
 	if strings.Contains(session, "live.evaluate(") {
 		t.Error("session.js calls live.evaluate(): unvalidated code would hush the live repl before parsing")
+	}
+}
+
+// TestSyncStatusUIRendersDriftAndStateInGoja executes the served session.js in
+// goja to prove that connection state, current bar/cycle, pending countdown,
+// unscheduled state, and observed drift values are actually written to #sync-status.
+func TestSyncStatusUIRendersDriftAndStateInGoja(t *testing.T) {
+	server := New()
+	req := httptest.NewRequest(http.MethodGet, "/static/session.js", nil)
+	w := httptest.NewRecorder()
+	server.routes().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /static/session.js status = %d, want 200", w.Code)
+	}
+	sessionJS := w.Body.String()
+
+	rt := newSessionRuntime(t, sessionJS)
+
+	// Install a fake #sync-status DOM element.
+	rt.run(`
+	  var syncStatusElem = { innerHTML: "" };
+	  document.getElementById = function (id) {
+	    if (id === "sync-status") { return syncStatusElem; }
+	    return null;
+	  };
+	`)
+
+	// 1. Initial connection state write.
+	rt.run("window.strudelSession.updateSyncStatusUI()")
+	html := rt.eval("syncStatusElem.innerHTML").String()
+	if !strings.Contains(html, "reconnecting") {
+		t.Errorf("initial sync status HTML = %q, want it to include 'reconnecting'", html)
+	}
+
+	// 2. Pending commit and current cycle/bar.
+	const frameAt = int64(1002100)
+	rt.run(fmt.Sprintf("window.__setNow(%d)", frameAt))
+	rt.run(`window.strudelSession.applyVersion(
+	  { version: 1, code: 's("bd")', anchor: { epochMs: 1000000, cps: 0.5 } },
+	  window.__sandbox, window.__live);`)
+	rt.settle()
+
+	html = rt.eval("syncStatusElem.innerHTML").String()
+	if !strings.Contains(html, "cycle 1.1") && !strings.Contains(html, "bar 1") {
+		t.Errorf("pending sync status HTML = %q, want cycle/bar info", html)
+	}
+	if !strings.Contains(html, "next in") && !strings.Contains(html, "1925") {
+		t.Errorf("pending sync status HTML = %q, want pending countdown", html)
+	}
+
+	// 3. Boundary tick fires and writes observed drift.
+	rt.advance(1925)
+	html = rt.eval("syncStatusElem.innerHTML").String()
+	if !strings.Contains(html, `class="sync-drift"`) {
+		t.Errorf("committed sync status HTML = %q, want class=\"sync-drift\"", html)
+	}
+
+	// 4. Assert exact drift VALUE reaches the status region.
+	rt.run(`window.strudelSync.observe({
+	  version: 2,
+	  cycle: 2.0,
+	  targetMs: 1004000,
+	  actualMs: 1004024,
+	  driftMs: 24
+	});`)
+	rt.run("window.strudelSession.updateSyncStatusUI()")
+
+	html = rt.eval("syncStatusElem.innerHTML").String()
+	if !strings.Contains(html, "24ms") {
+		t.Errorf("sync status HTML = %q, want drift value '24ms' to reach the region", html)
+	}
+	if !strings.Contains(html, "last bar 2") {
+		t.Errorf("sync status HTML = %q, want last landed bar 'last bar 2'", html)
+	}
+
+	// 5. Unscheduled observation (invalid anchor).
+	rt.run(`window.strudelSession.scheduleCommit(function(){}, null, 3, {}, null);`)
+	html = rt.eval("syncStatusElem.innerHTML").String()
+	if !strings.Contains(html, "unscheduled") {
+		t.Errorf("unscheduled sync status HTML = %q, want 'unscheduled'", html)
+	}
+}
+
+// TestSyncStatusUIOnlyWritesOnChangeAndStopsOnPageHide proves the two properties
+// that keep the status region well-behaved rather than merely present:
+//
+//  1. It writes ONLY when the rendered text actually changes. The region is
+//     aria-live="polite" and the countdown moves several times a second, so an
+//     unconditional write would announce every tick — the feature would work
+//     and still be unusable with a screen reader.
+//  2. The interval is torn down on pagehide. Otherwise the timer keeps running
+//     against a frozen clock in the back/forward cache, and stopStatusTimer is
+//     dead code with no caller.
+//
+// Both are asserted by EXECUTING the served bytes and watching the fake DOM, so
+// a session.js that renders nothing but still satisfies a source grep is caught.
+func TestSyncStatusUIOnlyWritesOnChangeAndStopsOnPageHide(t *testing.T) {
+	server := New()
+	req := httptest.NewRequest(http.MethodGet, "/static/session.js", nil)
+	w := httptest.NewRecorder()
+	server.routes().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /static/session.js status = %d, want 200", w.Code)
+	}
+
+	rt := newSessionRuntime(t, w.Body.String())
+
+	// A fake element that COUNTS its writes, which is the whole point: innerHTML
+	// being reassigned to an identical string is a mutation an aria-live region
+	// still announces.
+	rt.run(`
+	  var __writes = 0;
+	  var syncStatusElem = {
+	    _html: "",
+	    get innerHTML() { return this._html; },
+	    set innerHTML(v) { __writes++; this._html = v; }
+	  };
+	  window.__writes = function () { return __writes; };
+	  document.getElementById = function (id) {
+	    return id === "sync-status" ? syncStatusElem : null;
+	  };
+	`)
+
+	// An anchor, so the region has a clock-dependent countdown to render.
+	rt.run("window.__setNow(1000000)")
+	rt.run(`window.strudelSession.scheduleCommit(function () {}, { epochMs: 1000000, cps: 0.5 }, 1, {}, null);`)
+	rt.settle()
+
+	rt.run("window.strudelSession.updateSyncStatusUI()")
+	first := rt.eval("window.__writes()").ToInteger()
+	if html := rt.eval("syncStatusElem.innerHTML").String(); html == "" {
+		t.Fatal("updateSyncStatusUI rendered nothing: the region is present but never written")
+	}
+
+	// Same clock, same state: an identical write must be suppressed.
+	rt.run("window.strudelSession.updateSyncStatusUI()")
+	rt.run("window.strudelSession.updateSyncStatusUI()")
+	if got := rt.eval("window.__writes()").ToInteger(); got != first {
+		t.Errorf("writes after 3 renders of unchanged state = %d, want %d: an identical write still mutates the aria-live region", got, first)
+	}
+
+	// Moving the clock changes the countdown, so the write MUST happen now.
+	rt.advance(300)
+	rt.run("window.strudelSession.updateSyncStatusUI()")
+	if got := rt.eval("window.__writes()").ToInteger(); got <= first {
+		t.Errorf("writes after the clock moved = %d, want MORE than %d: suppressing the write suppressed a real change too", got, first)
+	}
+
+	// pagehide must stop the interval, or it runs forever against a frozen clock.
+	rt.run("window.strudelSession.startStatusTimer()")
+	before := rt.eval("window.__pendingTimers()").ToInteger()
+	if before == 0 {
+		t.Fatal("no timer pending after startStatusTimer: the interval is not running, so teardown proves nothing")
+	}
+	rt.run("window.__fireEvent('pagehide')")
+	if got := rt.eval("window.__pendingTimers()").ToInteger(); got >= before {
+		t.Errorf("pending timers after pagehide = %v, want fewer than %v: the status interval outlived the page", got, before)
+	}
+
+	// And it must stay stopped: advancing a long time re-arms nothing.
+	settled := rt.eval("window.__pendingTimers()").ToInteger()
+	rt.advance(5000)
+	if got := rt.eval("window.__pendingTimers()").ToInteger(); got > settled {
+		t.Errorf("pending timers after advancing 5s post-pagehide = %v, want no more than %v: the interval re-armed after teardown", got, settled)
 	}
 }

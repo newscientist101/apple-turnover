@@ -73,13 +73,33 @@ html, body {
 }
 
 .agent-message {
-  flex: 1;
+  flex: 1 1 0px;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   color: #e0e6f8;
   font-size: 13px;
   letter-spacing: 0.02em;
+}
+
+.sync-status {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex: 0 100 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sync-status:empty {
+  display: none;
+}
+
+.sync-drift {
+  color: var(--accent-cyan);
+  font-weight: bold;
 }
 
 .play-btn {

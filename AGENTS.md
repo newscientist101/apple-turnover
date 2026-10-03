@@ -294,6 +294,36 @@ Recorded here so the "not yet wired" list above cannot quietly become wrong.
   exercise the real policy in milliseconds. Mutation 63 removes the pong
   deadline and wedges instead of failing.
 
+* **Visible per-client sync status** (`srv/templates/welcome.html`,
+  `srv/static/style.css`, `srv/static/session.js`, issue
+  strudel-agent-3vo.8.5): the drift that bar alignment reduces but cannot
+  eliminate is now VISIBLE, which is what makes the honesty in AGENT_API.md
+  checkable from the UI rather than a claim. `#sync-status` (in the agent panel,
+  `aria-live="polite"`) shows connection state, current cycle/bar, the ms to a
+  pending commit, the bar the last commit landed on, and the observed drift.
+  Three properties are load-bearing, and each has a mutation (rows 93-97):
+  - **It reports what it OBSERVED, not what it hopes.** With no usable anchor
+    `sync.js` records `{unscheduled: true}` and the region says "last:
+    unscheduled"; there is no grid to align to, and rendering a confident
+    "bar N" there would be the exact dishonesty this bead exists to remove.
+  - **The region writes ONLY when the rendered text changes.** The countdown
+    moves several times a second and the region is `aria-live`, so an
+    unconditional `innerHTML` assignment announces every tick — the feature
+    works and is still unusable with a screen reader. `aria-live` announces on a
+    MUTATION, so an identical write is what stays quiet (row 96).
+  - **The interval is torn down on `pagehide`.** `pagehide` rather than `unload`
+    because it also fires when the page enters the back/forward cache, where the
+    interval would otherwise keep ticking against a frozen clock. This makes
+    `stopStatusTimer` reachable rather than dead code (row 97).
+  Proof is by EXECUTING the served bytes in goja (`srv/coherence_test.go`), for
+  the same reason as the cycle-aligned commit above: a status region that
+  silently fails to render leaves the source perfectly readable. Two harness
+  facts are load-bearing for that: the fake `setInterval` RE-ARMS (a one-shot
+  push would make the countdown untestable and leave `pagehide` nothing to stop),
+  and the fake `window` carries `addEventListener` — modelled rather than
+  guarded in `session.js`, so an unmodelled API fails loudly instead of letting
+  an untested path through.
+
 * **Cycle-aligned client commit** (`srv/static/sync.js`, `srv/static/session.js`,
   issue strudel-agent-3vo.8.2): the client half of the shared timeline. A
   listener used to commit via `live.setPattern` the instant a frame landed, so

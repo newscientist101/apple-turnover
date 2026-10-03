@@ -43,6 +43,87 @@
   // pending.
   var pendingCommit = null;
 
+  // Sync status UI state (issue .3vo.8.5).
+  var connectionState = "reconnecting";
+  var latestAnchor = null;
+  var statusTimer = null;
+
+  function updateSyncStatusUI() {
+    var el = document.getElementById("sync-status");
+    if (!el) {
+      return;
+    }
+
+    var parts = [];
+
+    // a. connection state
+    parts.push(connectionState);
+
+    var nowMs = Date.now();
+
+    // b. current cycle and bar
+    if (sync() && sync().usableAnchor(latestAnchor)) {
+      var cyclePos = sync().cyclePosition(latestAnchor, nowMs);
+      var bar = Math.floor(cyclePos);
+      parts.push("cycle " + cyclePos.toFixed(1) + " (bar " + bar + ")");
+    }
+
+    // c. ms to the next commit WHILE one is pending
+    if (pendingCommit && typeof pendingCommit.targetMs === "function" &&
+        (!pendingCommit.isCancelled || !pendingCommit.isCancelled())) {
+      var targetMs = pendingCommit.targetMs();
+      var remainingMs = Math.max(0, Math.round(targetMs - nowMs));
+      parts.push("next in " + remainingMs + "ms");
+    }
+
+    // d & e. last commit bar & observed drift
+    var lastObs = sync() ? sync().lastObservation() : null;
+    if (lastObs) {
+      if (lastObs.unscheduled) {
+        parts.push("last: unscheduled");
+      } else {
+        var lastBar = typeof lastObs.cycle === "number" ? Math.floor(lastObs.cycle) : "?";
+        var driftVal = lastObs.driftMs;
+        var driftText = typeof driftVal === "number"
+          ? (driftVal >= 0 ? "+" : "") + Math.round(driftVal) + "ms"
+          : String(driftVal);
+        parts.push("last bar " + lastBar + " (<span class=\"sync-drift\">drift " + driftText + "</span>)");
+      }
+    }
+
+    // The countdown makes this text change several times a second, and the
+    // region is aria-live="polite" — so writing unconditionally would announce
+    // every tick to a screen reader and turn a status line into a chatterbox.
+    // aria-live announces on a MUTATION of the region, so an identical write is
+    // what stays quiet. Comparing before writing is what buys that: the
+    // countdown still updates, but only the values that actually moved speak.
+    var next = parts.join(" | ");
+    if (el.innerHTML === next) {
+      return;
+    }
+    el.innerHTML = next;
+  }
+
+  function startStatusTimer() {
+    if (statusTimer === null) {
+      statusTimer = setInterval(updateSyncStatusUI, 250);
+    }
+  }
+
+  function stopStatusTimer() {
+    if (statusTimer !== null) {
+      clearInterval(statusTimer);
+      statusTimer = null;
+    }
+  }
+
+  // The countdown only needs to tick while the page is on screen. pagehide
+  // (not unload) is the right hook because it also fires when the page enters
+  // the back/forward cache, where the interval would otherwise keep running
+  // against a frozen clock. stopStatusTimer is idempotent, so a restored page
+  // that also re-runs start is harmless.
+  window.addEventListener("pagehide", stopStatusTimer);
+
   // window.strudelSync (sync.js, issue .3vo.8.2) owns the shared bar grid.
   // Resolved per call rather than captured at load: the module is loaded with
   // defer alongside this one, and a client served a cached session.js must still
@@ -212,6 +293,9 @@
     // the audio commit waits for the bar.
     var stats = collectStats(pattern);
     var anchor = snapshot.anchor || null;
+    if (anchor) {
+      latestAnchor = anchor;
+    }
 
     // A newer version supersedes a pending commit: cancel before scheduling, so
     // a superseded pattern can never land after the version that replaced it.
@@ -228,6 +312,10 @@
       return live.setPattern(pattern, false);
     }, anchor, version, stats, pattern);
 
+    // Refresh now that this caller owns the new handle, so the countdown
+    // describes the commit that is actually pending rather than the previous one.
+    updateSyncStatusUI();
+
     return postEvalResult(version, true, "", stats);
   }
 
@@ -239,13 +327,17 @@
   // silence, and the observation is marked unscheduled so the UI can say so
   // honestly instead of reporting a fake aligned commit.
   function scheduleCommit(commit, anchor, version, stats, pattern) {
+    if (anchor) {
+      latestAnchor = anchor;
+    }
     if (!sync() || !sync().usableAnchor(anchor)) {
       if (sync()) {
         sync().observe({ version: version, unscheduled: true });
       }
+      updateSyncStatusUI();
       return commitNow(commit, version, stats, pattern);
     }
-    return sync().scheduleAtBoundary(function (at) {
+    var handle = sync().scheduleAtBoundary(function (at) {
       sync().observe({
         version: version,
         cycle: sync().cyclePosition(anchor, at.actualMs),
@@ -253,8 +345,13 @@
         actualMs: at.actualMs,
         driftMs: at.driftMs,
       });
+      updateSyncStatusUI();
       return commitNow(commit, version, stats, pattern);
     }, anchor, Date.now(), sync().LEAD_MS);
+    // pendingCommit is assigned by the CALLER, which already owns it and
+    // cancels it before scheduling. Setting it here as well gave one variable
+    // two owners, and the countdown below depends on which write landed.
+    return handle;
   }
 
   // The commit itself, plus everything that describes it: the viz hook, the log
@@ -291,6 +388,8 @@
 
     ws.onopen = function () {
       attempt = 0;
+      connectionState = "connected";
+      updateSyncStatusUI();
       console.info("[session] subscribed to " + WS_PATH);
     };
 
@@ -303,6 +402,10 @@
         return;
       }
       var snapshot = frame && frame.snapshot;
+      if (snapshot && snapshot.anchor) {
+        latestAnchor = snapshot.anchor;
+      }
+      updateSyncStatusUI();
       if (!snapshot) {
         return;
       }
@@ -330,6 +433,8 @@
     };
 
     ws.onclose = function () {
+      connectionState = "reconnecting";
+      updateSyncStatusUI();
       var delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, attempt || 0), RECONNECT_MAX_MS);
       console.warn("[session] disconnected; reconnecting in " + delay + "ms");
       setTimeout(function () {
@@ -360,6 +465,7 @@
       var sandbox = buildSandbox(strudel);
       window.strudelSandbox = sandbox;
       console.info("[session] sandbox repl ready; subscribing");
+      startStatusTimer();
       connect(sandbox, live, 0);
     }).catch(function (err) {
       console.error("[session] live repl failed to start:", err);
@@ -382,6 +488,12 @@
     getLastVersion: function () { return lastVersion; },
     getCurrentPattern: function () { return currentPattern; },
     getPendingCommit: function () { return pendingCommit; },
+    updateSyncStatusUI: updateSyncStatusUI,
+    getConnectionState: function () { return connectionState; },
+    // Test/debug seam: startStatusTimer is normally called once from boot, but a
+    // test needs to observe the interval actually ticking and actually stopping.
+    startStatusTimer: startStatusTimer,
+    stopStatusTimer: stopStatusTimer,
   };
 
   if (document.readyState === "loading") {

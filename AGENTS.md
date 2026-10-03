@@ -1,6 +1,48 @@
 # Agent Instructions
 
-Do not put build/run instructions here, and do not put invariants in the README.
+This file holds the **invariants and the conventions that keep them true**.
+Three documents, three jobs — do not blur them:
+
+| Document | Owns |
+| --- | --- |
+| `README.md` | how to build, run and deploy it; what it does and does not promise a user |
+| `AGENT_API.md` | the wire contract an external agent codes against (HTTP bodies, frame kinds) |
+| `AGENTS.md` (this file) | the architecture invariants, and how each one is proved |
+
+Concretely: a build or run instruction belongs in `README.md`, a field name or
+status code belongs in `AGENT_API.md`, and a rule that a test enforces belongs
+here. If you find yourself adding a fourth kind of statement to the wrong file,
+move it rather than duplicating it — the duplication is what goes stale.
+
+Both other documents are **machine-checked against the source and against a
+running server**, so "the doc is probably fine" is not available here:
+`TestReadmeAPITableMatchesRoutes` and `TestAgentAPIDoc*` fail the build when
+they disagree with `routes()` or with live bytes. A change to the contract is a
+change to `AGENT_API.md` **and** the code, in the same commit.
+
+## Repository map
+
+```text
+cmd/srv/            main package; the only thing that calls srv.New().Serve()
+cmd/agentcli/       pure-Go client for the documented HTTP API (a harness
+                    should not hand-roll curl for this)
+srv/                the server package
+  server.go         Server struct, New(), Serve(), HandleRoot, Handler()
+  api.go            the agent HTTP API and the whole routing tree (routes())
+  conductor.go      the in-memory Conductor: the one live performance
+  hub.go            the fan-out core: one goroutine owns the subscriber set
+  ws.go             GET /ws, the listener endpoint (handshake, relay, reaping)
+  event.go          the ONE listener frame shape, and Server.broadcast
+  static/           browser assets: session.js, editor.js, viz.js, sync.js
+  templates/        welcome.html, the three-region shell
+scripts/            mutation-check.sh (the non-vacuity gate), mutation-bench.sh
+docs/mutation-bench/ the grid timing baselines and the gomutants verdict
+srv.service         the systemd unit the deployment uses
+```
+
+There is no database, no build step for the browser assets, and no vendored
+copy of anything: the page loads CodeMirror and `@strudel/web` from pinned CDN
+URLs in `welcome.html`. That is why there is no npm/Vite toolchain here.
 
 ## Task tracking: beads (`bd`)
 
@@ -151,63 +193,179 @@ same reason.
 
 ## Architecture invariants
 
-These are easy to break and each has tests. Changes should expect failures until the invariant is preserved.
+These are easy to break and each has tests. Changes should expect failures until
+the invariant is preserved. Where a mutation row proves one, it is named — the
+grid in `scripts/mutation-check.sh` is the executable form of this section.
 
 **Conductor (`srv/conductor.go`)**
 
 * One Conductor owns performance state; nothing is persisted.
-* Stores code document, monotonically increasing version, timeline anchor, last agent message, bounded history, playing state, and listener count.
+* It stores the code document, a monotonically increasing version, the timeline
+  anchor, the last agent message, a bounded history ring, the playing flag and
+  the listener count. `Publish` takes the write lock, `Snapshot` the read lock,
+  and every operation is safe for concurrent use.
 * Versions are contiguous, unique, never reused, and never skipped, including under concurrent pushes.
+* Only `Publish` bumps the version. `SetMessage`, `SetAnchor`, `SetPlaying` and
+  `SetListenerCount` all leave it alone: a narration, a tempo change, a
+  transport move and somebody connecting are not new revisions of the document,
+  and a version bump would put each of them in the code history.
+* A `Snapshot` never aliases Conductor internals — `History` is rebuilt and
+  `LastEvalResult`/`Stats` are deep-copied on every call. A caller holding a
+  snapshot must not be able to reach back into the live state through it.
+* `RecordEvalResult` returns `(stored bool, err error)`. The bool is the whole
+  point: `nil` error cannot distinguish "this changed the performance" from
+  "this was understood and deliberately dropped as stale", and only the former
+  may be broadcast.
 
 **Hub (`srv/hub.go`)**
 
 * One goroutine exclusively owns the subscriber set.
 * It is independent of the Conductor and wire format and broadcasts one encoded `[]byte` to subscribers.
-* The optional count hook is `func(int) []byte`: it is handed the count and returns a frame the HUB delivers, to every subscriber except the one that caused the change. It must not call back into the Hub — it runs on the hub goroutine, so that deadlocks.
-* `SubscriberCount` is a synchronous round-trip and can block forever if the hub wedges.
-* Slow subscribers are dropped and their channel is closed exactly once; a double close would panic (mutation `28-hub-double-close-allowed`).
-* Hub shutdown and subscriber drop both appear as channel closure.
+* The optional count hook is `func(int) []byte`: it is handed the count and
+  returns a frame the HUB delivers, to every subscriber except the one that
+  caused the change. It must not call back into the Hub — it runs on the hub
+  goroutine, so that deadlocks.
+* `SubscriberCount` is a synchronous round-trip and can block forever if the hub
+  wedges, so every call to it in a test is bounded (see Boundedness below).
+* Slow subscribers are dropped and their channel is closed exactly once; a double
+  close would panic (mutation `28-hub-double-close-allowed`). `Unsubscribe` is
+  idempotent and reports whether it was the one that removed the subscriber.
+* Hub shutdown and subscriber drop both appear as channel closure, and a receiver
+  must use the two-value receive form — `ok == false` means "no longer
+  subscribed", which is the same signal either way.
+* The per-subscriber buffer is `HubDefaultSendBuffer` (64) MESSAGES, not bytes. At
+  the 64 KiB body cap the worst case held for one stalled client is a few MiB,
+  and such a client is dropped at the first message that does not fit.
 
 **WebSocket (`srv/ws.go`)**
 
 * `/ws` must never block on a client.
-* Use `CloseRead`/its canceled context to detect disconnects; the handler does not need its own read loop.
-* Every frame write has a per-frame write deadline via `defaultWSWriteTimeout` (5s).
-* Unsubscribe on every exit path so a listener cannot leak a subscriber slot.
-* Handshake/error behavior is fixed: 426 for a handshake-less GET, 400 for a bad `Sec-WebSocket-Version`, 501 for a writer that cannot be hijacked, 403 for a cross-origin handshake, 405 + `Allow`, 1001 for a listener arriving after hub shutdown, and clean 1000 on hub shutdown.
+* Use `CloseRead`/its canceled context to detect disconnects; the handler does
+  not need its own read loop. `CloseRead` reads in the library's goroutine and
+  answers control frames, so the pong is consumed there and not by the handler.
+* Every frame write has a per-frame write deadline via `defaultWSWriteTimeout`
+  (5s). Without one, a frame larger than a dead client's socket buffers waits
+  forever for space the client will never provide.
+* Unsubscribe on every exit path so a listener cannot leak a subscriber slot —
+  `defer s.Hub.Unsubscribe(sub)` sits immediately after `Subscribe`, above every
+  later return, so an early return cannot skip it. `CloseNow` is the deferred
+  backstop: it cannot block on a peer that never answers a close handshake.
+* The handler selects on the subscriber channel CLOSING as well as on `Hub.Done`
+  — a listener the hub dropped for falling behind looks exactly like one the hub
+  shut down, and treating them differently would strand a dropped client.
+* A failed catch-up snapshot is **not** fatal. The listener is still subscribed
+  and will receive every later change; dropping the connection instead would turn
+  a transient write timeout into a listener that can never hear anything again.
+* Handshake/error behavior is fixed: 426 for a handshake-less GET, 400 for a bad
+  `Sec-WebSocket-Version`, 501 for a writer that cannot be hijacked, 403 for a
+  cross-origin handshake, 405 + `Allow`, 1001 for a listener arriving after hub
+  shutdown, and clean 1000 on hub shutdown. The 426/400/501/403 cases are written
+  by `websocket.Accept` itself from `nil` options, not by code in this repo — the
+  same-origin rule is the library's default. `TestWSUpgradeIsSameOriginOnly` pins
+  the behaviour, so a future `AcceptOptions` that loosened it would fail; do not
+  "fix" a handshake failure by adding options here.
+* `Server.Serve` sets no `WriteTimeout`, so the 5s close handshake is bounded by
+  the library's own deadline and cannot be cut short by the `http.Server`.
 * Match exactly one `/ws` path.
 
-**API**
+**API (`srv/api.go`)**
 
-* Apply the 64 KiB `APIMaxBodyBytes` payload cap centrally in `limitAPIRequestBody`, so no endpoint can forget it.
-* Size checking occurs before parsing, so oversized + malformed requests return 413, not 400.
-* `/api` errors are JSON; other net/http errors remain plain text.
+* Apply the 64 KiB `APIMaxBodyBytes` payload cap centrally in
+  `limitAPIRequestBody`, so no endpoint can forget it. Handlers detect the trip
+  via `*http.MaxBytesError` and answer 413.
+* Size checking occurs before parsing, so oversized + malformed requests return
+  413, not 400. `decodeBody` drains the capped body before decoding for the same
+  reason: a stream decoder can hit a *syntax* error in the first few bytes of an
+  oversized body and report a 400 instead of the cap violation.
+* `/api` errors are JSON — always exactly `{"error": "..."}` — and every `/api`
+  route carries an explicit non-GET fallback and a catch-all, so the agent never
+  receives net/http's plain-text 404/405. Non-`/api` net/http errors stay plain
+  text on purpose.
+* `decodeBody` rejects unknown fields and trailing data. A typo'd `messge` must
+  fail loudly, and a second JSON value in one body must not be silently ignored.
+* The argument-free endpoints (`/api/hush`, `/api/play`) go through
+  `rejectUnexpectedBody`, so a client cannot smuggle a `code` field through them
+  believing it changed the music.
+* An empty `code` or `message` is a 400, never a silent no-op: a no-op in the
+  agent's loop is indistinguishable from a lost request.
+* Broadcasting happens only AFTER a write is accepted, and the snapshot that is
+  broadcast is the same one that is returned. `Server.broadcast` is the single
+  place that encodes and fans out, so no call site can invent its own path.
+* `Handler()` exists so out-of-package tests can drive the REAL `routes()`. It is
+  deliberately behaviour-free; `Serve` mounts `routes()` exactly as before.
 
-## Not yet wired
+**Listener frames (`srv/event.go`)**
 
-Do not assume these features work; they remain open work.
+* There is exactly ONE frame shape: `{"kind": ..., "snapshot": {...}}`. A
+  listener that connects mid-performance gets the same shape as one watching a
+  change, so the browser client has a single decode path. A bare snapshot on
+  connect plus an envelope on change would force every client to branch on shape
+  before it could read a field.
+* The `snapshot` is a marshalled `Snapshot` VALUE, not a re-shaped copy. That is
+  what keeps the frame body byte-identical to `GET /api/state`; the harness
+  asserts byte equality, so do not "simplify" the encoder into a second shape.
+* `encodeEvent` is the single place a frame is built (both broadcast and
+  snapshot-on-connect go through it). It returns `nil` on a marshal failure —
+  a dropped message, not a corrupt one — and logs, because a silent drop is a
+  silent wrongness.
+* The kinds are named for what the AGENT did, not for which endpoint produced
+  them, so two routes with the same listener-visible effect agree on one name.
+  `transport` covers hush *and* play on purpose: what a listener needs is the
+  resulting `playing` flag, which the snapshot carries.
 
-* Client commits are bar-ALIGNED, not sample-accurate, and cross-machine sync is
-  still out of scope; the honest limitation is written up in strudel-agent-3vo.8.3.
-* Nothing plays audio **on the server**, and nothing ever will: there is no audio
-  in Go. A verdict reaches the agent only because a *browser* evaluated the
-  pattern and reported it, so a performance with no listener connected produces
-  no `eval-result` at all. The agent loop is closed by polling, not by a reply.
-* Coherence is app-layer only. Two machines have no common clock to align to
-  (NeoCyclist shares a clock between instances in the SAME browser only), so the
-  anchor plus the bar-aligned commit is the whole mechanism and drift within a
-  bar is real, merely made visible rather than eliminated.
+**Anchor and coherence (`srv/conductor.go`, `POST /api/anchor`)**
 
-## Wired since the last audit
+* A re-anchor REPLACES the whole timeline; it is not a patch. Both `epochMs` and
+  `cps` are required, and a body naming only one is a 400. Deliberate: the anchor
+  is the one number every client maps its whole scheduler position onto, so there
+  is no per-client fallback that could soften a half-applied one.
+* Validation lives in `Conductor.SetAnchor`, not in the HTTP handler. A guard at
+  one call site is a guard a second caller forgets.
+* `validateAnchorAt` takes the reference clock as a **parameter**. That is not
+  tidiness: the bound case (`epochMs` exactly `AnchorMaxSkewMS` from now) is
+  otherwise asserted against a moving target and fails intermittently for reasons
+  that have nothing to do with the guard.
+* `!(cps > 0)` rejects zero, negative and NaN in one clause, so there is no
+  separate NaN case to forget. Skew is compared as an ABSOLUTE value, so a clock
+  running fast is refused on the same terms as one running slow.
+* A refused re-anchor leaves the stored anchor UNCHANGED and broadcasts NOTHING.
+  Telling listeners to adopt a timeline the server rejected is unrecoverable: each
+  client re-derives its position from the anchor it was last told, so the belief
+  is invisible to it and surfaces only later as music that does not line up.
+* The `POST /api/anchor` response bytes are the `GET /api/state` bytes. An agent
+  that re-anchors and then reads the state must not see a different epoch than
+  the one its own 200 reported.
 
-Recorded here so the "not yet wired" list above cannot quietly become wrong.
+**Page shell and static assets (`srv/server.go`, `srv/api.go`)**
+
+* `GET /{$}` is exactly `/`, and `pageData` is a **struct passed to the
+  template**, not `nil`. `html/template` only raises an error for an
+  unresolvable field when the data is a struct; against `nil` a bad reference
+  renders an empty string and `Execute` returns nil, so `HandleRoot` would serve
+  a silently truncated page with a 200. Mutation row 14 depends on this.
+* The shell is asserted on **end-of-document markers** (`</main>`, `</html>`, plus
+  a `HasSuffix` on `</html>`), not on a substring near the top. A shell that
+  renders its first half and dies is the defect that matters.
+* `/static/` is served by `http.FileServer` and must never be swallowed by the
+  API's JSON error handling — the tests assert the `Content-Type` is not
+  `application/json` for every module, because that failure is otherwise silent.
+* Every browser module is wired by an explicit `<script src="/static/...">` tag
+  in `welcome.html`, and each tag is pinned by a test asserting it is still
+  there. Dropping a tag is a one-character edit that silently removes a feature,
+  so the tag itself is the invariant.
+
+## Listener fan-out and the browser client
+
+Everything in this section is shipped and load-bearing. Each property names the
+mutation row that proves it, because "the grid catches it" is only true while the
+row is anchored where the property actually lives.
 
 * **The agent CLI** (`cmd/agentcli`, issues strudel-agent-3vo.9.1,
   strudel-agent-3vo.8.4): a pure-Go client for the documented HTTP API, so the
   harness stops hand-rolling `curl`. It adds NO server behaviour — every
   subcommand maps one-to-one onto an endpoint, and `srv.Server.Handler()` exists
   (behaviour-free) purely so its tests can drive the REAL `routes()` instead of
-  a fake that could drift from the contract. Two properties are load-bearing and
+  a fake that could drift from the contract. Three properties are load-bearing and
   each has a mutation (rows 70-73, 90-92):
   - **A rejection is never softened.** The server's `{"error": ...}` string is
     printed verbatim on stderr and the exit code is non-zero (1 for a refusal,
@@ -230,6 +388,11 @@ Recorded here so the "not yet wired" list above cannot quietly become wrong.
     (row 91) is caught by the resulting 400, and removing the pre-read
     altogether (row 92) is caught too — the two are separate defects, so both
     rows are needed rather than one.
+  - `-base` or `STRUDEL_AGENT_URL` selects the server; `-timeout` (10s) bounds
+    each request and is shared by the pre-read and the write, so one command
+    cannot spend twice the budget the caller asked for; `-json` prints the raw
+    server JSON for piping into `jq`. Subcommands: `state`, `push`, `message`,
+    `anchor`, `hush`, `play`, `eval-result`.
 
 * **Snapshot on connect** (`srv/ws.go`, `srv/event.go`): a listener that
   subscribes is sent the full state immediately as a `snapshot` frame, so a late
@@ -355,6 +518,33 @@ Recorded here so the "not yet wired" list above cannot quietly become wrong.
   bar-accurate. Nothing here is sample-accurate or cross-machine, and the
   per-client drift the UI reports is reduced by the anchor, not eliminated by it.
 
+* **Validate-then-commit, and why the order is the invariant**
+  (`srv/static/session.js`, `srv/session_client_test.go`): each pushed version is
+  evaluated in a SEPARATE sandbox repl, and only on success is it committed to the
+  live repl via `live.setPattern(pattern, false)`. This is live-change safety, not
+  tidiness: `repl.evaluate()` calls `hush()` BEFORE parsing, so pushing
+  unvalidated code at the live repl would silence every listener on bad code. The
+  sandbox absorbs that hush — its scheduler never starts — while the live repl
+  keeps playing. The served file is asserted to contain no `live.evaluate(` call;
+  that string is the invariant in code form.
+
+* **The live code view is read-only, and degrades** (`srv/static/editor.js`,
+  `srv/editor_view_test.go`, issue strudel-agent-3vo.6): the agent is the sole
+  writer of the one performer instance, so the view is read-only by default
+  (`spellcheck="false" readonly aria-readonly="true"`, and `readOnly` in both the
+  `fromTextArea` options and the later `setOption`). `editor.js` owns the ONLY
+  CodeMirror touchpoint: it upgrades the shell's `<textarea id="editor">` in
+  place when the pinned CDN bundle loaded, and drives the textarea directly
+  otherwise, so a blocked CDN degrades to a plain-text view rather than a blank
+  one. `session.js` reaches it only through `setCode`/`flashUpdate`/`markError`/
+  `clearError` — never the CodeMirror instance or the textarea value.
+
+* **The visualization is ours, not a dependency** (`srv/static/viz.js`,
+  `srv/viz_test.go`, issue strudel-agent-3vo.7): canvas renderers driven by
+  `Pattern.queryArc` (`@strudel/draw` is not in the bundle), fed by
+  `strudelViz.setPattern` and `strudelViz.onSnapshot`. It reads the shared anchor
+  for its playhead, so the picture sits on the same bar grid the audio does.
+
 * **Cycle-aligned client commit** (`srv/static/sync.js`, `srv/static/session.js`,
   issue strudel-agent-3vo.8.2): the client half of the shared timeline. A
   listener used to commit via `live.setPattern` the instant a frame landed, so
@@ -377,6 +567,11 @@ Recorded here so the "not yet wired" list above cannot quietly become wrong.
     hazard the immediate commit did not have: a pattern sitting in a timer,
     superseded. Uncancelled it lands AFTER its replacement, and every
     version-stamped surface then disagrees with the audio.
+  - **With no usable anchor, commit IMMEDIATELY and say so.** There is no grid to
+    align to, so `sync.js` runs the commit at once and records
+    `{unscheduled: true}`. An unaligned commit is strictly better than no commit;
+    what is not acceptable is rendering a confident "bar N" the client cannot
+    justify.
 
   **These properties are proved by EXECUTING the served bytes in goja, not by
   grepping for a marker** (`srv/coherence_test.go`). That is the same reasoning as
@@ -422,6 +617,40 @@ Recorded here so the "not yet wired" list above cannot quietly become wrong.
   that binds to the wrong block is a coin flip. `TestAgentAPIDocShapesAreStable`
   asserts the anchor set, so the set of checked shapes cannot quietly shrink.
 
+## Standing limitations
+
+These are **not** open work and not bugs. They are properties of the design, and
+the point of writing them down is that an agent must not promise a listener more
+than the system delivers. If one of these ever stops being true, that is a change
+to `AGENT_API.md` and `README.md` in the same commit as the code.
+
+* **Bar-aligned, never sample-accurate.** Strudel has no cross-machine clock:
+  `NeoCyclist` shares one only between instances in the *same* browser. The anchor
+  plus the cycle-aligned commit is the entire coherence mechanism, so two machines
+  land on the same *bar* and can still be tens of milliseconds apart within it —
+  different audio clocks, different output latencies. Never call this lockstep.
+* **Drift is made VISIBLE, not eliminated.** `#sync-status` reports the drift the
+  client actually observed, and says `unscheduled` rather than a confident bar
+  number when there is no usable anchor. An agent reading a nonzero drift has
+  learned something true about its listeners.
+* **Nothing plays audio on the server, and nothing ever will.** There is no audio
+  in Go and the server never evaluates JavaScript. A verdict reaches the agent
+  only because a *browser* evaluated the pattern and posted it, so a performance
+  with **no listener connected produces no `eval-result` at all**. The agent loop
+  closes by polling `GET /api/state`, not by a reply. A push that looks
+  unacknowledged is usually just an unheard one.
+* **The browser is the only evaluator.** A pattern that is valid JSON and invalid
+  strudel is accepted with a 200 and a bumped version. Only a browser turns that
+  into a verdict — which is what `POST /api/eval-result` carries, and why the
+  version number is the join key between the two halves.
+* **The page needs the network at load time.** CodeMirror 5.65.16 and
+  `@strudel/web` 1.3.0 load from public CDNs, pinned. There is no vendored copy
+  and no offline mode: no network, no audio. `editor.js` degrades to the plain
+  `<textarea>` when CodeMirror is absent — the *view* survives, the audio does not.
+* **Nothing is persisted.** No database, no saved sets, no history across a
+  restart: the server comes up at version 0, already playing, with an empty
+  history. `HistoryLimit` (32) bounds the in-memory ring only.
+
 ## Verification conventions
 
 `make verify` is the repo gate:
@@ -433,24 +662,45 @@ go build ./...
 go test ./... -race -count=1
 ```
 
-Run it before every commit.
+Each step is a separate recipe line and there is no `-` and no `|| true`, so make
+stops at the first failure and names it: a failing step cannot be mistaken for
+success. Nothing in the gate needs the network, a database, a real port or a
+running service, and `-count=1` defeats the test cache so a stale cached PASS
+cannot mask a regression.
 
-Commit each piece of completed work when the task finishes; never leave finished changes sitting uncommitted in the tree, and do not close a bead until its work is committed.
+Run it before every commit. Commit each piece of completed work when the task
+finishes; never leave finished changes sitting uncommitted in the tree, and do
+not close a bead until its work is committed.
 
 When adding verification, extend `make verify`; do not create throwaway scripts.
 
 Tests must:
 
-* avoid network, databases, real ports, and running services;
+* avoid network, databases, real ports, and running services — and must never
+  bind `:8000`, the production default, or they collide with a real deployment;
 * use `httptest` and loopback where appropriate;
 * bound every operation so a hang fails rather than waits.
 
-Main test locations:
+Main test locations — **extend these rather than adding a new harness**:
 
-* `srv/integration_test.go` — boots the real handler tree (`Server.routes()`, the same one `Server.Serve` mounts) / end-to-end API behavior.
-* `srv/ws_test.go` — WebSocket behavior.
-* `srv/hub_test.go` — Hub behavior.
-* Extend these files when a new feature needs proving; a one-off script is not part of the gate and the next agent will not run it.
+* `srv/integration_test.go` — boots the real handler tree (`Server.routes()`, the
+  same one `Server.Serve` mounts); end-to-end API and WebSocket behaviour, plus
+  the README/`AGENT_API.md` route tables and the shipped-binary checks.
+* `srv/ws_test.go` — WebSocket behaviour: upgrade, snapshot-on-connect, relay,
+  teardown, keepalive, reaping.
+* `srv/hub_test.go` — Hub behaviour: fan-out, ordering, churn, slow subscribers,
+  close-exactly-once, count-hook transitions.
+* `srv/api_test.go` — the agent API per endpoint: status codes AND bodies.
+* `srv/conductor_test.go`, `srv/conductor_eval_test.go` — the state core:
+  versioning, history ring, anchor, transport, listener count.
+* `srv/coherence_test.go` — the anchor route **and** the goja harness that
+  executes the served `session.js`/`sync.js` against a fake clock.
+* `srv/agent_api_doc_test.go` — holds `AGENT_API.md` to live bytes.
+* `srv/session_client_test.go`, `srv/editor_view_test.go`, `srv/viz_test.go` —
+  the wiring anchors for the browser modules: the shell must still load the tag,
+  and the served module must still carry its load-bearing markers.
+* `cmd/agentcli/main_test.go` — the CLI driven in-process against the REAL
+  handler tree over loopback `httptest`, asserting output **and** exit code.
 
 Coverage should include:
 
@@ -482,30 +732,62 @@ Close each `httptest.Server` with a timeout on a goroutine instead of `defer ts.
 
 ## Documentation needs no mutation proof
 
-Documentation does not require mutation testing.
+Documentation does not require mutation testing. It requires a check that
+compares it to something real:
 
-* Verify documentation against source.
-* Verify runtime behavior with a running server.
-* The README API table is checked against `routes()` by `TestReadmeAPITableMatchesRoutes`.
-* A missing route must fail the check rather than produce a vacuous pass.
+* `README.md`'s API table and `AGENT_API.md`'s endpoint table are both checked
+  against `routes()`, in BOTH directions, by `TestReadmeAPITableMatchesRoutes`. A
+  documented endpoint the server does not mount fails, and so does a mounted one
+  neither document names.
+* `AGENT_API.md`'s payload shapes are checked against a **running server** by
+  `TestAgentAPIDocPayloadShapesMatchARunningServer`, which drives the real
+  handler tree and diffs live JSON. Checking the doc against the *source* is not
+  enough: a json tag renamed in `srv/conductor.go` leaves a source-reading check
+  perfectly happy while every agent reading the doc breaks.
+* The frame-kind list is derived from `srv/event.go` itself, so a new kind is
+  picked up with no doc edit — and an undocumented one fails the build.
+* **A missing document FAILS; it does not skip.** `AGENT_API.md` is a shipped
+  artefact, and a skipped check here would be exactly the vacuous pass these
+  tests exist to prevent. (`README.md` is read with a `Skipf` only because the
+  harness itself lives inside the module and may be run from elsewhere.)
 
 ## Building
 
-`make build` produces:
+`make build` produces two binaries:
 
 ```text
-srv/srv
+srv/srv        # the server
+bin/agentcli   # the agent CLI
 ```
 
-`srv/` is a package directory, so `go build -o srv` places the binary inside the `srv/` directory. Run:
+Both paths are deliberate and both are awkward. `srv/` is a package directory, so
+`go build -o srv` lands the binary *inside* it — which is why `srv/srv` is in
+`.gitignore` and why `srv.service` points at that path. The CLI is built into
+`bin/` for the same reason: a stray executable sitting next to the package it was
+built from is confusing, and `bin/` is ignored wholesale.
 
-```text
-./srv/srv
-```
+Default listen address is `:8000`; override with `-listen`. Tests must not bind
+`:8000`.
 
-Default listen address is `:8000`; override with `-listen`.
+`README.md` has the user-facing build/run/deploy instructions. Keep it there.
 
-Tests must not bind `:8000`.
+## Deployment
+
+`make start`, `make stop` and `make restart` wrap `sudo systemctl {start,stop,restart} srv`.
+The `sudo` is required: a bare `systemctl start srv` fails with "Interactive
+authentication required" rather than starting anything, which reads like a broken
+unit instead of a missing privilege.
+
+Every recipe fails LOUDLY. `systemctl` exits non-zero when the unit is not
+installed and make stops at the first failing line, so a typo'd unit name can
+never be mistaken for a server that started. This is deliberate: a `start` target
+that reported success on a unit that does not exist would be worse than no target.
+
+`README.md` has the install sequence (`cp srv.service`, `daemon-reload`,
+`enable --now`). Note that `srv.service` hardcodes this checkout's
+`WorkingDirectory` and `ExecStart`; a moved directory yields a unit that starts
+and immediately exits, so those two paths are part of the deployment, not
+boilerplate.
 
 ## Mutation testing
 
@@ -523,14 +805,26 @@ MUTATION_TEST_ARGS="-run TestHub" ./scripts/mutation-check.sh
 
 Controls:
 
-* `MUTATION_TIMEOUT` — bounds one mutation run.
-* `GO_TEST_TIMEOUT` — `go test -timeout`.
-* `MUTATION_TEST_ARGS` — extra test arguments.
+* `MUTATION_TIMEOUT` (180s) — bounds one mutation run.
+* `GO_TEST_TIMEOUT` (150s) — `go test -timeout`, which is what turns a wedged test
+  into a failure with a stack dump rather than a hung run.
+* `MUTATION_TEST_ARGS` — extra test arguments, e.g. to hold only the integration
+  harness to account. This is the form that matters when a NEW test file is
+  added: it proves the new tests catch the defects on their own rather than
+  relying on older unit tests to do the work.
 
-The full grid (all 41 mutations) takes a few minutes. Start it in the background
-with its output redirected to a log file, then STOP — do not poll or sleep-wait
-for it. Tell the user the run has started and that they should prompt you again
-once it has finished; on that prompt, read the log and report the verdicts.
+The full grid takes several minutes — it is 98 rows, of which 65 are ROUTED to a
+narrow `-run` regex and only 33 pay for a whole-suite run, so the wall time is
+made of those 33. Start it in the background with its output redirected to a log
+file, then STOP — do not poll or sleep-wait for it. Tell the user the run has
+started and that they should prompt you again once it has finished; on that
+prompt, read the log and report the verdicts.
+
+Get the row count from the script, not from a doc:
+
+```text
+./scripts/mutation-check.sh --list | grep -cE '^[0-9]+[a-z]?-'
+```
 
 Mutations must:
 
@@ -550,7 +844,10 @@ Mutations must:
 | `WEAK`     | Compile/panic failure; does not prove the assertion caught it.        |
 | `BROKEN`   | Mutation anchor no longer matches the implementation.                 |
 
-`SURVIVED` and `WEAK` are both failures.
+`SURVIVED` and `WEAK` are both failures. `BROKEN` is not a test result but a
+maintenance signal: the anchor no longer matches the implementation, so the grid
+can no longer see the defect that row exists to catch. It must be re-anchored
+before the grid is trusted again.
 
 ## Why there is no gomutants gate
 
@@ -568,6 +865,14 @@ evidence. Two independent reasons, both measured:
   cached and replayed. Independently, 23 of the 41 curated mutations have no
   gomutants mutant expressing the same defect, including every `ws.go` row and
   both hang rows.
+
+Every number in that verdict was measured against the grid **as it stood in
+epic `strudel-agent-kki`**, when it had 41 rows. The grid has grown since (it is
+98 rows now), so treat the figures as the recorded measurement of that
+comparison, not as a current benchmark — the *reasons* are structural (a tool
+whose timeout verdict exits 0 cannot be the thing that says the suite is
+non-vacuous) and the structural reasons have not changed. Re-running gomutants
+means re-running the whole bench, not re-reading this paragraph.
 
 So: no `make verify` step, no `.gomutants.yml`, no pinned dependency. A tool
 whose `TIMED OUT` and `PENDING` verdicts both exit 0 must not be the thing that
@@ -641,19 +946,58 @@ A valid RED includes:
 
 The stack frames are the evidence, not the timeout alone.
 
+## Adding a feature, and the order to do it in
+
+The order matters more than it looks, because several of these steps *fail the
+build* until the earlier ones are done:
+
+1. **Write the failing test first**, in the existing harness for that layer
+   (`srv/integration_test.go`, `srv/ws_test.go`, `srv/hub_test.go`,
+   `srv/coherence_test.go`, …). Watch it fail for the right reason. A test that
+   passes before the implementation exists is not testing the feature.
+2. **Implement it in the layer that owns the property.** A broadcast belongs in
+   `Server.broadcast`; a listener-count change belongs in the hub's count hook;
+   a client-timing property belongs in `sync.js`. Putting a rule one layer out
+   from where it belongs is how the next change quietly undoes it.
+3. **Update `AGENT_API.md`** if the HTTP surface or the frame vocabulary changed,
+   in the same commit. `TestAgentAPIDoc*` will tell you if you forgot.
+4. **Update this file** if you added or changed an invariant. An invariant with no
+   entry here is one the next agent will break without knowing.
+5. **Add a mutation row** for the new behaviour, anchored in the source that owns
+   it, routed if it is expensive. Prove it is caught *before* you commit — a row
+   added and never run is worse than no row, because it reads as coverage.
+6. **`make verify`**, then commit.
+
+Two habits worth keeping:
+
+* **Assert on the body, not the status code.** A 200 with a truncated or empty
+  body is a real defect and a status-only assertion is blind to it.
+* **Prove the real thing, not a model of it.** For the browser that means running
+  the served bytes in goja; for the docs it means diffing against a live server;
+  for the CLI it means driving the real `routes()`. A harness that reimplements
+  the thing under test agrees with its bugs.
+
 ## Mutation routing
 
 A mutation may specify a 5th pipe-delimited field containing a `-run` regex.
 
 Rules:
 
-* The 5th field **replaces** `MUTATION_TEST_ARGS`.
-* A regex matching no tests produces `SURVIVED`.
-* Verify routed names with `go test ./srv/... -list '<regex>'`.
+* The 5th field **replaces** `MUTATION_TEST_ARGS` (it does not narrow it
+  further), so a routed row ignores an outer `-run` restriction.
+* A regex matching no tests produces `SURVIVED`. That is the desired outcome for
+  a typo — a row that can never fail is a row that proves nothing, and reporting
+  it as `SURVIVED` rather than passing is what makes the typo visible.
+* Verify routed names with `go test ./srv/... -list '<regex>'`. An alternation
+  such as `TestA|TestB` routes one mutation to several tests.
 * Route only genuinely expensive mutations.
-* Include all tests required to catch a mutation.
+* Include all tests required to catch a mutation. Under-routing is the quiet
+  failure here: the row still reports `caught`, but only because some unrelated
+  test noticed.
 
-Routing is an optimization, not a substitute for fixing unbounded waits.
+Routing is an optimization, not a substitute for fixing unbounded waits. Today 65
+of the 98 rows are routed and 33 pay for a whole-suite run; the wall time is made
+of those 33, which is why a routed row costs nearly nothing to add.
 
 ## Measurement discipline
 

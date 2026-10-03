@@ -169,6 +169,24 @@ var ErrInvalidAnchor = errors.New("invalid anchor")
 // A NaN cps is rejected by the same clause as a zero: `!(cps > 0)` is true for
 // NaN, so there is no separate NaN case to forget.
 func validateAnchor(epochMS int64, cps float64) error {
+	return validateAnchorAt(epochMS, cps, time.Now().UnixMilli())
+}
+
+// validateAnchorAt is validateAnchor against an EXPLICIT reference clock, in
+// epoch milliseconds.
+//
+// It exists so the boundary cases of the skew bound can be asserted exactly.
+// validateAnchor reads the wall clock at the instant it is called, so an epoch
+// built as (some captured now) - AnchorMaxSkewMS is inside the bound for one
+// millisecond and outside it for every millisecond after -- a test asserting
+// that value is accepted is asserting against a moving target, and fails
+// intermittently for reasons that have nothing to do with the guard. Passing the
+// clock in makes "exactly at the limit" a fact rather than a race.
+//
+// nowMS is deliberately a parameter of the guard rather than a field on the
+// Conductor: the guard is a pure predicate over (epoch, rate, clock), and the
+// store it protects is not what makes it time-dependent.
+func validateAnchorAt(epochMS int64, cps float64, nowMS int64) error {
 	if !(cps > 0) {
 		return fmt.Errorf("%w: cps must be greater than 0, got %g", ErrInvalidAnchor, cps)
 	}
@@ -178,7 +196,7 @@ func validateAnchor(epochMS int64, cps float64) error {
 	// The epoch is compared as an ABSOLUTE skew, so a clock running fast is
 	// refused on the same terms as one running slow rather than only the past
 	// being checked.
-	skew := time.Now().UnixMilli() - epochMS
+	skew := nowMS - epochMS
 	if skew < 0 {
 		skew = -skew
 	}

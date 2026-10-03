@@ -306,6 +306,19 @@ func TestConductorSetAnchorRejectsNonsense(t *testing.T) {
 func TestConductorSetAnchorAcceptsTheEdges(t *testing.T) {
 	now := time.Now().UnixMilli()
 
+	// The edge cases are asserted against validateAnchor with the reference
+	// clock FROZEN, not against SetAnchor with a live one. The skew guard
+	// compares the epoch to time.Now() at the instant of the call, so an epoch
+	// captured as now-AnchorMaxSkewMS is only inside the bound for the exact
+	// millisecond it was captured in: by the time SetAnchor reads the clock the
+	// skew has already grown past the limit and the "accepted" edge is refused.
+	// That made this test fail intermittently (a few runs in 400 under -race)
+	// for a reason that had nothing to do with the guard. Injecting the clock
+	// makes "exactly at the limit" mean what it says.
+	//
+	// SetAnchor is still exercised below on a value that is comfortably inside
+	// the bound, so the real entry point stays covered -- just not on a boundary
+	// that moves under it.
 	for _, tc := range []struct {
 		name    string
 		epochMS int64
@@ -316,12 +329,37 @@ func TestConductorSetAnchorAcceptsTheEdges(t *testing.T) {
 		{"skew exactly at the limit, future", now + AnchorMaxSkewMS, DefaultCPS},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := NewConductor(0)
-			if err := c.SetAnchor(tc.epochMS, tc.cps); err != nil {
-				t.Errorf("SetAnchor(%d, %v) = %v, want nil: the bound must include its own edge", tc.epochMS, tc.cps, err)
+			if err := validateAnchorAt(tc.epochMS, tc.cps, now); err != nil {
+				t.Errorf("validateAnchorAt(%d, %v) = %v, want nil: the bound must include its own edge", tc.epochMS, tc.cps, err)
 			}
 		})
 	}
+
+	// One step beyond the edge is refused, so "includes its own edge" is not
+	// just a looser bound wearing the same test.
+	for _, tc := range []struct {
+		name    string
+		epochMS int64
+		cps     float64
+	}{
+		{"rate one step past the ceiling", now, AnchorMaxCPS + 1},
+		{"skew one step past the limit, past", now - AnchorMaxSkewMS - 1, DefaultCPS},
+		{"skew one step past the limit, future", now + AnchorMaxSkewMS + 1, DefaultCPS},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateAnchorAt(tc.epochMS, tc.cps, now); err == nil {
+				t.Errorf("validateAnchorAt(%d, %v) = nil, want a refusal one step past the edge", tc.epochMS, tc.cps)
+			}
+		})
+	}
+
+	// The exported entry point, away from the moving edge.
+	t.Run("SetAnchor accepts an anchor comfortably inside the bound", func(t *testing.T) {
+		c := NewConductor(0)
+		if err := c.SetAnchor(now, DefaultCPS); err != nil {
+			t.Errorf("SetAnchor(%d, %v) = %v, want nil", now, DefaultCPS, err)
+		}
+	})
 }
 
 // TestConductorLastAgentMessage covers narration semantics: the conductor

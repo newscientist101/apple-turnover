@@ -190,6 +190,8 @@ Do not assume these features work; they remain open work.
 * No browser client/audio playback exists yet. `/` and `srv/static/` are still the template content.
 * The verified fan-out path stops at the API: nothing yet proves a listener
   renders what it receives, because there is no browser client.
+* Client commits are bar-ALIGNED, not sample-accurate, and cross-machine sync is
+  still out of scope; the honest limitation is written up in strudel-agent-3vo.8.3.
 
 ## Wired since the last audit
 
@@ -282,6 +284,48 @@ Recorded here so the "not yet wired" list above cannot quietly become wrong.
   Both budgets live on `Server` as fields, like `wsWriteTimeout`, so the tests
   exercise the real policy in milliseconds. Mutation 63 removes the pong
   deadline and wedges instead of failing.
+
+* **Cycle-aligned client commit** (`srv/static/sync.js`, `srv/static/session.js`,
+  issue strudel-agent-3vo.8.2): the client half of the shared timeline. A
+  listener used to commit via `live.setPattern` the instant a frame landed, so
+  each client committed mid-cycle at whatever moment its OWN frame arrived and
+  two listeners on one anchor landed on different bars. The commit now defers to
+  `window.strudelSync.scheduleAtBoundary`. Four properties are load-bearing, and
+  each has a mutation (rows 86-89):
+  - **Validation stays immediate; only the commit defers.** The
+    `POST /api/eval-result` report is the agent's feedback loop, so delaying it
+    behind a bar line would stall the loop for no coherence gain.
+  - **The LEAD is load-bearing** (row 88, the subtle one). The commit is
+    targeted the LEAD past the bar line, not AT it. Targeting the line leaves no
+    margin, so any lateness carries the commit into the next bar and two clients
+    that received the same frame milliseconds apart end up a full bar apart.
+  - **The re-check is a SEPARATE property from the lead.** A `setTimeout` that
+    fires early must not commit early — that is the same off-by-one-bar defect
+    arriving through the scheduler instead of through the arithmetic. So the
+    tick recomputes against the clock and re-arms rather than firing.
+  - **A newer version cancels a pending commit** (row 89). Deferral introduces a
+    hazard the immediate commit did not have: a pattern sitting in a timer,
+    superseded. Uncancelled it lands AFTER its replacement, and every
+    version-stamped surface then disagrees with the audio.
+
+  **These properties are proved by EXECUTING the served bytes in goja, not by
+  grepping for a marker** (`srv/coherence_test.go`). That is the same reasoning as
+  `TestAgentAPIDocPayloadShapesMatchARunningServer`: a subtly wrong `floor()` or
+  a session.js that quietly stops deferring both leave the source perfectly
+  readable while every listener drifts a bar apart. Concretely:
+  - `TestSessionDefersTheCommitToTheBoundary` drives the served **session.js**,
+    because the decision to defer lives there. A suite exercising only sync.js
+    cannot see it — which is exactly how row 87 SURVIVED its first run. Do not
+    "simplify" that harness back to sync.js alone.
+  - The fake clock is advanced explicitly and `runJS` interrupts any script that
+    exceeds its budget, so a timing test can never hang the gate.
+  - Bar numbers are computed by the **client's own** `cyclePosition`, not by the
+    test's arithmetic: a test that duplicated the client's bug would agree with
+    it, and the drift would be invisible.
+  - goja's `Interrupt` takes the value to interrupt WITH, not a channel to wait
+    on — passing a channel interrupts the very next `Run*`. The watchdog joins
+    before `ClearInterrupt`, because a concurrent interrupt would leave the
+    runtime permanently broken for every later call.
 
 * **The agent contract doc is machine-checked** (`AGENT_API.md`,
   `srv/agent_api_doc_test.go`, issue strudel-agent-3vo.9.2): the document an

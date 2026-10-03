@@ -625,6 +625,14 @@ func TestAgentAPIDocDocumentsTheLoop(t *testing.T) {
 		{"that POST /api/code bumps the version by one", "by exactly one"},
 		{"the 64 KiB body cap", "64 KiB"},
 		{"the snapshot-on-connect catch-up", "mid-performance"},
+		// The coherence LIMITATION. These are prose, so nothing else keeps them
+		// present, and an agent that overclaims here tells a listener two
+		// machines are playing in lockstep when only the bar is shared.
+		{"that strudel has no cross-machine sync", "no cross-machine sync"},
+		{"that the goal is bar alignment", "bar-aligned"},
+		{"that sample-accurate sync is out of scope", "sample-accurate"},
+		{"what a drifted listener should expect", "has drifted should therefore expect"},
+		{"that an unalignable listener says so rather than claiming a bar", "unscheduled"},
 	} {
 		if !strings.Contains(doc, must.needle) {
 			t.Errorf("AGENT_API.md no longer states %s (looked for %q): this is the guidance an external agent codes its loop from", must.what, must.needle)

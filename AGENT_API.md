@@ -112,9 +112,39 @@ bump the version: it moves where the shared timeline starts, not what is
 playing, so it does not belong in the code history. Listeners see it as an
 `anchor` frame.
 
-The honest limit of this mechanism: it aligns listeners to a **bar**, not to a
-sample. Bar-aligned is the goal; sample-accurate cross-machine sync is out of
-scope, because strudel has no cross-machine clock to align to.
+### What the anchor does not do
+
+The honest limit of this mechanism, stated plainly because it bounds what an
+agent may promise a listener: **strudel has no cross-machine sync.** Its
+`NeoCyclist` shares a clock only between instances in the *same* browser, so two
+machines never had a common timeline to begin with. Coherence between listeners
+is therefore entirely an **app-layer** concern, and the anchor plus the
+bar-aligned commit is the whole of it. There is no server-side audio clock, no
+sample buffer, and nothing that could correct a listener afterwards.
+
+So the goal is **bar-aligned, and bar-aligned is what you get**:
+
+* **In scope:** two listeners on one anchor commit on the same *bar*. A commit
+  is deferred to the next cycle boundary — plus a small lead, because a frame
+  that arrives a few milliseconds late must still reach the *same* boundary
+  rather than round down onto the bar it is currently playing. Where a listener
+  has drifted, `POST /api/anchor` is the recovery: re-anchor it onto the grid.
+* **Out of scope:** **sample-accurate sync**, and therefore anything that
+  claims two machines are playing in lockstep. Two listeners can be on the same
+  bar and still be tens of milliseconds apart within it — different audio clocks,
+  different output latencies, different machines.
+
+A listener that has drifted should therefore expect: it keeps playing, its
+commits land on the correct bar going forward, and the residual drift is
+**visible rather than silent**. The shipped client renders its connection state,
+current cycle and bar, the milliseconds remaining to a pending commit, the bar
+its last commit landed on, and the drift it actually observed. With no usable
+anchor there is no grid to align to, and the client says `unscheduled` rather
+than rendering a confident bar number it cannot justify — an unaligned commit is
+strictly better than no commit, but it is not a claim of alignment.
+
+An agent should hold the same line in what it tells a listener: this anchor
+aligns performances to a bar. It does not make them sample-identical.
 
 ### `POST /api/hush` / `POST /api/play`
 
@@ -185,9 +215,15 @@ The response to `GET /api/state` and to every accepted write except
 | `listenerCount` | live `/ws` listeners; see [listener-count](#listener-count-is-not-a-change) |
 | `lastEvalResult` | the stored verdict, or `null` before any is stored |
 
-`anchor.cps` is 0.5 unless a future change says otherwise: clients derive their
-scheduler position from `epochMs + cps` so listeners sharing a page do not drift
-apart. `history` holds the most recent 32 versions.
+`anchor.cps` is 0.5 unless a future change says otherwise. Together the two
+fields are a shared **bar grid** in wall-clock terms: cycle *i* begins at
+`epochMs + i * 1000/cps` milliseconds, so any two listeners on one anchor agree
+on which bar they are in without talking to each other. A listener that defers
+its commit to a cycle boundary therefore lands on the same bar as every other
+listener — across tabs, across browsers, across machines — whatever order the
+frames happened to arrive in. That is the entire coherence mechanism; see
+[what the anchor does not do](#what-the-anchor-does-not-do) for its limits.
+`history` holds the most recent 32 versions.
 
 A stored `lastEvalResult` has the shape of the eval request plus an `epochMs`
 the server stamps on it:

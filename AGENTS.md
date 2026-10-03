@@ -187,11 +187,16 @@ These are easy to break and each has tests. Changes should expect failures until
 
 Do not assume these features work; they remain open work.
 
-* No browser client/audio playback exists yet. `/` and `srv/static/` are still the template content.
-* The verified fan-out path stops at the API: nothing yet proves a listener
-  renders what it receives, because there is no browser client.
 * Client commits are bar-ALIGNED, not sample-accurate, and cross-machine sync is
   still out of scope; the honest limitation is written up in strudel-agent-3vo.8.3.
+* Nothing plays audio **on the server**, and nothing ever will: there is no audio
+  in Go. A verdict reaches the agent only because a *browser* evaluated the
+  pattern and reported it, so a performance with no listener connected produces
+  no `eval-result` at all. The agent loop is closed by polling, not by a reply.
+* Coherence is app-layer only. Two machines have no common clock to align to
+  (NeoCyclist shares a clock between instances in the SAME browser only), so the
+  anchor plus the bar-aligned commit is the whole mechanism and drift within a
+  bar is real, merely made visible rather than eliminated.
 
 ## Wired since the last audit
 
@@ -323,6 +328,32 @@ Recorded here so the "not yet wired" list above cannot quietly become wrong.
   and the fake `window` carries `addEventListener` — modelled rather than
   guarded in `session.js`, so an unmodelled API fails loudly instead of letting
   an untested path through.
+
+* **A browser client that renders what it receives** (`srv/templates/welcome.html`,
+  `srv/static/session.js`, `editor.js`, `viz.js`, `sync.js`; issues
+  strudel-agent-3vo.5, 3vo.6, 3vo.7, 3vo.8.2, 3vo.8.5): this is what removes the
+  old claim that the verified fan-out path stopped at the API. `session.js` runs
+  a real `strudel.repl`, evaluates each pushed pattern in its own sandbox, defers
+  the commit to the shared bar, and posts the verdict back — so the loop is now
+  closed by a browser rather than by a polling agent. Three things are
+  load-bearing:
+  - **The served bytes are what is proved, not a reimplementation.**
+    `srv/coherence_test.go` fetches `/static/*.js` and runs it in goja. A test
+    harness that modelled the client's arithmetic instead would agree with a
+    client bug; executing the shipped file is the only version of this claim
+    worth making.
+  - **`session.js` must be in that harness, not just `sync.js`.** The decision to
+    defer lives in `session.js` (`scheduleCommit`); `sync.js` only offers the
+    scheduler. A suite driving only `sync.js` cannot see `session.js` quietly
+    reverting to an immediate commit — which is exactly how mutation row 87
+    survived its first run.
+  - **Validation and the eval report stay immediate.** Only the audio commit
+    defers. The report is the agent's feedback loop, and holding it for a bar
+    line would stall the loop for no coherence gain.
+
+  What this does **not** make true: the audio is real but the *timing* is only
+  bar-accurate. Nothing here is sample-accurate or cross-machine, and the
+  per-client drift the UI reports is reduced by the anchor, not eliminated by it.
 
 * **Cycle-aligned client commit** (`srv/static/sync.js`, `srv/static/session.js`,
   issue strudel-agent-3vo.8.2): the client half of the shared timeline. A

@@ -1,6 +1,7 @@
 package srv
 
 import (
+	"errors"
 	"strconv"
 	"sync"
 	"testing"
@@ -234,14 +235,92 @@ func TestConductorAnchor(t *testing.T) {
 		t.Errorf("anchor changed on publish: got %+v, want %+v", got, anchor)
 	}
 
-	// SetAnchor republishes the timeline without bumping the version.
-	c.SetAnchor(1700000000000, 1.5)
+	// SetAnchor republishes the timeline without bumping the version. The epoch
+	// is near "now" because SetAnchor now REFUSES a skewed one: an anchor is the
+	// one number every client maps its scheduler position onto, so an epoch from
+	// another machine's badly-skewed clock would put the shared bar boundary
+	// somewhere no listener can reach.
+	now := time.Now().UnixMilli()
+	if err := c.SetAnchor(now, 1.5); err != nil {
+		t.Fatalf("SetAnchor(now, 1.5) = %v, want nil", err)
+	}
 	got := c.Snapshot()
-	if got.Anchor.EpochMS != 1700000000000 || got.Anchor.CPS != 1.5 {
+	if got.Anchor.EpochMS != now || got.Anchor.CPS != 1.5 {
 		t.Errorf("SetAnchor not applied: got %+v", got.Anchor)
 	}
 	if got.Version != 1 {
 		t.Errorf("SetAnchor bumped version to %d, want 1", got.Version)
+	}
+}
+
+// TestConductorSetAnchorRejectsNonsense pins the anchor guard, and the two
+// properties that make it more than a version bump in disguise.
+//
+// The epoch used to be arbitrary (a fixed constant far in the past). It is now
+// bounded, which is the point: an anchor is a shared absolute timeline, so an
+// epoch from a badly-skewed clock is not a harmless value, it is a bar grid no
+// listener can find itself on.
+func TestConductorSetAnchorRejectsNonsense(t *testing.T) {
+	now := time.Now().UnixMilli()
+
+	for _, tc := range []struct {
+		name    string
+		epochMS int64
+		cps     float64
+	}{
+		{"zero rate", now, 0},
+		{"negative rate", now, -0.5},
+		{"absurd rate", now, AnchorMaxCPS * 1000},
+		{"epoch far in the past", now - AnchorMaxSkewMS - 60_000, DefaultCPS},
+		{"epoch far in the future", now + AnchorMaxSkewMS + 60_000, DefaultCPS},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewConductor(0)
+			c.Publish("a", "")
+			before := c.Snapshot().Anchor
+
+			err := c.SetAnchor(tc.epochMS, tc.cps)
+			if err == nil {
+				t.Fatalf("SetAnchor(%d, %v) = nil, want a refusal", tc.epochMS, tc.cps)
+			}
+			if !errors.Is(err, ErrInvalidAnchor) {
+				t.Errorf("SetAnchor error = %v, want it to wrap ErrInvalidAnchor", err)
+			}
+			// A refused re-anchor must not half-apply. If it stored the
+			// timeline anyway, listeners would be told to adopt a bar grid the
+			// server itself does not believe.
+			if got := c.Snapshot().Anchor; got != before {
+				t.Errorf("refused SetAnchor still changed the stored anchor: got %+v, want %+v", got, before)
+			}
+			if got := c.Snapshot().Version; got != 1 {
+				t.Errorf("refused SetAnchor changed the version to %d, want 1", got)
+			}
+		})
+	}
+}
+
+// TestConductorSetAnchorAcceptsTheEdges documents where the guard stops
+// rejecting: exactly at the rate ceiling and exactly at the skew limit is
+// accepted, one step beyond is not. Without this, a future edit could tighten
+// the bound by accident and quietly refuse a legitimate tempo.
+func TestConductorSetAnchorAcceptsTheEdges(t *testing.T) {
+	now := time.Now().UnixMilli()
+
+	for _, tc := range []struct {
+		name    string
+		epochMS int64
+		cps     float64
+	}{
+		{"rate exactly at the ceiling", now, AnchorMaxCPS},
+		{"skew exactly at the limit, past", now - AnchorMaxSkewMS, DefaultCPS},
+		{"skew exactly at the limit, future", now + AnchorMaxSkewMS, DefaultCPS},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewConductor(0)
+			if err := c.SetAnchor(tc.epochMS, tc.cps); err != nil {
+				t.Errorf("SetAnchor(%d, %v) = %v, want nil: the bound must include its own edge", tc.epochMS, tc.cps, err)
+			}
+		})
 	}
 }
 

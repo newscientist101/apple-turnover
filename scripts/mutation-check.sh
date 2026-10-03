@@ -188,6 +188,14 @@ MUTATIONS=$(cat <<'EOF'
 76-livecode-error-region-not-highlighted|srv/static/editor.js|cm.addLineClass(line, 'background', 'editor-error-line');|void line; // deliberately: the failing region is not highlighted|TestLiveCodeEditorView
 77-livecode-flash-cue-dropped|srv/static/editor.js|root.classList.add('editor-flash');|void root; // deliberately: no landed-version flash|TestLiveCodeEditorView
 78-livecode-code-never-shown|srv/static/session.js|      ed.setCode(snapshot.code);|      // deliberately: the arriving version is not shown|TestLiveCodeEditorView
+79-anchor-route-not-mounted|srv/api.go|	mux.HandleFunc("POST /api/anchor", s.handleAPIAnchor)|	// deliberately: no agent can re-anchor the shared timeline|TestAnchorRoute
+80-anchor-zero-rate-guard-removed|srv/conductor.go|	if !(cps > 0) {|	if false { // deliberately: a zero or NaN rate is accepted as a shared timeline|TestAnchorRouteRejectsNonsenseAnchor|TestConductorSetAnchorRejectsNonsense
+81-anchor-rate-ceiling-removed|srv/conductor.go|	if cps > AnchorMaxCPS {|	if false { // deliberately: a runaway rate is accepted as a shared timeline|TestAnchorRouteRejectsNonsenseAnchor|TestConductorSetAnchorRejectsNonsense
+81b-anchor-epoch-skew-guard-removed|srv/conductor.go|	if skew > AnchorMaxSkewMS {|	if false { // deliberately: an epoch from a badly-skewed clock is accepted|TestAnchorRouteRejectsNonsenseAnchor|TestConductorSetAnchorRejectsNonsense
+82-refused-anchor-still-stored|srv/conductor.go|	if err := validateAnchor(epochMS, cps); err != nil {\n\t\treturn err\n\t}|	if err := validateAnchor(epochMS, cps); err != nil {\n\t\t_ = err // deliberately: the refusal is noticed and then ignored, so a rejected anchor is stored anyway\n\t}|TestConductorSetAnchorRejectsNonsense|TestAnchorRouteRejectsNonsenseAnchor
+83-anchor-frame-never-built|srv/api.go|	s.broadcast(EventAnchor, snap)|	_ = snap // deliberately: the anchor is stored but nobody is told|TestAnchorRouteAcceptedBroadcastsOneAnchorFrame|TestAnchorRouteRejectedBroadcastsNothing
+84-anchor-frame-wrong-kind|srv/api.go|	s.broadcast(EventAnchor, snap)\n\twriteJSON(w, http.StatusOK, snap)\n}|	s.broadcast(EventTransport, snap)\n\twriteJSON(w, http.StatusOK, snap)\n}|TestAnchorRouteAcceptedBroadcastsOneAnchorFrame
+85-refused-anchor-still-broadcast|srv/api.go|	if err := s.Conductor.SetAnchor(req.EpochMS, req.CPS); err != nil {\n\t\twriteError(w, http.StatusBadRequest, err.Error())\n\t\treturn\n\t}|	if err := s.Conductor.SetAnchor(req.EpochMS, req.CPS); err != nil {\n\t\tdefer s.broadcast(EventAnchor, s.Conductor.Snapshot())\n\t\twriteError(w, http.StatusBadRequest, err.Error())\n\t\treturn\n\t} // deliberately: a rejected re-anchor is announced to every listener|TestAnchorRouteRejectedBroadcastsNothing
 EOF
 )
 

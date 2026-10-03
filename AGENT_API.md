@@ -42,6 +42,7 @@ JSON too, always exactly one field:
 | `GET /api/state` | none | [snapshot](#the-snapshot) | no |
 | `POST /api/code` | [codeRequest](#post-apicode) | snapshot | **yes, by one** |
 | `POST /api/message` | [messageRequest](#post-apimessage) | snapshot | no |
+| `POST /api/anchor` | [anchorRequest](#post-apianchor) | snapshot | no |
 | `POST /api/hush` | [no body](#post-apihush--post-apiplay) | snapshot | no |
 | `POST /api/play` | [no body](#post-apihush--post-apiplay) | snapshot | no |
 | `POST /api/eval-result` | [evalResultRequest](#post-apieval-result) | [evalAck](#post-apieval-result) | no |
@@ -81,6 +82,39 @@ history, so the music keeps playing while the words change.
 `message` is required and must be non-blank. An empty message is a 400 rather
 than a silent no-op, because a no-op is indistinguishable in the agent's loop
 from a lost request.
+
+### `POST /api/anchor`
+
+Republishes the shared timeline that every listener maps its scheduler position
+onto — use it to change tempo, or to pull a listener whose clock has drifted back
+onto the shared bar grid.
+
+<!-- shape:anchorRequest -->
+```json
+{"epochMs": 1757000000000, "cps": 0.5}
+```
+
+Both fields are **required**: a re-anchor replaces the whole timeline rather than
+patching one half of it, so an agent changing only the rate must resend the
+current `epochMs` (read it from `GET /api/state`) rather than leave it to be
+guessed. A body missing either field is a 400.
+
+`cps` must be greater than 0 and at most 1000, and `epochMs` must be within five
+minutes of the server's clock. Both bounds exist because the anchor is a shared
+absolute timeline: a zero rate or an epoch from a badly-skewed clock would put
+the shared bar boundary somewhere no listener can reach, and there is no
+per-client fallback to soften it. A refused re-anchor changes nothing and is
+**not** broadcast, so no listener is told to adopt a timeline the server did not
+accept.
+
+Like `POST /api/message` and the transport endpoints, a re-anchor does **not**
+bump the version: it moves where the shared timeline starts, not what is
+playing, so it does not belong in the code history. Listeners see it as an
+`anchor` frame.
+
+The honest limit of this mechanism: it aligns listeners to a **bar**, not to a
+sample. Bar-aligned is the goal; sample-accurate cross-machine sync is out of
+scope, because strudel has no cross-machine clock to align to.
 
 ### `POST /api/hush` / `POST /api/play`
 
@@ -259,6 +293,7 @@ The complete vocabulary of `kind` is:
 | `transport` | a hush or a play changed the `playing` flag |
 | `eval-result` | a browser reported a verdict, and it was STORED |
 | `listener-count` | a listener connected or left, or the hub dropped one |
+| `anchor` | the shared timeline was re-anchored (`POST /api/anchor`) |
 
 `hush` and `play` are deliberately one kind, not two: what a listener needs is
 the resulting `playing` flag, which the snapshot carries, and hush-then-play is a

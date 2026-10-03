@@ -43,6 +43,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 )
@@ -319,6 +320,7 @@ func TestAgentAPIDocPayloadShapesMatchARunningServer(t *testing.T) {
 	wantMessageReq := docShape(t, doc, "messageRequest")
 	wantEvalReq := docShape(t, doc, "evalResultRequest")
 	wantEvalAck := docShape(t, doc, "evalAck")
+	wantAnchorReq := docShape(t, doc, "anchorRequest")
 	wantSnapshot := docShape(t, doc, "snapshot")
 	wantStoredEval := docShape(t, doc, "storedEvalResult")
 	wantFrame := docShape(t, doc, "frame")
@@ -381,6 +383,14 @@ func TestAgentAPIDocPayloadShapesMatchARunningServer(t *testing.T) {
 	}
 	if err := checkRequestShape(t, base, "/api/message", "messageRequest", wantMessageReq,
 		map[string]any{"message": "shape check"}); err != nil {
+		t.Error(err)
+	}
+	// epochMs is "now" rather than a constant because the server REFUSES a
+	// skewed anchor, and that refusal is the documented behaviour: a pinned
+	// literal here would make this check pass only by being refused, which
+	// would prove the request shape nothing.
+	if err := checkRequestShape(t, base, "/api/anchor", "anchorRequest", wantAnchorReq,
+		map[string]any{"epochMs": time.Now().UnixMilli(), "cps": 0.5}); err != nil {
 		t.Error(err)
 	}
 	if err := checkRequestShape(t, base, "/api/eval-result", "evalResultRequest", wantEvalReq,
@@ -634,7 +644,7 @@ func TestAgentAPIDocShapesAreStable(t *testing.T) {
 	doc := readAgentAPI(t)
 	want := []string{
 		"error", "codeRequest", "messageRequest", "evalResultRequest",
-		"evalAck", "snapshot", "storedEvalResult", "frame",
+		"evalAck", "snapshot", "storedEvalResult", "frame", "anchorRequest",
 	}
 	for _, name := range want {
 		docShape(t, doc, name) // fails loudly if the anchor or its JSON is gone

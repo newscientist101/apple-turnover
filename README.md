@@ -24,6 +24,7 @@ WebSocket. Bodies are JSON and capped at 64 KiB.
 | `GET /api/state` | the current snapshot |
 | `POST /api/code` | push new strudel code; bumps the version |
 | `POST /api/message` | set the message shown to listeners |
+| `POST /api/anchor` | re-anchor the shared timeline every listener schedules against |
 | `POST /api/play`, `POST /api/hush` | start / stop the performance |
 | `POST /api/eval-result` | report how the last code evaluated |
 | `GET /ws` | listener WebSocket; one JSON frame per state change |

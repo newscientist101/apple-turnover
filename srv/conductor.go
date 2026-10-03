@@ -133,13 +133,84 @@ func (c *Conductor) SetMessage(message string) {
 	c.message = message
 }
 
+// Anchor validation bounds. An anchor is the one number every client maps its
+// whole scheduler position onto, so a bad one desynchronises every listener at
+// once — there is no per-client fallback that could soften it. These bounds are
+// therefore deliberately far wider than any real use (a two-second cycle is
+// DefaultCPS; even a 1000 cps machine-music rate is 2000x the default) and exist
+// to catch the two ways an agent can get this wrong by accident: a zero or
+// negative rate, which divides by nothing sensible, and an epoch from a
+// different machine's badly-skewed clock, which puts the shared bar boundary
+// somewhere no client can reach.
+const (
+	// AnchorMaxCPS is the largest accepted cycles-per-second. It is not a
+	// policy about tempo; it is a guard against a unit mix-up (0.5 cycles per
+	// MINUTE, or milliseconds posted as seconds) silently becoming a timeline
+	// nobody can schedule against.
+	AnchorMaxCPS = 1000.0
+
+	// AnchorMaxSkewMS is how far an anchor's epoch may sit from the server's
+	// own clock. Listeners are assumed to be roughly synchronised, and this is
+	// generous enough for a browser on a phone with a drifting clock while
+	// still rejecting an epoch that would place the next bar boundary hours
+	// away.
+	AnchorMaxSkewMS = 5 * 60 * 1000
+)
+
+// ErrInvalidAnchor is returned by SetAnchor for an anchor the server refuses to
+// publish. It is a distinct error so the HTTP layer can map it to a 400 and so
+// the reason is nameable in a test rather than matched on prose.
+var ErrInvalidAnchor = errors.New("invalid anchor")
+
+// validateAnchor rejects an anchor the server refuses to publish. It is
+// separate from SetAnchor so the rule reads as one statement of what a usable
+// anchor IS, and so the guard cannot drift away from the store it protects.
+//
+// A NaN cps is rejected by the same clause as a zero: `!(cps > 0)` is true for
+// NaN, so there is no separate NaN case to forget.
+func validateAnchor(epochMS int64, cps float64) error {
+	if !(cps > 0) {
+		return fmt.Errorf("%w: cps must be greater than 0, got %g", ErrInvalidAnchor, cps)
+	}
+	if cps > AnchorMaxCPS {
+		return fmt.Errorf("%w: cps must be at most %g, got %g", ErrInvalidAnchor, AnchorMaxCPS, cps)
+	}
+	// The epoch is compared as an ABSOLUTE skew, so a clock running fast is
+	// refused on the same terms as one running slow rather than only the past
+	// being checked.
+	skew := time.Now().UnixMilli() - epochMS
+	if skew < 0 {
+		skew = -skew
+	}
+	if skew > AnchorMaxSkewMS {
+		return fmt.Errorf("%w: epochMs must be within %d ms of the server clock, got %d",
+			ErrInvalidAnchor, int64(AnchorMaxSkewMS), epochMS)
+	}
+	return nil
+}
+
 // SetAnchor republishes the shared timeline anchor without touching the code
 // document or the version counter. Issue .8 (multi-client coherence) uses this
 // to align every listener onto one clock.
-func (c *Conductor) SetAnchor(epochMS int64, cps float64) {
+//
+// The anchor is validated HERE, in the one place that owns the field, rather
+// than in the HTTP handler: a guard that lives only at one call site is a guard
+// a second caller can forget, and the cost of a bad anchor is that every
+// listener computes its position from nonsense. SetAnchor therefore returns an
+// error and leaves the stored anchor UNCHANGED when the request is refused, so a
+// rejected re-anchor cannot half-apply.
+//
+// A re-anchor never bumps the version: it changes where the shared timeline
+// starts, not what is playing, so it does not belong in the code history.
+func (c *Conductor) SetAnchor(epochMS int64, cps float64) error {
+	if err := validateAnchor(epochMS, cps); err != nil {
+		return err
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.anchor = Anchor{EpochMS: epochMS, CPS: cps}
+	return nil
 }
 
 // SetPlaying records transport intent (POST /api/hush and POST /api/play)

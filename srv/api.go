@@ -56,6 +56,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/eval-result", s.handleAPIEvalResult)
 	mux.HandleFunc("/api/eval-result", methodNotAllowed(http.MethodPost))
 
+	mux.HandleFunc("POST /api/anchor", s.handleAPIAnchor)
+	mux.HandleFunc("/api/anchor", methodNotAllowed(http.MethodPost))
+
 	mux.HandleFunc("POST /api/hush", s.handleAPIHush)
 	mux.HandleFunc("/api/hush", methodNotAllowed(http.MethodPost))
 
@@ -214,6 +217,47 @@ func (s *Server) handleAPIEvalResult(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, apiEvalAck{Accepted: true, Version: req.Version})
+}
+
+// anchorRequest is the POST /api/anchor body: the shared timeline every listener
+// maps its scheduler position onto. Both fields are required — a re-anchor is a
+// complete replacement of the timeline, not a patch, so an agent changing only
+// the rate must resend the current epochMs rather than leave it to be guessed.
+type anchorRequest struct {
+	EpochMS int64   `json:"epochMs"`
+	CPS     float64 `json:"cps"`
+}
+
+// handleAPIAnchor republishes the shared timeline anchor (issue .3vo.8.1) so an
+// agent can move every listener onto one clock — for instance after changing
+// tempo, or to pull a listener whose clock had drifted onto the shared bar
+// grid.
+//
+// It deliberately does NOT bump the version and does NOT touch the code
+// document: a re-anchor changes where the shared timeline starts, not what is
+// playing, so putting it in the code history would make a tempo change look
+// like a new revision to every client.
+//
+// The broadcast is gated on acceptance, exactly like every other accepted write
+// here: a refused anchor (a non-positive rate, or an epoch too far from the
+// server's clock) leaves the stored anchor untouched and broadcasts NOTHING.
+// Telling listeners to adopt a timeline the server refused to store would leave
+// every client scheduling against a bar grid the server does not hold.
+func (s *Server) handleAPIAnchor(w http.ResponseWriter, r *http.Request) {
+	var req anchorRequest
+	if err := decodeBody(r, &req); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+
+	if err := s.Conductor.SetAnchor(req.EpochMS, req.CPS); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	snap := s.Conductor.Snapshot()
+	s.broadcast(EventAnchor, snap)
+	writeJSON(w, http.StatusOK, snap)
 }
 
 // apiEvalAck is the response to an accepted eval report. The field is named

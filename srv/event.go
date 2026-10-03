@@ -76,6 +76,22 @@ const (
 	// snapshot, so a second copy of the same state would be noise on the one
 	// frame every client reads first. See Hub's fanOut for the exclusion.
 	EventListenerCount = "listener-count"
+	// EventAnchor is a re-anchoring of the shared timeline
+	// (POST /api/anchor): every listener was told to map its scheduler position
+	// onto a new epoch and/or rate. It is a SEVENTH kind rather than a fold into
+	// one of the six above because a timeline move is not a change to the
+	// performance in the ordinary sense — the code, the narration, the transport
+	// intent and the stored verdict are all untouched — but it IS a change every
+	// client must act on immediately, or its next commit lands on a different bar
+	// from everyone else's. Folding it into EventTransport would force clients to
+	// infer "nothing about the music changed" from a kind that means the
+	// opposite.
+	//
+	// Like the listener-count frame it never bumps the version (the version
+	// belongs to the code document) and a REJECTED re-anchor is never broadcast,
+	// so a listener can never be told to adopt a timeline the server refused to
+	// store.
+	EventAnchor = "anchor"
 )
 
 // Event is the single frame shape sent to listeners. Snapshot holds the full

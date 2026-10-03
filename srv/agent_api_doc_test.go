@@ -135,6 +135,25 @@ func contains(hay []string, needle string) bool {
 	return false
 }
 
+// wsCollapseRe matches any run of whitespace, for reasons below.
+var wsCollapseRe = regexp.MustCompile(`\s+`)
+
+// docStates reports whether the doc says something, comparing with whitespace
+// collapsed. A needle is prose, and prose in markdown gets rewrapped: a check
+// that fails when a line is rewrapped reports a formatting change as a missing
+// guarantee, which trains the next agent to ignore it. This is the same defect
+// that broke the `{...}` placeholder, one level up.
+func docStates(doc, needle string) bool {
+	collapse := func(s string) string {
+		return strings.TrimSpace(wsCollapseRe.ReplaceAllString(s, " "))
+	}
+	return strings.Contains(collapse(doc), collapse(needle))
+}
+
+// ellipsisObjectRe matches the `{...}` placeholder used to stand in for a nested
+// object in a documented shape. Whitespace inside the braces is not significant.
+var ellipsisObjectRe = regexp.MustCompile(`\{\s*\.\.\.\s*\}`)
+
 // docShape returns the JSON object printed in the doc under the given
 // `<!-- shape:NAME -->` anchor.
 //
@@ -161,11 +180,16 @@ func docShape(t *testing.T, doc, name string) map[string]json.RawMessage {
 	}
 	block := strings.TrimSpace(rest[:end])
 
-	// The frame envelope documents its snapshot as the placeholder `{ ... }`,
-	// which is prose standing in for the nested object rather than JSON. It is
-	// replaced with an empty object so the TOP-LEVEL keys can be read; the nested
+	// The frame envelope documents its snapshot as the placeholder `{...}`.
+	// That is prose standing in for the nested object rather than JSON, so it is
+	// replaced with an empty object and the TOP-LEVEL keys are read. The nested
 	// snapshot is verified separately against a real frame, so nothing is lost.
-	block = strings.ReplaceAll(block, "{ ... }", "{}")
+	//
+	// The match is a REGEXP rather than a literal because the placeholder is
+	// prose: `{...}`, `{ ... }` and `{  ...  }` are the same placeholder, and a
+	// literal replace stops matching the moment someone reformats it — which
+	// failed as "not a JSON object", blaming the JSON for a whitespace change.
+	block = ellipsisObjectRe.ReplaceAllString(block, "{}")
 
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(block), &obj); err != nil {
@@ -175,6 +199,47 @@ func docShape(t *testing.T, doc, name string) map[string]json.RawMessage {
 		t.Fatalf("the shape documented at %s parsed to zero fields:\n%s", anchor, block)
 	}
 	return obj
+}
+
+// TestDocShapeToleratesWhitespace is the regression test for the brittleness
+// that made the frame shape unparseable: docShape used to replace the literal
+// string "{ ... }", so a doc printing the same placeholder as "{...}" failed with
+// "not a JSON object" — blaming the JSON for a whitespace change, and taking the
+// vocabulary check down with it. checkInlineShape had the same defect for the
+// same reason, matching a literal `"anchor": {`.
+func TestDocShapeToleratesWhitespace(t *testing.T) {
+	for _, placeholder := range []string{"{...}", "{ ... }", "{  ...  }"} {
+		doc := "<!-- shape:frame -->\n```json\n{\"kind\":\"<what happened>\",\"snapshot\":" + placeholder + "}\n```\n"
+		got := docShape(t, doc, "frame")
+		if len(got) != 2 || !contains(sortedKeys(got), "snapshot") {
+			t.Errorf("placeholder %q: docShape read %v, want the frame's two top-level fields", placeholder, sortedKeys(got))
+		}
+	}
+
+	// The inline nested-object lookup must not depend on a space after the colon.
+	// checkInlineShape is driven directly with a synthetic doc so the assertion is
+	// the real helper's, not a copy of its matcher.
+	live := []byte("{\"anchor\":{\"epochMs\":1757000000000,\"cps\":0.5}}")
+	for _, anchorField := range []string{`"anchor": {`, `"anchor":{`, `"anchor"  :  {`} {
+		doc := "```json\n{" + anchorField + "\"epochMs\":1757000000000,\"cps\":0.5}\n```\n"
+		if err := checkInlineShape(t, "synthetic anchor", live, "anchor", doc); err != nil {
+			t.Errorf("inline lookup with %q: %v", anchorField, err)
+		}
+	}
+	// It must still bind to the wrong place loudly: a doc that omits the field is
+	// an unchecked shape, not a pass.
+	if err := checkInlineShape(t, "synthetic anchor", live, "anchor", "```json\n{}\n```\n"); err == nil {
+		t.Error("inline lookup passed with no documented anchor; a nested shape nothing checks would read as verified")
+	}
+
+	// docStates must tolerate rewrapping but NOT tolerate a removed sentence,
+	// which is the whole point of tolerating whitespace.
+	if !docStates("one two\nthree", "one two three") {
+		t.Error("docStates reported a rewrapped sentence as absent")
+	}
+	if docStates("one two three", "one two four") {
+		t.Error("docStates reported absent wording as present")
+	}
 }
 
 // sortedKeys returns a JSON object's field names, sorted, for comparison.
@@ -286,11 +351,11 @@ func TestAgentAPIDocCoversEveryEventKind(t *testing.T) {
 	// which no behavioural test can do.
 	for _, must := range []struct{ what, needle string }{
 		{"that a count frame never bumps the version", "never bumps"},
-		{"that the listener which caused a count change is not sent it", "CAUSED"},
-		{"that a listener subscribes before it is snapshotted", "subscribes\nfirst and is snapshotted second"},
+		{"that the listener which caused a count change is not sent it", "does not receive its own count event"},
+		{"that a listener subscribes before it is snapshotted", "subscribed before its initial snapshot"},
 		{"that the connect snapshot already counts the listener itself", "includes itself"},
 	} {
-		if !strings.Contains(doc, must.needle) {
+		if !docStates(doc, must.needle) {
 			t.Errorf("AGENT_API.md no longer states %s (looked for %q): a client needs this to consume listener-count frames correctly", must.what, must.needle)
 		}
 	}
@@ -491,12 +556,12 @@ func checkInlineShape(t *testing.T, what string, raw []byte, field, doc string) 
 	if len(inner) == 0 {
 		return fmt.Errorf("%s is missing from the live body: %q", what, bodyOf(string(raw)))
 	}
-	needle := `"` + field + `": {`
-	at := strings.Index(doc, needle)
-	if at < 0 {
+	re := regexp.MustCompile(`"` + field + `"\s*:\s*{`)
+	at := re.FindStringIndex(doc)
+	if at == nil {
 		return fmt.Errorf("AGENT_API.md no longer prints %q inline in the documented snapshot, so its fields are unchecked", field)
 	}
-	rest := doc[at+len(needle):]
+	rest := doc[at[1]:]
 	// These nested objects are flat, so the first '}' closes them.
 	end := strings.Index(rest, "}")
 	if end < 0 {
@@ -617,24 +682,24 @@ func TestAgentAPIDocErrorTableMatchesTheServer(t *testing.T) {
 func TestAgentAPIDocDocumentsTheLoop(t *testing.T) {
 	doc := readAgentAPI(t)
 	for _, must := range []struct{ what, needle string }{
-		{"that accepted:true does not mean the verdict was stored", "not that it was stored"},
+		{"that accepted:true does not mean the verdict was stored", "not necessarily stored"},
 		{"that a stale verdict is accepted and discarded", "stale"},
-		{"that the loop closes by polling /api/state", "closed by polling"},
-		{"that the server never evaluates JavaScript", "never evaluates JavaScript"},
-		{"that a rejected or ignored write broadcasts nothing", "Nothing is ever broadcast"},
-		{"that POST /api/code bumps the version by one", "by exactly one"},
+		{"that the loop closes by reading back /api/state", "Read `GET /api/state` and inspect `lastEvalResult`"},
+		{"that the server never evaluates JavaScript", "never evaluated"},
+		{"that a rejected or ignored write broadcasts nothing", "| rejected | `400` / `405` / `413` | no | no |"},
+		{"that POST /api/code bumps the version by one", "increments exactly once"},
 		{"the 64 KiB body cap", "64 KiB"},
-		{"the snapshot-on-connect catch-up", "mid-performance"},
+		{"the snapshot-on-connect catch-up", "immediate full snapshot"},
 		// The coherence LIMITATION. These are prose, so nothing else keeps them
 		// present, and an agent that overclaims here tells a listener two
 		// machines are playing in lockstep when only the bar is shared.
-		{"that strudel has no cross-machine sync", "no cross-machine sync"},
+		{"that strudel has no cross-machine sync", "cross-machine audio clock"},
 		{"that the goal is bar alignment", "bar-aligned"},
 		{"that sample-accurate sync is out of scope", "sample-accurate"},
-		{"what a drifted listener should expect", "has drifted should therefore expect"},
+		{"what a drifted listener should expect", "Re-anchoring is the recovery mechanism for drift"},
 		{"that an unalignable listener says so rather than claiming a bar", "unscheduled"},
 	} {
-		if !strings.Contains(doc, must.needle) {
+		if !docStates(doc, must.needle) {
 			t.Errorf("AGENT_API.md no longer states %s (looked for %q): this is the guidance an external agent codes its loop from", must.what, must.needle)
 		}
 	}

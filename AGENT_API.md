@@ -161,20 +161,20 @@ Empty `error` and `stats` fields are omitted.
 
 ## Errors and status codes
 
-| Situation | Status / behavior |
-|---|---|
-| Unknown JSON field | `400` |
-| Trailing JSON data | `400` |
-| Empty or truncated body | `400` |
-| Blank `code` | `400` |
-| Blank `message` | `400` |
-| Body supplied to `/api/hush` or `/api/play` | `400` |
-| Body over 64 KiB | `413` |
-| Verdict for an unpublished version | `400` |
-| Wrong method on an API endpoint | `405` + `Allow` |
-| Unknown `/api` endpoint | `404` |
+| Situation | Status | `error` |
+|---|---|---|
+| Unknown JSON field | `400` | `invalid JSON body: json: unknown field "messge"` |
+| Trailing JSON data | `400` | `invalid JSON body: unexpected data after JSON body` |
+| Empty or truncated body | `400` | `invalid JSON body: empty or truncated request body` |
+| Blank `code` | `400` | `code must not be empty: send the strudel pattern to play` |
+| Blank `message` | `400` | `message must not be empty: use POST /api/code to change the music, or send narration text` |
+| Body supplied to `/api/hush` or `/api/play` | `400` | `invalid JSON body: this endpoint takes no arguments: unexpected field(s) code (use POST /api/code to change the music)` |
+| Body over 64 KiB | `413` | `request body too large: limit is 65536 bytes` |
+| Verdict for an unpublished version | `400` | `unknown version: 9999 (latest is 0)` |
+| Wrong method on an API endpoint | `405` + `Allow` | `method GET not allowed on /api/code, use POST` |
+| Unknown `/api` endpoint | `404` | `no such API endpoint: GET /api/nope` |
 
-Every `/api` error response is the single-field JSON error object above. Errors outside `/api` use ordinary `net/http` behavior.
+Every `/api` error response is the single-field JSON error object above. Errors outside `/api` use ordinary `net/http` behavior. Messages name the offending field, limit or version so an agent can branch on them, not only on the status.
 
 ## The agent loop
 

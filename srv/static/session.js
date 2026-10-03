@@ -200,6 +200,7 @@
       return postEvalResult(version, false, commitMessage, { haps: 0 });
     }
     currentPattern = pattern;
+    if (window.strudelViz && typeof window.strudelViz.setPattern === "function") { window.strudelViz.setPattern(pattern); }
     console.info("[session] version " + version + " live (" + stats.haps + " haps)");
     return postEvalResult(version, true, "", stats);
   }
@@ -240,6 +241,7 @@
       // the version on screen also highlights the view, so a failure
       // reported by another listener is visible here too.
       showMessage(snapshot);
+      if (window.strudelViz && typeof window.strudelViz.onSnapshot === "function") { window.strudelViz.onSnapshot(snapshot); }
       if (frame.kind !== "code" && frame.kind !== "snapshot") {
         if (typeof snapshot.version === "number") {
           lastVersion = Math.max(lastVersion, snapshot.version);

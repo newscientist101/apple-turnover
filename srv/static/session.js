@@ -48,6 +48,106 @@
   var latestAnchor = null;
   var statusTimer = null;
 
+  // AGENT_STATES is the whole badge vocabulary: three states the wire can
+  // actually express, each with its own class and its own words.
+  //
+  // "never" is kept distinct from "absent" deliberately. They are different
+  // situations and an operator acts on them differently: NEVER means no agent
+  // has ever run and one should be started; LOST means one was here and has
+  // stopped, which is the case worth investigating. Collapsing them would lose
+  // exactly the distinction this badge was added to provide.
+  var AGENT_STATES = {
+    connected: { cls: "agent-connected", label: "AGENT LIVE" },
+    absent: { cls: "agent-absent", label: "AGENT LOST" },
+    never: { cls: "agent-never", label: "AGENT NEVER" },
+  };
+
+  // agentStateOf reads the three wire states out of a snapshot.
+  //
+  // It is defensive about the agent field on purpose. A browser can legitimately
+  // hold a frame encoded before the server knew about presence — a reconnect
+  // replaying an old frame, or a server upgraded underneath a live page. Throwing
+  // here would take down the whole onmessage handler and with it the music, so a
+  // missing field degrades to "never" instead.
+  function agentStateOf(snapshot) {
+    var agent = snapshot && snapshot.agent;
+    if (!agent || typeof agent !== "object") {
+      return "never";
+    }
+    if (agent.active === true) {
+      return "connected";
+    }
+    // lastSeenMs === 0 is the server's "no agent has EVER connected" marker,
+    // distinct from a heartbeat that landed at the epoch.
+    return agent.lastSeenMs ? "absent" : "never";
+  }
+
+  // renderAgentStatus paints the badge from a snapshot.
+  //
+  // The presence decision comes ENTIRELY from the server's snapshot.agent. The
+  // client deliberately does not compare agent.lastSeenMs against its own
+  // Date.now() to decide whether the lease has expired: that would inherit
+  // clock skew between browser and server and the two would disagree near the
+  // boundary. The server owns the TTL; the client reports what it was told. The
+  // expiry arrives as an "agent" frame when the server decides it.
+  //
+  // Every write is guarded by comparing against what the element already
+  // holds, for the same reason updateSyncStatusUI guards its own region: this
+  // one is aria-live, and every frame carries the full snapshot, so an
+  // unconditional write would re-announce the badge on every message and turn a
+  // status line into a screen-reader chatterbox. Comparing per element — rather
+  // than caching a "last state" and skipping the whole render — means a
+  // partially-applied update still repairs itself.
+  function renderAgentStatus(snapshot) {
+    var state = AGENT_STATES[agentStateOf(snapshot)];
+    var indicator = document.getElementById("status-indicator");
+    var dot = document.getElementById("agent-status-dot");
+    var text = document.getElementById("agent-status-text");
+
+    if (indicator) {
+      var cls = "status-indicator " + state.cls;
+      // Replace rather than append, so a re-render cannot accumulate duplicate
+      // state classes.
+      if (indicator.className !== cls) {
+        indicator.className = cls;
+      }
+    }
+    if (dot && dot.className !== "status-dot") {
+      dot.className = "status-dot";
+    }
+    if (text && text.innerHTML !== state.label) {
+      text.innerHTML = state.label;
+    }
+  }
+
+  // handleFrame is the /ws onmessage body, exposed as a seam so a test can drive
+  // the REAL decode-to-badge path rather than calling renderAgentStatus
+  // directly.
+  //
+  // The distinction matters: a badge that renders correctly but is never wired
+  // to incoming frames looks identical to a working one when tested by calling
+  // its renderer, and is exactly the defect this feature was raised about — the
+  // old badge was decoration precisely because nothing called it.
+  //
+  // It returns whether the frame was usable. Throwing in an onmessage handler
+  // would take the music down with it, so a corrupt frame is logged and dropped —
+  // but a silent drop means a caller passing the wrong type fails quietly, which
+  // is how a test can go green while asserting nothing. Returning the verdict
+  // makes "handled" and "ignored" distinguishable.
+  function handleFrame(raw, sandbox, live) {
+    var frame;
+    try {
+      frame = JSON.parse(raw);
+    } catch (err) {
+      console.warn("[session] unparseable frame:", err);
+      return false;
+    }
+    var snapshot = frame && frame.snapshot;
+    renderAgentStatus(snapshot);
+    applyFrame(frame, snapshot, sandbox, live);
+    return true;
+  }
+
   function updateSyncStatusUI() {
     var el = document.getElementById("sync-status");
     if (!el) {
@@ -382,6 +482,41 @@
     );
   }
 
+  // applyFrame is everything a decoded frame does apart from parsing it and
+  // painting the presence badge. It is split out of handleFrame so the decode
+  // seam and the badge can be exercised together, and so ws.onmessage stays a
+  // one-liner that routes through the same path the harness drives.
+  function applyFrame(frame, snapshot, sandbox, live) {
+    if (snapshot && snapshot.anchor) {
+      latestAnchor = snapshot.anchor;
+    }
+    updateSyncStatusUI();
+    if (!snapshot) {
+      return;
+    }
+    // Transport / message / eval-result / listener-count frames carry the
+    // same snapshot shape: keep panels fresh, but only new code versions
+    // go through validate-then-commit. A failing eval-result verdict for
+    // the version on screen also highlights the view, so a failure
+    // reported by another listener is visible here too.
+    showMessage(snapshot);
+    if (window.strudelViz && typeof window.strudelViz.onSnapshot === "function") { window.strudelViz.onSnapshot(snapshot); }
+    if (frame.kind !== "code" && frame.kind !== "snapshot") {
+      if (typeof snapshot.version === "number") {
+        lastVersion = Math.max(lastVersion, snapshot.version);
+      }
+      if (frame.kind === "eval-result" && snapshot.lastEvalResult &&
+          !snapshot.lastEvalResult.ok && snapshot.lastEvalResult.error) {
+        showEvalError(snapshot.lastEvalResult.error);
+      }
+      return;
+    }
+    if (!isNewCodeVersion(snapshot)) {
+      return;
+    }
+    applyVersion(snapshot, sandbox, live);
+  }
+
   function connect(sandbox, live, attempt) {
     var protocol = location.protocol === "https:" ? "wss:" : "ws:";
     var ws = new WebSocket(protocol + "//" + location.host + WS_PATH);
@@ -393,43 +528,11 @@
       console.info("[session] subscribed to " + WS_PATH);
     };
 
+    // Every frame carries the full snapshot, so the badge is refreshed from all
+    // of them — including the "agent" frame that reports a lapsed lease, which
+    // is the only way this client learns an agent has gone.
     ws.onmessage = function (event) {
-      var frame;
-      try {
-        frame = JSON.parse(event.data);
-      } catch (err) {
-        console.warn("[session] ignoring unparseable frame:", err);
-        return;
-      }
-      var snapshot = frame && frame.snapshot;
-      if (snapshot && snapshot.anchor) {
-        latestAnchor = snapshot.anchor;
-      }
-      updateSyncStatusUI();
-      if (!snapshot) {
-        return;
-      }
-      // Transport / message / eval-result / listener-count frames carry the
-      // same snapshot shape: keep panels fresh, but only new code versions
-      // go through validate-then-commit. A failing eval-result verdict for
-      // the version on screen also highlights the view, so a failure
-      // reported by another listener is visible here too.
-      showMessage(snapshot);
-      if (window.strudelViz && typeof window.strudelViz.onSnapshot === "function") { window.strudelViz.onSnapshot(snapshot); }
-      if (frame.kind !== "code" && frame.kind !== "snapshot") {
-        if (typeof snapshot.version === "number") {
-          lastVersion = Math.max(lastVersion, snapshot.version);
-        }
-        if (frame.kind === "eval-result" && snapshot.lastEvalResult &&
-            !snapshot.lastEvalResult.ok && snapshot.lastEvalResult.error) {
-          showEvalError(snapshot.lastEvalResult.error);
-        }
-        return;
-      }
-      if (!isNewCodeVersion(snapshot)) {
-        return;
-      }
-      applyVersion(snapshot, sandbox, live);
+      handleFrame(event.data, sandbox, live);
     };
 
     ws.onclose = function () {
@@ -489,6 +592,16 @@
     getCurrentPattern: function () { return currentPattern; },
     getPendingCommit: function () { return pendingCommit; },
     updateSyncStatusUI: updateSyncStatusUI,
+    // The agent badge (strudel-agent-4jk). Exposed so the headless harness can
+    // drive the real rendering path against real /api/state bytes, rather than
+    // reimplementing the state mapping in Go and proving nothing about what a
+    // browser would display.
+    agentStateOf: agentStateOf,
+    renderAgentStatus: renderAgentStatus,
+    // handleFrame is the real /ws onmessage path, exposed so a test proves the
+    // badge is WIRED to incoming frames rather than only that its renderer
+    // works when called directly.
+    handleFrame: handleFrame,
     getConnectionState: function () { return connectionState; },
     // Test/debug seam: startStatusTimer is normally called once from boot, but a
     // test needs to observe the interval actually ticking and actually stopping.

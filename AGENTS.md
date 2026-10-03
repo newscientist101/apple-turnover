@@ -71,13 +71,33 @@ Dispatch only leaf subtasks; keep parent issues open until their children are co
 `Conductor` owns the entire live performance state.
 
 - Thread-safe for concurrent use.
-- Holds code, version, anchor, last agent message, bounded code history, playing state, listener count, and the stored evaluation verdict.
+- Holds code, version, anchor, last agent message, bounded code history, playing state, listener count, the agent liveness lease, and the stored evaluation verdict.
 - Nothing is persisted.
 - Versions are contiguous, unique, monotonic, never reused, and never skipped.
 - Only `Publish` / `POST /api/code` increments the version.
 - Message, anchor, transport, listener-count, and evaluation-result changes do not increment it.
 - `Snapshot` must not expose mutable internal state; history and nested verdict data are copied.
 - `RecordEvalResult` must distinguish **stored** from **understood but stale** so only a stored verdict is broadcast.
+
+### Agent presence
+
+Agent liveness is a **lease**, not a connection: the agent speaks plain HTTP and holds no persistent connection.
+
+- Presence is **derived** from `agentLastSeenMS` and the clock, never stored as a boolean. A stored flag needs a timer to unset it, and a timer that misfires leaves the server asserting an agent is present when it is not.
+- `agentLastSeenMS == 0` means **never seen** and is distinct from a heartbeat at the epoch.
+- The TTL comparison is **inclusive**, and the clock is an **atomic offset** rather than a `func() int64` field, so a test can age a lease while the sweeper is running. Ageing the clock is not the same operation as rewinding the timestamp: real decay leaves `lastSeenMS` untouched.
+- Presence **never** increments the version and **never** enters history.
+- `AgentPresence` is a value struct on `Snapshot`, not a pointer, so it cannot alias.
+- Validation lives in `Conductor`, not only in the HTTP handler.
+
+### Lease sweeper
+
+The sweeper exists only to **push** the expiry. It must not maintain the flag.
+
+- It broadcasts `agent` on exactly one occasion: a **held** lease lapsing. A heartbeat broadcasts nothing, and a never-seen agent is an initial state rather than a transition, so it is never announced.
+- The announcement keys on the **state**, with the last-announced `lastSeenMS` used only to suppress a repeat. Keying on "a value I have not seen" misses real decay, which does not move the value; keying on "I watched it go stale" misses a lease that is taken and dropped between two ticks. Both orderings must work.
+- It starts in `Serve`, not `New`, so configuration between construction and running is not a data race.
+- Shutdown is joined, bounded, and idempotent. A stop that signals without joining leaks a goroutine per `Server`.
 
 ### Hub
 
@@ -112,6 +132,7 @@ The listener endpoint must never block on a client.
 - Argument-free endpoints reject any supplied field.
 - Empty `code` and `message` are errors, not no-ops.
 - Validate first, commit second, broadcast last.
+- An argument-free endpoint rejects any supplied field, including `/api/heartbeat`.
 - Broadcast the same snapshot that the HTTP response returns.
 - Keep `/api` errors uniformly JSON.
 - Keep route handling centralized in `routes()`; tests should exercise that real tree.
@@ -126,8 +147,9 @@ Every listener event has exactly this shape:
 
 - `snapshot` is the actual snapshot value, not a second bespoke representation.
 - All frame construction goes through one encoder.
-- The event vocabulary is `snapshot`, `code`, `message`, `transport`, `eval-result`, `listener-count`, `anchor`.
+- The event vocabulary is `snapshot`, `code`, `message`, `transport`, `eval-result`, `listener-count`, `anchor`, `agent`.
 - Event names describe listener-visible changes, not endpoint names; therefore play and hush both use `transport`.
+- A frame is sent for a **transition**, not for an accepted write that changed nothing observable. A heartbeat is accepted and silent; a lease lapse is announced once.
 
 ### Anchor and coherence
 
@@ -198,10 +220,11 @@ Use `httptest` and loopback instead.
 | WebSocket | `srv/ws_test.go` |
 | Hub | `srv/hub_test.go` |
 | API handlers | `srv/api_test.go` |
-| Conductor/state | `srv/conductor_test.go`, `srv/conductor_eval_test.go` |
+| Conductor/state | `srv/conductor_test.go`, `srv/conductor_eval_test.go`, `srv/conductor_presence_test.go` |
+| Agent presence/lease | `srv/presence_test.go` |
 | Browser timing | `srv/coherence_test.go` |
 | API documentation | `srv/agent_api_doc_test.go` |
-| Browser wiring | `srv/session_client_test.go`, `srv/editor_view_test.go`, `srv/viz_test.go` |
+| Browser wiring | `srv/session_client_test.go`, `srv/editor_view_test.go`, `srv/viz_test.go`, `srv/agent_indicator_test.go` |
 | CLI | `cmd/agentcli/main_test.go` |
 
 Assert response **bodies**, not just status codes.
@@ -316,7 +339,11 @@ A timeout can expose a hang, but the test still needs to fail because the intend
 7. Commit the completed work.
 8. Sync/close the corresponding bead only after the code is actually committed.
 
+- The pulse must be scoped to `.agent-connected`. A stylesheet that merely *mentions* the state classes is not enough; the animation itself has to live under the connected selector, or every state animates identically again. Strip CSS comments before searching, since the file explains the old unconditional pulse in prose containing the same text.
+
 For browser timing or synchronization, test the **served JavaScript** with the fake clock/goja harness rather than translating the timing algorithm into Go.
+
+Drive a decode seam (`handleFrame`), not only the renderer. Calling a paint function directly cannot prove it is wired to incoming frames — which is precisely how the original badge stayed decorative while every unit test of it would have passed. Where a function deliberately swallows bad input, have it **return** whether it handled the frame: a silent catch otherwise turns a caller passing the wrong type into a green test asserting nothing.
 
 ## Measurement discipline
 

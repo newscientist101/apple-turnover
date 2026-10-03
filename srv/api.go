@@ -65,6 +65,14 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/play", s.handleAPIPlay)
 	mux.HandleFunc("/api/play", methodNotAllowed(http.MethodPost))
 
+	// Agent liveness. Argument-free like hush/play, and deliberately silent on
+	// the listener socket: a heartbeat renews a lease every listener already
+	// believes is held, so there is nothing for them to be told. The ONE thing
+	// they must be told is that the lease lapsed, and that comes from the lease
+	// sweeper rather than from here (see Server.startAgentSweeper).
+	mux.HandleFunc("POST /api/heartbeat", s.handleAPIHeartbeat)
+	mux.HandleFunc("/api/heartbeat", methodNotAllowed(http.MethodPost))
+
 	// The listener WebSocket. It follows the /api idiom above rather than
 	// letting net/http answer: the bare pattern is the wrong-verb fallback (405
 	// plus Allow), while a WebSocket request without valid upgrade headers is
@@ -286,6 +294,40 @@ func (s *Server) handleAPIPlay(w http.ResponseWriter, r *http.Request) {
 // succeeds, because the agent may not have read /api/state first. A body is
 // still parsed when present so a client cannot smuggle a "code" field through
 // these endpoints believing it changed the music.
+// handleAPIHeartbeat renews the agent's liveness lease.
+//
+// It is the only way an agent can be "connected" at all: the agent speaks plain
+// request/response HTTP and holds no persistent connection, so the server cannot
+// observe a socket and this lease is the whole of what it knows (see
+// AgentPresence).
+//
+// It follows validate -> commit -> broadcast like every other write, with one
+// deliberate omission: there is NO broadcast. A heartbeat renews a lease that
+// every listener already believes is held — they received the active flag in
+// whichever frame last carried it — so the event that listeners need is the one
+// that CANNOT be triggered from here, namely the lease lapsing. Announcing each
+// renewal would be indistinguishable, on the wire, from a stream of no-ops, and
+// because a listener's queue is bounded at 64 messages a heartbeat loop running
+// faster than a listener drains could evict that listener on its own.
+//
+// A heartbeat is therefore accepted, committed, and returned — but silent. The
+// expiry sweeper owns the EventAgent broadcast.
+//
+// The endpoint is argument-free and idempotent, for the reasons hush and play
+// are: an agent may heartbeat on a timer without reading /api/state first, and
+// a body is still parsed and refused so a client cannot smuggle a "code" field
+// through it believing it changed the music.
+func (s *Server) handleAPIHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if err := rejectUnexpectedBody(r); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+	// The snapshot is returned rather than a bare ack so the agent can confirm
+	// what the server believes without a second round trip — the same reason
+	// every other accepted write answers with the state it produced.
+	writeJSON(w, http.StatusOK, s.Conductor.RecordAgentPresence())
+}
+
 func (s *Server) handleAPITransport(w http.ResponseWriter, r *http.Request, playing bool) {
 	if err := rejectUnexpectedBody(r); err != nil {
 		writeDecodeError(w, err)

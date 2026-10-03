@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -50,16 +51,38 @@ type Version struct {
 	EpochMS int64  `json:"epochMs"`
 }
 
+// AgentPresence is what the server knows about the external agent's liveness.
+//
+// It is a VALUE struct on Snapshot, never a pointer, for the same reason
+// History is a slice built per read: Snapshot must not expose mutable internal
+// state, and a pointer field would alias whatever the Conductor handed out.
+// Returning it by value makes aliasing impossible to express.
+//
+// Active is DERIVED at read time from LastSeenMS and the Conductor's clock, not
+// stored. See conductor_presence_test.go for why a stored boolean is the wrong
+// shape.
+type AgentPresence struct {
+	// Active is true iff an agent heartbeat arrived within AgentTTL of now.
+	Active bool `json:"active"`
+
+	// LastSeenMS is when the most recent heartbeat arrived, in epoch
+	// milliseconds, or 0 if no agent has EVER been seen. Zero is reserved as
+	// the "never" marker and is deliberately distinct from a heartbeat that
+	// genuinely landed at the Unix epoch.
+	LastSeenMS int64 `json:"lastSeenMs"`
+}
+
 // Snapshot is a copy of the Conductor's state at one instant.
 type Snapshot struct {
-	Version          int64       `json:"version"`
-	Code             string      `json:"code"`
-	LastAgentMessage string      `json:"lastAgentMessage"`
-	Anchor           Anchor      `json:"anchor"`
-	History          []Version   `json:"history"`
-	Playing          bool        `json:"playing"`
-	ListenerCount    int         `json:"listenerCount"`
-	LastEvalResult   *EvalResult `json:"lastEvalResult"`
+	Version          int64         `json:"version"`
+	Code             string        `json:"code"`
+	LastAgentMessage string        `json:"lastAgentMessage"`
+	Anchor           Anchor        `json:"anchor"`
+	History          []Version     `json:"history"`
+	Playing          bool          `json:"playing"`
+	ListenerCount    int           `json:"listenerCount"`
+	LastEvalResult   *EvalResult   `json:"lastEvalResult"`
+	Agent            AgentPresence `json:"agent"`
 }
 
 // Conductor owns the single live performance. It is safe for concurrent use:
@@ -83,6 +106,22 @@ type Conductor struct {
 
 	lastEval *EvalResult
 
+	// agentLastSeenMS is the lease: when an agent last proved it was alive.
+	// 0 means no agent has ever been seen. There is deliberately no companion
+	// `agentActive` boolean — see AgentPresence.
+	agentLastSeenMS int64
+
+	// clockOffsetMS offsets the Conductor's clock. It is how a test drives DECAY
+	// — ageing a stored heartbeat without moving it — which real elapsed time
+	// does and rewinding a timestamp does not.
+	//
+	// It is an atomic rather than a bare int64 because the lease sweeper reads
+	// the clock on its own goroutine while a test advances it from the test's.
+	// The alternative, a func() int64 field swapped before the sweeper starts,
+	// still races as soon as a test wants to move time while the sweeper is
+	// running — which is exactly what reproducing real decay requires.
+	clockOffsetMS atomic.Int64
+
 	history  []Version
 	histLen  int
 	histNext int
@@ -100,6 +139,117 @@ func NewConductor(historyLimit int) *Conductor {
 		// transport is not muted either.
 		playing: true,
 	}
+}
+
+// nowMS is the Conductor's clock: the wall clock plus any test offset. It is the
+// single place time enters the Conductor.
+func (c *Conductor) nowMS() int64 {
+	return time.Now().UnixMilli() + c.clockOffsetMS.Load()
+}
+
+// advanceClock moves this Conductor's notion of "now" forward by ms, returning
+// the new reading. Only tests call it; it exists so a lease can DECAY under test
+// the way it decays in production.
+//
+// Ageing the clock is deliberately not the same operation as ageing the stored
+// timestamp. Advancing time leaves lastSeenMs exactly where it was, which is
+// what real decay looks like to a reader of the state; rewriting lastSeenMs
+// moves the very field a sweeper may be keyed on, and would make a sweeper that
+// reacts to "a value I have not seen" pass without ever handling an agent that
+// simply stopped beating.
+func (c *Conductor) advanceClock(ms int64) int64 {
+	return c.clockOffsetMS.Add(ms)
+}
+
+// AgentTTL is how long an agent's heartbeat keeps it counted as present.
+//
+// It is a LIVENESS WINDOW, not a session: the agent holds no connection, so
+// this is the only thing the server can honestly say. The tradeoff it encodes
+// is liveness against false alarms, and it is deliberately asymmetric — a
+// window too short reports "agent gone" while the agent is merely mid-thought
+// between two calls, which is worse than useless because it trains an operator
+// to ignore the indicator; a window too long delays the report of a real crash.
+//
+// 15s suits an agent whose loop is: push code, wait for a browser verdict, push
+// again. That cycle is normally a second or two, so 15s is several missed
+// heartbeats before anyone is told the agent is gone, and short enough that a
+// crashed agent is reported within a coffee break. The bound is inclusive: a
+// heartbeat exactly AgentTTL old is still active.
+//
+// This is deliberately much longer than the 5s WebSocket write deadline or the
+// 30s listener ping. Those are about not blocking on a client; this is about an
+// agent that is entitled to take its time between HTTP calls.
+const AgentTTL = 15 * time.Second
+
+// AgentTTLMS is AgentTTL in milliseconds, which is the unit both the presence
+// derivation and LastSeenMS are denominated in.
+//
+// It exists so the comparison cannot silently change units. The earlier shape
+// converted inline — int64(AgentTTL/time.Millisecond) — which is correct but
+// leaves the unit boundary implicit at every call site, and a caller writing
+// `age <= AgentTTL` against a millisecond age is a compile error only by luck.
+const AgentTTLMS = int64(AgentTTL / time.Millisecond)
+
+// RecordAgentPresence renews the agent's lease and returns the resulting
+// snapshot. It never touches the code document, the version counter or the
+// history: an agent proving it is alive is not a change to what is playing, and
+// bumping the version would put a heartbeat in the code history and make every
+// listener's reconnection look like a new document.
+//
+// Like SetAnchor, the rule lives HERE rather than only in the HTTP handler. A
+// guard that exists at one call site is a guard a second caller can forget, and
+// presence is exactly the field a future "mark the agent as departed" endpoint
+// would want to write without re-deriving the TTL.
+//
+// It returns the snapshot so the caller can broadcast the SAME value it returns
+// to the agent, which is the validate -> commit -> broadcast contract every
+// other write here follows.
+func (c *Conductor) RecordAgentPresence() Snapshot {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.agentLastSeenMS = c.nowMS()
+	return c.snapshotLocked()
+}
+
+// AgentPresenceAt returns the presence derived at an EXPLICIT instant.
+//
+// The clock is a parameter for the same reason validateAnchorAt takes one: the
+// derivation is a pure predicate over (lastSeen, now, ttl), and making it a
+// pure function is what lets the TTL boundary be asserted exactly rather than
+// approximately. The Server's lease sweeper uses it with the wall clock to
+// notice an expiry; tests use it with a fixed instant to pin the boundary.
+//
+// lastSeenMS == 0 is handled BEFORE the arithmetic, so a server that has never
+// seen an agent reports inactive rather than computing a nonsensical age
+// measured from the epoch.
+func (c *Conductor) AgentPresenceAt(nowMS int64) AgentPresence {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return presenceAt(c.agentLastSeenMS, nowMS)
+}
+
+// presenceAt is the pure derivation behind AgentPresenceAt, split out so the
+// rule reads as one statement of what "present" means.
+func presenceAt(lastSeenMS, nowMS int64) AgentPresence {
+	p := AgentPresence{LastSeenMS: lastSeenMS}
+	if lastSeenMS == 0 {
+		// Never seen. This branch is only reachable for a clock within AgentTTL
+		// of the epoch — real time is ~1.7e12 ms, so without it the arithmetic
+		// below would still yield inactive, and a mutation deleting this line
+		// survives every other test. It is kept because the marker is RESERVED
+		// (see AgentPresence) and a server whose clock is wrong must not report
+		// an agent that has never existed as present.
+		return p
+	}
+	// Compared as an absolute distance, so a heartbeat stamped in the future by
+	// a skewed client cannot sit "active" indefinitely and cannot be made
+	// negative-and-therefore-false by the same skew.
+	age := nowMS - lastSeenMS
+	if age < 0 {
+		age = -age
+	}
+	p.Active = age <= AgentTTLMS
+	return p
 }
 
 // Publish installs a new code document, bumping the version by one.
@@ -329,6 +479,10 @@ func (c *Conductor) snapshotLocked() Snapshot {
 		Playing:          c.playing,
 		ListenerCount:    c.listeners,
 		LastEvalResult:   cloneEvalResult(c.lastEval),
+		// Derived here rather than stored, so every snapshot is consistent with
+		// the instant it was built. c.nowMS is called under the lock the caller
+		// already holds, so the timestamp cannot drift mid-snapshot.
+		Agent: presenceAt(c.agentLastSeenMS, c.nowMS()),
 	}
 }
 

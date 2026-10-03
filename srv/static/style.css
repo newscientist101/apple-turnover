@@ -58,13 +58,66 @@ html, body {
   flex-shrink: 0;
 }
 
+/* The three presence states, driven by the class session.js writes from
+   snapshot.agent. Each differs in BOTH colour and words, so the distinction
+   survives a glance, a colourblind reader, and a screen reader.
+
+   The animation is deliberately NOT declared here. It used to be an
+   unconditional `animation: pulse 2s infinite` on the bare .status-dot, which
+   meant a pulsing green dot looked identical whether an agent was driving,
+   had crashed, or had never existed — the badge was reporting a mood, not a
+   state. Now only .agent-connected pulses, so motion itself carries meaning:
+   if the dot is moving, an agent is genuinely renewing its lease. */
+.status-indicator.agent-connected {
+  color: #4ade80;
+}
+
+.status-indicator.agent-connected .status-dot {
+  background-color: #4ade80;
+  box-shadow: 0 0 8px #4ade80;
+  animation: pulse 2s infinite ease-in-out;
+}
+
+/* An agent WAS here and its lease lapsed. Red, and static: motion would read as
+   life. */
+.status-indicator.agent-absent {
+  color: #f87171;
+}
+
+.status-indicator.agent-absent .status-dot {
+  background-color: #f87171;
+  box-shadow: 0 0 8px #f87171;
+}
+
+/* No agent has ever connected. Muted rather than red: nothing has gone wrong
+   yet, so this must not read as an alarm. */
+.status-indicator.agent-never {
+  color: var(--text-muted);
+}
+
+.status-indicator.agent-never .status-dot {
+  background-color: var(--text-muted);
+  box-shadow: none;
+}
+
+/* The fallback for a browser that loaded the markup but never ran session.js
+   (a CDN failure, a JS error). It must not claim a connection, so it looks
+   like the never-seen state rather than falling back to a green pulse. */
+.status-indicator:not([class*="agent-"]) {
+  color: var(--text-muted);
+}
+
+.status-indicator:not([class*="agent-"]) .status-dot {
+  background-color: var(--text-muted);
+  box-shadow: none;
+}
+
 .status-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background-color: var(--accent-cyan);
-  box-shadow: 0 0 8px var(--accent-cyan);
-  animation: pulse 2s infinite ease-in-out;
+  background-color: var(--text-muted);
+  flex-shrink: 0;
 }
 
 @keyframes pulse {

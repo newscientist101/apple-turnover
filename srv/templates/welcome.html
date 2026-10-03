@@ -21,9 +21,15 @@
     <main class="app-shell">
       <!-- Top Region: Single-Line Agent Message Panel -->
       <section class="agent-panel" id="agent-panel">
-        <div class="status-indicator">
-          <span class="status-dot"></span>
-          <span class="status-text">LIVE</span>
+        <!-- Agent presence. The state class (agent-connected / agent-absent /
+             agent-never) is written by session.js from snapshot.agent, and the
+             dot only pulses while an agent is actually connected. The initial
+             text says NEVER rather than LIVE: this server has, by definition,
+             not seen an agent yet, so any confident "live" claim here would be
+             decoration reporting a state nothing observed. -->
+        <div class="status-indicator agent-never" id="status-indicator" role="status">
+          <span class="status-dot" id="agent-status-dot"></span>
+          <span class="status-text" id="agent-status-text" aria-live="polite">AGENT NEVER</span>
         </div>
         <div class="agent-message" id="agent-message">
           System initialized. Awaiting agent input...

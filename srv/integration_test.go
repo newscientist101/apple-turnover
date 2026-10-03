@@ -1343,6 +1343,32 @@ func fanoutServer(t *testing.T) (*Server, string, string) {
 	return s, ts.URL, "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
 }
 
+// fanoutServerWith serves an ALREADY-BUILT Server on a loopback listener.
+//
+// It exists because some behaviour can only be configured before the handler
+// tree starts — the agent lease sweeper is started by the test with a shortened
+// interval — and building the Server inside wsTestServerWith would leave no
+// seam to configure it. Teardown is bounded in exactly the way fanoutServer's
+// is: the hub is closed from a goroutine and required to return.
+func fanoutServerWith(t *testing.T, s *Server) (*Server, string, string) {
+	t.Helper()
+	ts := httptest.NewServer(s.routes())
+	t.Cleanup(func() {
+		closedHub := make(chan struct{})
+		go func() {
+			s.Hub.Close()
+			close(closedHub)
+		}()
+		select {
+		case <-closedHub:
+		case <-time.After(wsHubCloseTimeout):
+			t.Errorf("Hub.Close did not return within %s during teardown: the hub goroutine is wedged", wsHubCloseTimeout)
+		}
+		wsCloseServer(t, ts)
+	})
+	return s, ts.URL, "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+}
+
 // fanoutGet and fanoutPost drive the API over the real listener. Every step is
 // bounded on three independent sides — request context, the transport's
 // response-header timeout, and the client timeout — so a wedged handler becomes

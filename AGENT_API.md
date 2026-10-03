@@ -28,6 +28,7 @@ All `/api` failures use exactly:
 | `POST /api/hush` | [no body](#post-apihush--post-apiplay) | snapshot | no |
 | `POST /api/play` | [no body](#post-apihush--post-apiplay) | snapshot | no |
 | `POST /api/eval-result` | [evalResultRequest](#post-apieval-result) | [evalAck](#post-apieval-result) | no |
+| `POST /api/heartbeat` | [no body](#post-apiheartbeat) | snapshot | no |
 | `GET /ws` | WebSocket upgrade | JSON listener frames | no |
 | `GET /` | none | HTML page | no |
 | `/static/` | none | static assets | no |
@@ -119,6 +120,24 @@ A browser reports the result of evaluating a published version in its sandbox RE
 
 `accepted:true` means the report was understood, not necessarily stored. A valid report older than the stored verdict is accepted but discarded as stale.
 
+### `POST /api/heartbeat`
+
+Renews the agent's liveness lease. Argument-free and idempotent.
+
+An agent speaks plain request/response HTTP and holds **no persistent connection**, so the server cannot observe a socket and cannot otherwise know an agent exists. This lease is the whole of what it knows.
+
+- Send it periodically — more often than the TTL — to be counted as present.
+- It never bumps the version and never changes the music.
+- A heartbeat broadcasts **nothing** to listeners: it renews a lease they already believe is held.
+
+**The lease decays.** A heartbeat counts the agent as present for **15 seconds** (`AgentTTL`). Stop sending and the server reports the agent absent 15s after the last beat, exactly once.
+
+`lastSeenMs` is `0` when no agent has *ever* connected, which is distinct from a heartbeat that landed at the Unix epoch — `0` is reserved as the "never" marker. The cost is that a heartbeat landing at exactly epoch millisecond `0` is stored as `0` and is therefore permanently indistinguishable from never-seen. This is unreachable in practice and cheaper than a second "has ever been seen" flag that could disagree with this one.
+
+Decay is a **server-side decision**, made against the server's own clock. A client must not infer presence from its own clock against `lastSeenMs`; it inherits clock skew and will disagree with the server near the boundary. Read `agent.active` as the server states it.
+
+This is liveness, not a session. The server cannot distinguish an agent that crashed from one that finished cleanly and exited — both stop beating and both decay.
+
 ## The snapshot
 
 `GET /api/state` and accepted writes return this object. WebSocket frames embed the same snapshot value.
@@ -133,7 +152,8 @@ A browser reports the result of evaluating a published version in its sandbox RE
   "history":[],
   "playing":true,
   "listenerCount":3,
-  "lastEvalResult":null
+  "lastEvalResult":null,
+  "agent":{"active":true,"lastSeenMs":1757000000123}
 }
 ```
 
@@ -147,6 +167,8 @@ A browser reports the result of evaluating a published version in its sandbox RE
 | `playing` | Transport intent, not audio state |
 | `listenerCount` | Current `/ws` listeners |
 | `lastEvalResult` | Stored browser verdict, or `null` before one is stored |
+| `agent.active` | Whether an agent heartbeat landed within the TTL |
+| `agent.lastSeenMs` | Server timestamp of the last heartbeat; `0` if no agent has ever connected |
 
 `anchor.cps` defaults to `0.5` cycles per second. `history` is bounded at 32 versions.
 
@@ -169,6 +191,7 @@ Empty `error` and `stats` fields are omitted.
 | Blank `code` | `400` | `code must not be empty: send the strudel pattern to play` |
 | Blank `message` | `400` | `message must not be empty: use POST /api/code to change the music, or send narration text` |
 | Body supplied to `/api/hush` or `/api/play` | `400` | `invalid JSON body: this endpoint takes no arguments: unexpected field(s) code (use POST /api/code to change the music)` |
+| Body supplied to `/api/heartbeat` | `400` | `invalid JSON body: this endpoint takes no arguments: unexpected field(s) agentId (use POST /api/code to change the music)` |
 | Body over 64 KiB | `413` | `request body too large: limit is 65536 bytes` |
 | Verdict for an unpublished version | `400` | `unknown version: 9999 (latest is 0)` |
 | Wrong method on an API endpoint | `405` + `Allow` | `method GET not allowed on /api/code, use POST` |
@@ -184,6 +207,8 @@ Every `/api` error response is the single-field JSON error object above. Errors 
 4. Wait for a browser to submit `POST /api/eval-result`.
 5. Read `GET /api/state` and inspect `lastEvalResult`.
 6. Iterate.
+
+While doing this, beat on `POST /api/heartbeat` more often than every 15 seconds — including while waiting in step 4, which is the step most likely to outlast the lease. An agent that heartbeats only when it has something to push will be reported absent during exactly the wait it is most idle through.
 
 The push response proves only that the document was stored. It is not an evaluation result. With no connected listener, no verdict will arrive.
 
@@ -207,7 +232,7 @@ The stale case applies to older `eval-result` reports. Because both accepted cas
 
 - Versions are contiguous, unique, monotonic, and never skipped, including under concurrent pushes.
 - Only `POST /api/code` increments the version.
-- Message, anchor, transport, listener-count, and stored evaluation-result changes do not increment it.
+- Message, anchor, transport, listener-count, agent-presence, and stored evaluation-result changes do not increment it.
 
 ## Listener WebSocket
 
@@ -232,8 +257,11 @@ The client replaces its entire local snapshot; it does not merge deltas.
 | `eval-result` | A browser verdict was stored |
 | `listener-count` | A listener connected, left, or was reaped |
 | `anchor` | Shared timeline changed |
+| `agent` | The agent lease lapsed |
 
 `hush` and `play` intentionally share `transport` because listeners care about the resulting `playing` state.
+
+`agent` is sent on exactly one occasion: a **held** lease lapsing. A heartbeat broadcasts nothing, and a server that has never seen an agent never announces one going away, because never-seen is the initial state rather than a transition. A client therefore treats `agent` as "the agent you were watching has gone", and re-reads `agent.active` from the frame rather than inferring the timing itself.
 
 ### Subscribe, then snapshot
 
@@ -285,6 +313,10 @@ false
 $ curl -s localhost:8000/api/code \
     -d '{"code":"s(\"bd*2\")","message":"dropping the broken layer"}'
 {"version":2,...}
+
+# The agent proves it is alive; stop beating and this decays in 15s.
+$ curl -s localhost:8000/api/heartbeat -d ''
+{"version":2,...,"agent":{"active":true,"lastSeenMs":1757000000456}}
 ```
 
 The server never evaluated either pattern. The browser did.

@@ -63,6 +63,7 @@ The agent uses HTTP; listeners use WebSocket. `/api` request bodies are JSON and
 | `POST /api/play` | Set transport intent to playing |
 | `POST /api/hush` | Set transport intent to stopped |
 | `POST /api/eval-result` | Record a browser evaluation result |
+| `POST /api/heartbeat` | Renew the agent liveness lease (decays after 15s) |
 | `GET /ws` | Listener WebSocket |
 | `GET /` | Browser application |
 | `/static/` | Browser assets |

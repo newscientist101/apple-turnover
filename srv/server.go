@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"path/filepath"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -48,6 +50,35 @@ type Server struct {
 	// 30s, and neither value may be baked into a test as a literal.
 	wsPingInterval time.Duration
 	wsPongTimeout  time.Duration
+
+	// agentSweepInterval is how often the lease sweeper checks for an expiry. It
+	// is a field rather than a constant for the same reason wsPingInterval is:
+	// the expiry tests must run in tens of milliseconds rather than spending the
+	// production 15s TTL, and the value may not be baked into a test as a
+	// literal. Read only after New, before the sweeper starts.
+	agentSweepInterval time.Duration
+
+	// agentSweepOnce makes starting the sweeper idempotent, so New and a test
+	// can both ask for it without leaking a second goroutine.
+	agentSweepOnce sync.Once
+
+	// agentSweepStopOnce makes stopping idempotent: the shutdown path and a
+	// test cleanup can both stop it, and closing a closed channel panics.
+	agentSweepStopOnce sync.Once
+
+	// agentSweepDone is closed to ask the sweeper to exit; agentSweepStopped is
+	// closed by the sweeper on its way out, so a stop can join rather than
+	// fire-and-forget. nil when the sweeper was never started.
+	agentSweepDone    chan struct{}
+	agentSweepStopped chan struct{}
+
+	// agentSweepTicks counts sweeper iterations, and agentSweeps counts the
+	// expiries actually announced. They are separate claims: "the goroutine is
+	// running" is not "the goroutine broadcast", and a test that conflated them
+	// could pass on a sweeper that spins without ever saying anything. Only
+	// tests read these.
+	agentSweepTicks atomic.Int64
+	agentSweeps     atomic.Int64
 }
 
 // New builds a Server with its Conductor and its Hub, and the wiring between
@@ -139,7 +170,18 @@ func (s *Server) Handler() http.Handler { return s.routes() }
 
 // Serve starts the HTTP server with the configured routes. All routing lives in
 // routes() so tests can drive the exact same handler tree over httptest.
+// Serve runs the server. It is deliberately the place the lease sweeper starts,
+// not New: New CONSTRUCTS a Server and Serve RUNS one, so a caller (or a test)
+// may configure fields between the two. Starting the sweeper in New would make
+// every later configuration change to those fields a data race against a
+// goroutine already reading them.
+//
+// Nothing is stopped here because ListenAndServe does not return until the
+// process is ending; when it does return, stopAgentSweeper reaps the sweeper
+// before the error is reported to the caller.
 func (s *Server) Serve(addr string) error {
 	slog.Info("starting server", "addr", addr)
+	s.startAgentSweeper()
+	defer s.stopAgentSweeper()
 	return http.ListenAndServe(addr, s.routes())
 }

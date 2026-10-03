@@ -698,6 +698,18 @@ func TestAgentAPIDocDocumentsTheLoop(t *testing.T) {
 		{"that sample-accurate sync is out of scope", "sample-accurate"},
 		{"what a drifted listener should expect", "Re-anchoring is the recovery mechanism for drift"},
 		{"that an unalignable listener says so rather than claiming a bar", "unscheduled"},
+		// The agent-presence LIMITATION. An agent holding no connection is a
+		// liveness lease, not a session, and an agent that reads it as anything
+		// stronger will tell a listener it is still driving when it is not.
+		{"that the agent holds no persistent connection", "no persistent connection"},
+		{"that presence is a lease that decays", "The lease decays"},
+		{"how long the lease lasts", "15 seconds"},
+		{"that a client must not infer presence from its own clock", "must not infer presence from its own clock"},
+		{"that liveness is not a session", "liveness, not a session"},
+		// The frame rule, which is the reason a listener can rely on `agent`.
+		{"that the agent frame fires only on a lapse", "held** lease lapsing"},
+		{"that a heartbeat broadcasts nothing", "A heartbeat broadcasts nothing"},
+		{"that presence never bumps the version", "agent-presence, and stored evaluation-result changes do not increment"},
 	} {
 		if !docStates(doc, must.needle) {
 			t.Errorf("AGENT_API.md no longer states %s (looked for %q): this is the guidance an external agent codes its loop from", must.what, must.needle)

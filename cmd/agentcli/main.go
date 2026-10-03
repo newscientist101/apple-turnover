@@ -1,12 +1,15 @@
 package main
 
 // agentcli drives the live performance from a shell or a script, so the harness
-// never has to hand-roll curl for the five things it does every iteration:
-// read the state, push code, narrate, hush and play.
+// never has to hand-roll curl for the things it does every iteration:
+// read the state, push code, narrate, re-anchor, hush and play.
 //
 // It is a CLIENT of the documented HTTP contract in AGENT_API.md and adds no
 // behaviour of its own to the server. Every subcommand maps one-to-one onto one
-// endpoint, and every value it prints comes from a server response.
+// endpoint — that one-to-one property is the reason `anchor` exists at all
+// (issue strudel-agent-3vo.8.4): a wrapper that covers six of the seven
+// documented endpoints is a wrapper whose one gap gets hand-rolled curl back.
+// Every value it prints comes from a server response.
 //
 // Two properties are worth stating up front, because both are easy to get
 // quietly wrong in a convenience wrapper:
@@ -70,6 +73,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "  hush                      stop the performance\n")
 		fmt.Fprintf(stderr, "  play                      resume the performance\n")
 		fmt.Fprintf(stderr, "  eval-result [flags]       report how the last version evaluated\n")
+		fmt.Fprintf(stderr, "  anchor [flags]            re-anchor the shared timeline (-epoch-ms, -cps)\n")
 		fmt.Fprintf(stderr, "\nflags:\n")
 		fs.PrintDefaults()
 	}
@@ -116,6 +120,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = cmdTransport(ctx, c, "play", true, cmdArgs, stdout)
 	case "eval-result":
 		err = cmdEvalResult(ctx, c, cmdArgs, stdout)
+	case "anchor":
+		err = cmdAnchor(ctx, c, cmdArgs, stdout)
 	case "help", "-h", "--help":
 		fs.Usage()
 		return exitOK

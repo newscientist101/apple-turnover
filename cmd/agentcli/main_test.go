@@ -23,11 +23,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -569,6 +571,221 @@ func TestTimeoutIsReportedAsATimeout(t *testing.T) {
 	}
 }
 
+// currentAnchor reads the stored anchor straight from the real server, so an
+// assertion about what the CLI did is checked against server state rather than
+// against the CLI's own prose — which is the thing most likely to be wrong.
+func currentAnchor(t *testing.T, base string) (epochMS int64, cps float64) {
+	t.Helper()
+	resp, err := http.Get(base + "/api/state")
+	if err != nil {
+		t.Fatalf("GET /api/state: %v", err)
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/state: HTTP %d", resp.StatusCode)
+	}
+	var snap snapshot
+	if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
+		t.Fatalf("decoding /api/state: %v", err)
+	}
+	return snap.Anchor.EpochMS, snap.Anchor.CPS
+}
+
+// TestAnchorMovesTheSharedTimeline is the happy path: a changed rate is stored,
+// the version is NOT bumped (a re-anchor moves where the timeline starts, not
+// what is playing), and the reported numbers are the server's own.
+func TestAnchorMovesTheSharedTimeline(t *testing.T) {
+	base := newTestServer(t)
+
+	// Publish something first, so an unchanged version is evidence rather than
+	// the trivial case of a performance that never had a version.
+	if got := runCLI(t, base, `s("bd")`, "push"); got.code != exitOK {
+		t.Fatalf("push: exit %d, stderr %q", got.code, got.stderr)
+	}
+
+	got := runCLI(t, base, "", "anchor", "-cps", "0.75")
+	if got.code != exitOK {
+		t.Fatalf("anchor -cps 0.75: exit %d, stderr %q", got.code, got.stderr)
+	}
+	if strings.Contains(got.stdout, "no change") {
+		t.Errorf("stdout %q reports a no-op for a real tempo change", got.stdout)
+	}
+	if !strings.Contains(got.stdout, "cps=0.75") {
+		t.Errorf("stdout %q, want it to report the new rate from the server", got.stdout)
+	}
+
+	epochMS, cps := currentAnchor(t, base)
+	if cps != 0.75 {
+		t.Errorf("server anchor cps = %g, want 0.75", cps)
+	}
+	if epochMS == 0 {
+		t.Error("server anchor epochMs was lost; a re-anchor replaced the timeline instead of moving it")
+	}
+	if !strings.Contains(got.stdout, "version 1 unchanged") {
+		t.Errorf("stdout %q, want it to say the version did not move", got.stdout)
+	}
+}
+
+// TestAnchorCarriesOverTheHalfItWasNotGiven pins the convenience that makes this
+// command safe to use: the endpoint REPLACES the whole timeline, so a body
+// carrying only one half would be a 400 — and an agent hand-writing that body
+// would have to read /api/state first to get the other half right. The CLI does
+// that read for them, so naming only -cps must not lose the epoch.
+func TestAnchorCarriesOverTheHalfItWasNotGiven(t *testing.T) {
+	base := newTestServer(t)
+
+	epochBefore, _ := currentAnchor(t, base)
+	got := runCLI(t, base, "", "anchor", "-cps", "1.5")
+	if got.code != exitOK {
+		t.Fatalf("anchor -cps only: exit %d, stderr %q", got.code, got.stderr)
+	}
+	epochAfter, cps := currentAnchor(t, base)
+	if cps != 1.5 {
+		t.Errorf("cps = %g, want the requested 1.5", cps)
+	}
+	if epochAfter != epochBefore {
+		t.Errorf("epochMs moved from %d to %d when only -cps was given; the unnamed half must be carried over",
+			epochBefore, epochAfter)
+	}
+
+	// And symmetrically for the epoch: the rate must survive a bare -epoch-ms.
+	// The epoch is nudged by a millisecond so the no-op comparison cannot
+	// collapse this into "no change".
+	_, cpsBefore := currentAnchor(t, base)
+	got = runCLI(t, base, "", "anchor", "-epoch-ms", strconv.FormatInt(epochAfter+1, 10))
+	if got.code != exitOK {
+		t.Fatalf("anchor -epoch-ms only: exit %d, stderr %q", got.code, got.stderr)
+	}
+	if _, cpsAfter := currentAnchor(t, base); cpsAfter != cpsBefore {
+		t.Errorf("cps changed from %g to %g when only -epoch-ms was given", cpsBefore, cpsAfter)
+	}
+}
+
+// TestAnchorReportsANoopAsANoop is the "accepted is not applied" property, and
+// it is real here rather than hypothetical: a re-anchor with the SAME values is
+// accepted, stored and broadcast, and nothing on the wire distinguishes it from
+// one that moved every listener onto a new bar grid.
+//
+// So the command reads the state first and compares, and the wording says what
+// was OBSERVED. The exit code is still 0 — the request WAS accepted — and the
+// distinct wording is what stops a caller reading "no change" as a re-anchor.
+func TestAnchorReportsANoopAsANoop(t *testing.T) {
+	base := newTestServer(t)
+
+	// Move the anchor somewhere distinctive, so the repeat is unambiguous.
+	if got := runCLI(t, base, "", "anchor", "-cps", "2"); got.code != exitOK {
+		t.Fatalf("first anchor: exit %d, stderr %q", got.code, got.stderr)
+	}
+	epoch, _ := currentAnchor(t, base)
+
+	// Re-sending exactly what is stored must be reported as a no-op.
+	repeat := runCLI(t, base, "", "anchor", "-epoch-ms", strconv.FormatInt(epoch, 10), "-cps", "2")
+	if repeat.code != exitOK {
+		t.Errorf("repeat anchor: exit %d, want 0 — the request WAS accepted", repeat.code)
+	}
+	if !strings.Contains(repeat.stdout, "no change") {
+		t.Errorf("repeat anchor = %q, want it reported as a no-op", repeat.stdout)
+	}
+	if !strings.Contains(repeat.stdout, "already") {
+		t.Errorf("repeat anchor = %q, want it to say the timeline was already there", repeat.stdout)
+	}
+
+	// A genuine move must NOT be reported as a no-op, or the wording is worse
+	// than useless: it is the false negative an agent would act on.
+	moved := runCLI(t, base, "", "anchor", "-cps", "3")
+	if moved.code != exitOK {
+		t.Fatalf("moved anchor: exit %d, stderr %q", moved.code, moved.stderr)
+	}
+	if strings.Contains(moved.stdout, "no change") {
+		t.Errorf("a real tempo change is reported as a no-op: %q", moved.stdout)
+	}
+}
+
+// TestAnchorRefusalIsReportedVerbatimAndFails is the first CLI property on this
+// endpoint: a rejected re-anchor leaves the stored anchor UNTOUCHED and is never
+// broadcast, so an agent that believed it had landed would believe every
+// listener had moved onto a timeline the server refused to store.
+//
+// Both halves matter independently: a paraphrase loses the reason (the server
+// distinguishes a bad rate from a bad skew), and exit 0 would let a script
+// record a refused re-anchor as applied.
+func TestAnchorRefusalIsReportedVerbatimAndFails(t *testing.T) {
+	base := newTestServer(t)
+	epochBefore, cpsBefore := currentAnchor(t, base)
+
+	tests := []struct {
+		name string
+		args []string
+		want string // the server's exact wording, not a paraphrase
+	}{
+		{"zero rate", []string{"anchor", "-cps", "0"}, "cps must be greater than 0"},
+		{"negative rate", []string{"anchor", "-cps", "-1"}, "cps must be greater than 0"},
+		{"runaway rate", []string{"anchor", "-cps", "100000"}, "cps must be at most 1000"},
+		{
+			// Far outside AnchorMaxSkewMS, so this cannot pass by accident.
+			name: "epoch from a badly skewed clock",
+			args: []string{"anchor", "-epoch-ms", "1000000000000"},
+			want: "must be within",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runCLI(t, base, "", tc.args...)
+			if got.code == exitOK {
+				t.Errorf("exit 0 on a refused re-anchor; want non-zero\nstdout: %q", got.stdout)
+			}
+			if got.code != exitError {
+				t.Errorf("exit %d, want %d (a refusal, not a bad command line)", got.code, exitError)
+			}
+			if !strings.Contains(got.stderr, tc.want) {
+				t.Errorf("stderr %q does not carry the server's verbatim reason %q", got.stderr, tc.want)
+			}
+			// A refusal must not read as a success on stdout either.
+			if strings.Contains(got.stdout, "anchor: epochMs=") {
+				t.Errorf("stdout claims an anchor landed despite a refusal: %q", got.stdout)
+			}
+			// And the refusal must be total: the stored anchor is untouched.
+			if epochAfter, cpsAfter := currentAnchor(t, base); epochAfter != epochBefore || cpsAfter != cpsBefore {
+				t.Errorf("a refused re-anchor changed the stored anchor: epochMs %d->%d cps %g->%g",
+					epochBefore, epochAfter, cpsBefore, cpsAfter)
+			}
+		})
+	}
+}
+
+// TestAnchorUsageErrorsExitTwo covers the second half of the exit-code contract:
+// a command line that names nothing cannot be sent at all. Exit 2 rather than 1
+// is what lets a caller retry after fixing its arguments without mistaking a
+// malformed invocation for a server refusal.
+func TestAnchorUsageErrorsExitTwo(t *testing.T) {
+	base := newTestServer(t)
+
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"neither flag", []string{"anchor"}, "-epoch-ms"},
+		{"positional argument", []string{"anchor", "now"}, "no positional"},
+		{"unknown flag", []string{"anchor", "-tempo", "2"}, "not defined"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runCLI(t, base, "", tc.args...)
+			if got.code != exitUsage {
+				t.Errorf("exit %d, want %d (stdout %q, stderr %q)", got.code, exitUsage, got.stdout, got.stderr)
+			}
+			if !strings.Contains(got.stderr, tc.want) {
+				t.Errorf("stderr %q does not explain the problem (want %q)", got.stderr, tc.want)
+			}
+		})
+	}
+}
+
 // TestHelpExitsZero covers the one non-error path that is not a command, and
 // checks every subcommand is discoverable from it.
 func TestHelpExitsZero(t *testing.T) {
@@ -580,7 +797,7 @@ func TestHelpExitsZero(t *testing.T) {
 		if !strings.Contains(got.stderr, "usage: agentcli") {
 			t.Errorf("%s: stderr %q, want the usage text", arg, got.stderr)
 		}
-		for _, want := range []string{"state", "push", "message", "hush", "play", "eval-result"} {
+		for _, want := range []string{"state", "push", "message", "hush", "play", "eval-result", "anchor"} {
 			if !strings.Contains(got.stderr, want) {
 				t.Errorf("%s: usage does not mention %q", arg, want)
 			}

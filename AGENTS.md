@@ -197,13 +197,13 @@ Do not assume these features work; they remain open work.
 
 Recorded here so the "not yet wired" list above cannot quietly become wrong.
 
-* **The agent CLI** (`cmd/agentcli`, issue strudel-agent-3vo.9.1): a pure-Go
-  client for the documented HTTP API, so the harness stops hand-rolling `curl`.
-  It adds NO server behaviour — every subcommand maps one-to-one onto an
-  endpoint, and `srv.Server.Handler()` exists (behaviour-free) purely so its
-  tests can drive the REAL `routes()` instead of a fake that could drift from
-  the contract. Two properties are load-bearing and each has a mutation
-  (rows 70-73):
+* **The agent CLI** (`cmd/agentcli`, issues strudel-agent-3vo.9.1,
+  strudel-agent-3vo.8.4): a pure-Go client for the documented HTTP API, so the
+  harness stops hand-rolling `curl`. It adds NO server behaviour — every
+  subcommand maps one-to-one onto an endpoint, and `srv.Server.Handler()` exists
+  (behaviour-free) purely so its tests can drive the REAL `routes()` instead of
+  a fake that could drift from the contract. Two properties are load-bearing and
+  each has a mutation (rows 70-73, 90-92):
   - **A rejection is never softened.** The server's `{"error": ...}` string is
     printed verbatim on stderr and the exit code is non-zero (1 for a refusal,
     2 for a bad command line). A CLI that paraphrased the reason, or exited 0 on
@@ -216,6 +216,15 @@ Recorded here so the "not yet wired" list above cannot quietly become wrong.
     success. The pre-read is a bounded extra round trip and a deliberately racy
     report, which is why the wording says what was OBSERVED, never what the
     server holds now.
+  - **`anchor` carries over the half it was not given.** `POST /api/anchor`
+    REPLACES the whole timeline rather than patching one half of it, so a body
+    naming only `cps` is a 400 — the contract tells an agent to resend the
+    current `epochMs` read from `/api/state`. The CLI does that read for them
+    (which is also the pre-read the no-op report needs), so `anchor -cps 0.75`
+    cannot silently drop the epoch. Mutating that carry-over to send a zero
+    (row 91) is caught by the resulting 400, and removing the pre-read
+    altogether (row 92) is caught too — the two are separate defects, so both
+    rows are needed rather than one.
 
 * **Snapshot on connect** (`srv/ws.go`, `srv/event.go`): a listener that
   subscribes is sent the full state immediately as a `snapshot` frame, so a late

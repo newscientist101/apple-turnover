@@ -72,7 +72,12 @@ bin/agentcli message "four on the floor"
 bin/agentcli hush
 bin/agentcli play
 bin/agentcli eval-result -version 1 -ok=false -error "x is not a function"
+bin/agentcli anchor -cps 0.75                  # or: anchor -epoch-ms 1757000000000
 ```
+
+`anchor` republishes the shared timeline. Either flag may be given alone — the
+other half is carried over from the current anchor, so a tempo change cannot
+silently drop the epoch.
 
 The base URL comes from `-base` or from `$STRUDEL_AGENT_URL`, defaulting to
 `http://localhost:8000`; a bare `host:port` is accepted. `-timeout` (10s) bounds
@@ -126,7 +131,7 @@ and a listener count. Nothing is persisted and there is no set saving.
 ## Code layout
 
 - `cmd/srv`: main package (binary entrypoint)
-- `cmd/agentcli`: pure-Go client for the agent API (`state`, `push`, `message`, `hush`, `play`, `eval-result`)
+- `cmd/agentcli`: pure-Go client for the agent API (`state`, `push`, `message`, `anchor`, `hush`, `play`, `eval-result`)
 - `srv/server.go`: `Server`, `Serve`, `HandleRoot`
 - `srv/api.go`: the agent HTTP API and the whole routing tree (`routes()`)
 - `srv/conductor.go`: the in-memory Conductor session core

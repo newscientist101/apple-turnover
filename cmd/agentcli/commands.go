@@ -238,6 +238,92 @@ func cmdEvalResult(ctx context.Context, c *client, args []string, out io.Writer)
 	return nil
 }
 
+// anchorRequest is the documented POST /api/anchor body. Both fields are
+// required by the contract — a re-anchor REPLACES the whole timeline rather
+// than patching one half of it — so this type sends both unconditionally,
+// even when the caller only wanted to change one of them.
+type anchorRequest struct {
+	EpochMS int64   `json:"epochMs"`
+	CPS     float64 `json:"cps"`
+}
+
+// cmdAnchor republishes the shared timeline every listener schedules against.
+//
+// It is here because the CLI is one-to-one with the documented endpoints: POST
+// /api/anchor was the last route reachable only by hand-rolled curl, and a
+// wrapper that covers six of seven endpoints is a wrapper whose gaps get
+// hand-rolled curl back.
+//
+// The two load-bearing properties apply, and the second one is real here rather
+// than theoretical: a re-anchor with unchanged values is idempotent — the server
+// accepts it, stores the same anchor and broadcasts it — so the wire carries no
+// marker distinguishing "moved the shared bar grid" from "said it again". The
+// state is therefore read FIRST and compared, and a re-send is reported as
+// "no change" rather than as a fresh re-anchor.
+//
+// A REFUSED anchor needs no such care to be safe, and this is deliberate: the
+// server answers 400 with its own reason, the client returns that error
+// verbatim, and run() maps it to exit 1. There is no accepted-but-ignored case
+// to paper over here — the uncertainty is the other way round, in the
+// comparison, which is a report of what was OBSERVED rather than a guarantee
+// about what the server holds now (another agent could re-anchor in between).
+func cmdAnchor(ctx context.Context, c *client, args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("anchor", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	epoch := fs.Int64("epoch-ms", 0, "the shared timeline's epoch, in Unix milliseconds (default: the current epoch)")
+	cps := fs.Float64("cps", 0, "cycles per second, greater than 0 and at most 1000 (default: the current rate)")
+	if err := fs.Parse(args); err != nil {
+		return &usageError{msg: err.Error()}
+	}
+	if fs.NArg() > 0 {
+		return usagef("anchor takes no positional arguments, got %q", strings.Join(fs.Args(), " "))
+	}
+	// Visit rather than a sentinel default: epoch 0 and cps 0 are both invalid
+	// to the server, so a default value cannot double as "was it supplied".
+	supplied := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { supplied[f.Name] = true })
+	if !supplied["epoch-ms"] && !supplied["cps"] {
+		return usagef("anchor needs -epoch-ms and/or -cps (got neither; read the current anchor with 'agentcli state')")
+	}
+
+	before, err := c.get(ctx, "/api/state")
+	if err != nil {
+		return err
+	}
+
+	// The half the caller did not name is carried over from the state just
+	// read, which is exactly what the contract tells an agent to do by hand
+	// ("resend the current epochMs") — so the CLI cannot half-anchor the way a
+	// hand-written body easily could.
+	req := anchorRequest{EpochMS: before.Anchor.EpochMS, CPS: before.Anchor.CPS}
+	if supplied["epoch-ms"] {
+		req.EpochMS = *epoch
+	}
+	if supplied["cps"] {
+		req.CPS = *cps
+	}
+
+	var snap snapshot
+	if err := c.post(ctx, "/api/anchor", req, &snap); err != nil {
+		return err
+	}
+	if c.jsonOutput {
+		return writeJSONLine(out, snap)
+	}
+
+	if req.EpochMS == before.Anchor.EpochMS && req.CPS == before.Anchor.CPS {
+		fmt.Fprintf(out, "anchor: accepted, no change (the timeline was already epochMs=%d cps=%g)\n",
+			snap.Anchor.EpochMS, snap.Anchor.CPS)
+		return nil
+	}
+	// The version is echoed for the same reason `message` echoes it: a re-anchor
+	// must NOT bump it, so the unchanged number is the confirmation that only
+	// the timeline moved.
+	fmt.Fprintf(out, "anchor: epochMs=%d cps=%g (version %d unchanged)\n",
+		snap.Anchor.EpochMS, snap.Anchor.CPS, snap.Version)
+	return nil
+}
+
 // readDocument loads the document to push, from a file or from stdin.
 //
 // "-" and an omitted -f both mean stdin. The size bound is deliberately looser

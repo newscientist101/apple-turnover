@@ -27,9 +27,11 @@ package srv
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -338,25 +340,47 @@ func TestVisualizationLanesNKeyedHaps(t *testing.T) {
 // proves the note colour branch is actually REACHED, and that colour agrees with
 // the lane the hap was filed under.
 //
-// viz.js derived the colour by re-sniffing `valItem.note !== undefined`
-// independently of how it had chosen the lane key, so the two could disagree: a
-// {note, s} hap was keyed under its sound but painted as a note. Asserting the
-// fillStyle the real code assigned proves the branch executed; asserting that
-// the source merely contains "#4f8cff" would pass just as happily on a branch
-// that never runs.
+// The exact hex pins were moved to family membership because colour is now
+// per-lane (issue strudel-agent-uvj.9): a lane's colour varies within its
+// family, so pinning one literal per family would break on every legitimate
+// palette change.
+//
+// The expected colour is NOT read back out of colourFor. Doing that would be
+// tautological — it asserts only that the renderer calls the function the test
+// itself just called, and a colourFor that ignored its arguments and returned
+// one constant would satisfy it.
+//
+// Family is decided by MEMBERSHIP of the served palette table instead: the
+// colour a lane painted must be one of ITS family's entries. Membership is used
+// rather than a hue band because hue does not discriminate here — the 'other'
+// family is grey-violet by design and 11 of its 16 entries sit inside the note
+// family's blue band, so a hue check happily accepts an 'other' colour as a
+// note colour. That is exactly the uvj.10 defect (a lane filed under one thing
+// and painted as another) arriving through the palette instead of the resolver,
+// and a hue-banded version of this test let mutation
+// 130-viz-lane-colour-decoupled-from-lane SURVIVE. The palettes are proven
+// disjoint by TestVisualizationFamilyPalettesAreDisjoint, which is what makes
+// membership a sound discriminator rather than another loose hint.
 func TestVisualizationLaneColourMatchesLaneIdentity(t *testing.T) {
-	const noteColour = "#4f8cff"
-	const sampleColour = "#00e5a3"
-
 	rt := newVizRuntime(t)
+
+	pals := vizPalettes(t, rt)
+	memberOf := func(colour, family string) bool {
+		for _, c := range pals[family] {
+			if c == colour {
+				return true
+			}
+		}
+		return false
+	}
 
 	rt.run(`
 	  window.strudelViz.onSnapshot({ anchor: { epochMs: 0, cps: 0.5 } });
 	  window.strudelViz.setPattern({
 	    queryArc: function (begin, end) {
 	      return [
-	        { whole: { begin: 0.0, end: 0.5 }, value: { note: "c4", s: "piano" } },
-	        { whole: { begin: 0.5, end: 1.0 }, value: { s: "bd" } },
+	        { whole: { begin: begin, end: begin + 0.5 }, value: { note: "c4", s: "piano" } },
+	        { whole: { begin: begin + 0.5, end: begin + 1.0 }, value: { s: "bd" } },
 	      ];
 	    },
 	  });
@@ -365,17 +389,34 @@ func TestVisualizationLaneColourMatchesLaneIdentity(t *testing.T) {
 
 	styles := vizLaneBlockStyles(rt)
 
-	for _, c := range []struct{ lane, want string }{
-		{"c4", noteColour},
-		{"bd", sampleColour},
+	for _, c := range []struct {
+		lane   string
+		family string
+	}{
+		// A {note, s} hap is filed under its PITCH, so the lane named "c4"
+		// must be painted from the note palette.
+		{"c4", "note"},
+		{"bd", "sample"},
 	} {
 		got := styles[c.lane]
 		if len(got) == 0 {
 			t.Fatalf("no block painted in lane %q (lanes seen: %v)", c.lane, laneNames(styles))
 		}
 		for _, s := range got {
-			if s != c.want {
-				t.Errorf("block in lane %q painted %q, want %q: lane identity and colour disagree", c.lane, s, c.want)
+			if !isWellFormedHex(s) {
+				t.Errorf("block in lane %q painted %q, which is not a #rrggbb hex", c.lane, s)
+				continue
+			}
+			if !memberOf(s, c.family) {
+				t.Errorf("block in lane %q painted %s, which is not in the %s palette: lane identity and colour disagree",
+					c.lane, s, c.family)
+			}
+			// Name the family it wrongly came from, when it came from one:
+			// "not the note palette" alone leaves the reader guessing.
+			for _, other := range []string{"note", "sample", "other"} {
+				if other != c.family && memberOf(s, other) {
+					t.Errorf("block in lane %q painted %s, an %s-family colour: the resolver and the palette disagree", c.lane, s, other)
+				}
 			}
 		}
 	}
@@ -386,6 +427,343 @@ func TestVisualizationLaneColourMatchesLaneIdentity(t *testing.T) {
 	if len(styles) != 2 {
 		t.Errorf("lanes seen = %v, want exactly [bd c4]: a sound or an ungrouped value is leaking in as a lane", laneNames(styles))
 	}
+}
+
+// vizPalettes reads the three family palettes out of the SERVED viz.js.
+//
+// It reads the palette TABLE, never colourFor, so using it to check a painted
+// colour stays independent of the resolver under test.
+func vizPalettes(t *testing.T, rt *syncRuntime) map[string][]string {
+	t.Helper()
+	out := map[string][]string{}
+	for _, fam := range []string{"note", "sample", "other"} {
+		raw := rt.eval(`JSON.stringify((window.strudelViz.PALETTES || {})["` + fam + `"] || null)`).String()
+		var entries []string
+		if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+			t.Fatalf("%s palette is not a JSON array of colours: %s (%v)", fam, raw, err)
+		}
+		out[fam] = entries
+	}
+	return out
+}
+
+// TestVisualizationFamilyPalettesAreDisjoint proves no colour appears in two
+// families.
+//
+// This is the invariant that lets a lane's family be decided by MEMBERSHIP —
+// "the painted colour is one of the note palette's entries" — instead of by hue.
+// Hue cannot do the job: the 'other' family is grey-violet by design, and
+// 11 of its 16 entries have a hue inside the note family's blue band. A
+// hue-only check therefore accepts an 'other' colour as a note colour, which is
+// precisely how a {note, s} hap filed under its sound could be painted as a
+// note (strudel-agent-uvj.10) re-entering through the palette.
+func TestVisualizationFamilyPalettesAreDisjoint(t *testing.T) {
+	rt := newVizRuntime(t)
+	pals := vizPalettes(t, rt)
+
+	for _, pair := range [][2]string{{"note", "sample"}, {"note", "other"}, {"sample", "other"}} {
+		a, b := pair[0], pair[1]
+		inA := map[string]bool{}
+		for _, c := range pals[a] {
+			inA[c] = true
+		}
+		for _, c := range pals[b] {
+			if inA[c] {
+				t.Errorf("colour %s is in both the %s and %s palettes: a painted colour would no longer identify its family", c, a, b)
+			}
+		}
+	}
+}
+
+// The per-lane palette is built by varying lightness and saturation WITHIN a
+// base hue, so an entry that drifts into another family's hue is invisible to
+// any test that checks a couple of specific lanes: the lane simply borrows the
+// wrong family's colour depending on where its key happens to hash. That is the
+// same defect uvj.10 was about — colour disagreeing with identity — arriving
+// through the palette instead of the resolver. The check is on the served bytes
+// so the palette table itself is what is graded.
+func TestVisualizationEveryPaletteEntryStaysInItsFamily(t *testing.T) {
+	rt := newVizRuntime(t)
+
+	for _, fam := range []struct {
+		name    string
+		hueFrom float64
+		hueTo   float64
+		maxSat  float64
+		wantHue bool
+		wantSat bool
+	}{
+		// The 'other' family is grey-violet by design and is bounded by
+		// saturation instead: several of its entries are plain blue-greys, and
+		// a hue band wide enough to hold them would swallow the note band.
+		{name: "note", hueFrom: 195, hueTo: 262, wantHue: true},
+		{name: "sample", hueFrom: 140, hueTo: 175, wantHue: true},
+		{name: "other", maxSat: 0.70, wantSat: true},
+	} {
+		raw := rt.eval(`JSON.stringify((window.strudelViz.PALETTES || {})["` + fam.name + `"] || null)`).String()
+		var entries []string
+		if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+			t.Fatalf("%s palette is not a JSON array of colours: %s (%v)", fam.name, raw, err)
+		}
+		if len(entries) < 4 {
+			t.Errorf("%s palette has %d entries, want at least 4 so realistic lane counts stay distinguishable", fam.name, len(entries))
+		}
+		seen := map[string]bool{}
+		for _, c := range entries {
+			if !isWellFormedHex(c) {
+				t.Errorf("%s palette entry %q is not a #rrggbb hex", fam.name, c)
+				continue
+			}
+			if seen[c] {
+				t.Errorf("%s palette repeats %q: the variation within a family is doing nothing", fam.name, c)
+			}
+			seen[c] = true
+			if fam.wantHue {
+				h, _ := hexHueDegrees(c)
+				if h < fam.hueFrom || h > fam.hueTo {
+					t.Errorf("%s palette entry %s has hue %.1f, outside its %.0f..%.0f family band: it would paint a lane in another family's colour", fam.name, c, h, fam.hueFrom, fam.hueTo)
+				}
+			}
+			if fam.wantSat {
+				if s, _ := hexSaturation(c); s > fam.maxSat {
+					t.Errorf("%s palette entry %s has saturation %.2f, above the %.2f ceiling for that family", fam.name, c, s, fam.maxSat)
+				}
+			}
+		}
+	}
+}
+
+// TestVisualizationPerLanePalette (issue strudel-agent-uvj.9) proves:
+// 1. Four distinct sample lanes receive four distinguishable colours.
+// 2. Note, sample, and 'other' lanes are semantically distinguishable and receive well-formed hexes.
+// 3. Colours are stable across re-renders and lane count/sort order changes (flicker regression).
+func TestVisualizationPerLanePalette(t *testing.T) {
+	rt := newVizRuntime(t)
+
+	// 1. Four distinct sample lanes receive four distinguishable colours.
+	rt.run(`
+	  window.strudelViz.onSnapshot({ anchor: { epochMs: 0, cps: 0.5 } });
+	  window.strudelViz.setPattern({
+	    queryArc: function (begin, end) {
+	      return [
+	        { whole: { begin: begin, end: begin + 0.25 }, value: { s: "bd" } },
+	        { whole: { begin: begin + 0.25, end: begin + 0.50 }, value: { s: "sd" } },
+	        { whole: { begin: begin + 0.50, end: begin + 0.75 }, value: { s: "cp" } },
+	        { whole: { begin: begin + 0.75, end: begin + 1.00 }, value: { s: "hh" } },
+	      ];
+	    },
+	  });
+	  window.__runOneFrame();
+	`)
+
+	sampleStyles := vizLaneBlockStyles(rt)
+	sampleLanes := []string{"bd", "sd", "cp", "hh"}
+	seenSampleColours := make(map[string]string)
+
+	for _, lane := range sampleLanes {
+		got := sampleStyles[lane]
+		if len(got) == 0 {
+			t.Fatalf("no blocks painted for lane %q", lane)
+		}
+		colour := got[0]
+		if !isWellFormedHex(colour) {
+			t.Errorf("lane %q colour %q is not a well-formed hex #rrggbb", lane, colour)
+		}
+		if prevLane, dup := seenSampleColours[colour]; dup {
+			t.Errorf("lane %q and lane %q share the exact same colour %q: sample lanes must be distinguishable", lane, prevLane, colour)
+		}
+		seenSampleColours[colour] = lane
+	}
+
+	// 2. Semantic distinction across families (note vs sample vs other).
+	rt.run(`
+	  window.__ctxCalls.fillRect.length = 0;
+	  window.__ctxCalls.stroke.length = 0;
+	  window.__ctxCalls.fillText.length = 0;
+	  window.__ctxCalls.order.length = 0;
+	  window.strudelViz.setPattern({
+	    queryArc: function (begin, end) {
+	      return [
+	        { whole: { begin: begin, end: begin + 0.33 }, value: { note: "c4" } },
+	        { whole: { begin: begin + 0.33, end: begin + 0.66 }, value: { s: "bd" } },
+	        { whole: { begin: begin + 0.66, end: begin + 1.00 }, value: { gain: 0.8 } }, // 'other'
+	      ];
+	    },
+	  });
+	  window.__runOneFrame();
+	`)
+
+	familyStyles := vizLaneBlockStyles(rt)
+	noteColour := familyStyles["c4"][0]
+	sampleColour := familyStyles["bd"][0]
+	otherColour := familyStyles["other"][0]
+
+	for lane, colour := range map[string]string{"c4": noteColour, "bd": sampleColour, "other": otherColour} {
+		if !isWellFormedHex(colour) {
+			t.Errorf("lane %q colour %q is not a well-formed hex #rrggbb", lane, colour)
+		}
+	}
+
+	if noteColour == sampleColour {
+		t.Errorf("note colour %q and sample colour %q are identical: families must be semantically distinguishable", noteColour, sampleColour)
+	}
+	if noteColour == otherColour {
+		t.Errorf("note colour %q and other colour %q are identical: families must be semantically distinguishable", noteColour, otherColour)
+	}
+	if sampleColour == otherColour {
+		t.Errorf("sample colour %q and other colour %q are identical: families must be semantically distinguishable", sampleColour, otherColour)
+	}
+
+	// 3. Stability across re-renders and lane count / sort order changes.
+	// Initial pattern: bd, sd, cp
+	rt.run(`
+	  window.__ctxCalls.fillRect.length = 0;
+	  window.__ctxCalls.stroke.length = 0;
+	  window.__ctxCalls.fillText.length = 0;
+	  window.__ctxCalls.order.length = 0;
+	  window.strudelViz.setPattern({
+	    queryArc: function (begin, end) {
+	      return [
+	        { whole: { begin: begin, end: begin + 0.33 }, value: { s: "bd" } },
+	        { whole: { begin: begin + 0.33, end: begin + 0.66 }, value: { s: "sd" } },
+	        { whole: { begin: begin + 0.66, end: begin + 1.00 }, value: { s: "cp" } },
+	      ];
+	    },
+	  });
+	  window.__runOneFrame();
+	`)
+	p1Styles := vizLaneBlockStyles(rt)
+	bdColourP1 := p1Styles["bd"][0]
+	sdColourP1 := p1Styles["sd"][0]
+	cpColourP1 := p1Styles["cp"][0]
+
+	// Re-render same pattern
+	rt.run(`
+	  window.__ctxCalls.fillRect.length = 0;
+	  window.__ctxCalls.stroke.length = 0;
+	  window.__ctxCalls.fillText.length = 0;
+	  window.__ctxCalls.order.length = 0;
+	  window.__runOneFrame();
+	`)
+	p1ReStyles := vizLaneBlockStyles(rt)
+	if p1ReStyles["bd"][0] != bdColourP1 || p1ReStyles["sd"][0] != sdColourP1 || p1ReStyles["cp"][0] != cpColourP1 {
+		t.Errorf("re-render changed colours: got [%s %s %s], want [%s %s %s]",
+			p1ReStyles["bd"][0], p1ReStyles["sd"][0], p1ReStyles["cp"][0],
+			bdColourP1, sdColourP1, cpColourP1)
+	}
+
+	// Render pattern with extra lane added and different sort order ("hh" added)
+	rt.run(`
+	  window.__ctxCalls.fillRect.length = 0;
+	  window.__ctxCalls.stroke.length = 0;
+	  window.__ctxCalls.fillText.length = 0;
+	  window.__ctxCalls.order.length = 0;
+	  window.strudelViz.setPattern({
+	    queryArc: function (begin, end) {
+	      return [
+	        { whole: { begin: begin, end: begin + 0.25 }, value: { s: "hh" } },
+	        { whole: { begin: begin + 0.25, end: begin + 0.50 }, value: { s: "bd" } },
+	        { whole: { begin: begin + 0.50, end: begin + 0.75 }, value: { s: "sd" } },
+	        { whole: { begin: begin + 0.75, end: begin + 1.00 }, value: { s: "cp" } },
+	      ];
+	    },
+	  });
+	  window.__runOneFrame();
+	`)
+	p2Styles := vizLaneBlockStyles(rt)
+	if p2Styles["bd"][0] != bdColourP1 {
+		t.Errorf("lane 'bd' colour changed when lane count/order changed: got %q, want %q", p2Styles["bd"][0], bdColourP1)
+	}
+	if p2Styles["sd"][0] != sdColourP1 {
+		t.Errorf("lane 'sd' colour changed when lane count/order changed: got %q, want %q", p2Styles["sd"][0], sdColourP1)
+	}
+	if p2Styles["cp"][0] != cpColourP1 {
+		t.Errorf("lane 'cp' colour changed when lane count/order changed: got %q, want %q", p2Styles["cp"][0], cpColourP1)
+	}
+}
+
+// hexChannels returns the r/g/b components of a #rrggbb colour in [0,1], and
+// whether the string was a well-formed hex at all.
+//
+// It exists so a lane's family can be asserted from the COLOUR THE RENDERER
+// PAINTED rather than from the palette table in viz.js: reading the expectation
+// back out of the implementation would make the assertion tautological.
+func hexChannels(hex string) ([3]float64, bool) {
+	var rgb [3]float64
+	if len(hex) != 7 || hex[0] != '#' {
+		return rgb, false
+	}
+	for i := 0; i < 3; i++ {
+		v, err := strconv.ParseUint(hex[1+2*i:3+2*i], 16, 8)
+		if err != nil {
+			return rgb, false
+		}
+		rgb[i] = float64(v) / 255
+	}
+	return rgb, true
+}
+
+// hexHueDegrees returns the hue of a #rrggbb colour in degrees [0,360), and
+// whether the string was a well-formed hex at all.
+func hexHueDegrees(hex string) (float64, bool) {
+	rgb, ok := hexChannels(hex)
+	if !ok {
+		return 0, false
+	}
+	maxC := math.Max(rgb[0], math.Max(rgb[1], rgb[2]))
+	minC := math.Min(rgb[0], math.Min(rgb[1], rgb[2]))
+	if maxC == minC {
+		return 0, true // achromatic: no meaningful hue
+	}
+	d := maxC - minC
+	var h float64
+	switch maxC {
+	case rgb[0]:
+		h = (rgb[1] - rgb[2]) / d
+		if rgb[1] < rgb[2] {
+			h += 6
+		}
+	case rgb[1]:
+		h = (rgb[2]-rgb[0])/d + 2
+	default:
+		h = (rgb[0]-rgb[1])/d + 4
+	}
+	h *= 60
+	if h < 0 {
+		h += 360
+	}
+	return h, true
+}
+
+// hexSaturation returns the HSL saturation of a #rrggbb colour in [0,1], and
+// whether the string was a well-formed hex at all.
+//
+// The 'other' (ungrouped) family is grey-violet BY DESIGN, so it is
+// identified by LOW saturation rather than by hue: several of its entries sit
+// near the blue part of the wheel (plain blue-greys like #78909c), and a hue
+// band wide enough to contain them would overlap the note family's band and
+// stop discriminating anything.
+func hexSaturation(hex string) (float64, bool) {
+	rgb, ok := hexChannels(hex)
+	if !ok {
+		return 0, false
+	}
+	maxC := math.Max(rgb[0], math.Max(rgb[1], rgb[2]))
+	minC := math.Min(rgb[0], math.Min(rgb[1], rgb[2]))
+	if maxC == minC {
+		return 0, true
+	}
+	l := (maxC + minC) / 2
+	d := maxC - minC
+	if l > 0.5 {
+		return d / (2 - maxC - minC), true
+	}
+	return d / (maxC + minC), true
+}
+
+func isWellFormedHex(hex string) bool {
+	_, ok := hexChannels(hex)
+	return ok
 }
 
 // TestVisualizationNeverReachesForAnAudioContext proves the unreachable

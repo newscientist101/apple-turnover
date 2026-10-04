@@ -63,10 +63,48 @@
     return { key: 'other', kind: 'other' };
   }
 
-  function colourFor(kind) {
-    if (kind === 'other') return '#8888aa';
-    if (kind === 'note') return '#4f8cff';
-    return '#00e5a3';
+  var PALETTES = {
+    note: [
+      '#4f8cff', '#33a0ff', '#6677ff', '#0a74ff',
+      '#5c6bc0', '#42a5f5', '#29b6f6', '#0288d1',
+      '#3f51b5', '#1e88e5', '#7986cb', '#1634f3',
+      '#5e35b1', '#039be5', '#3949ab', '#3939ef'
+    ],
+    sample: [
+      '#00e5a3', '#00c853', '#26a69a', '#00e676',
+      '#1de9b6', '#00bfa5', '#10ac84', '#1dd1a1',
+      '#00b894', '#55efc4', '#00d6ab', '#2ed573',
+      '#20bf6b', '#26de81', '#0be881', '#05c46b'
+    ],
+    other: [
+      '#8888aa', '#9fa8da', '#b0bec5', '#8981bb',
+      '#8e7cab', '#b39ddb', '#90a4ae', '#8e24aa',
+      '#a569bd', '#8877a1', '#9896a4', '#78909c',
+      '#8d99ae', '#aa96da', '#9d81ba', '#8c7ae6'
+    ]
+  };
+
+  function hashKey(str) {
+    var hash = 5381;
+    for (var i = 0; i < str.length; i++) {
+      hash = ((hash << 5) + hash) + str.charCodeAt(i);
+      hash |= 0;
+    }
+    return Math.abs(hash);
+  }
+
+  // Derive a stable, deterministic colour for a given lane key and kind.
+  // The base family hue is preserved (note = blue, sample = green, other = grey-violet).
+  // Variation within the family is determined by a stable hash of the lane key.
+  // Defined fallback behaviour: if two lane keys hash to the same index within a family,
+  // or if the palette size is exceeded, the colour deterministically wraps around the family palette
+  // via modulo indexing (hash % palette.length). This guarantees stable colours across re-renders
+  // regardless of lane sort order or lane count changes.
+  function colourFor(key, kind) {
+    var palette = PALETTES[kind] || PALETTES.other;
+    var kStr = String(key || '');
+    var idx = hashKey(kStr) % palette.length;
+    return palette[idx];
   }
 
   function draw() {
@@ -208,7 +246,7 @@
         // The colour comes from the lane's resolved kind, not from re-inspecting the
         // hap: deriving it separately is what let a {note, s} hap be filed under
         // its sound while painted as a note (issue strudel-agent-uvj.10).
-        ctx.fillStyle = colourFor(laneKinds[lKey]);
+        ctx.fillStyle = colourFor(lKey, laneKinds[lKey]);
         ctx.fillRect(x1, blockY, blockW, blockH);
       }
     }
@@ -238,5 +276,11 @@
   window.strudelViz = {
     setPattern: setPattern,
     onSnapshot: onSnapshot,
+    colourFor: colourFor,
+    // PALETTES is exposed so a test can grade every entry of every family,
+    // not only the lanes a given pattern happens to produce. A palette entry
+    // that drifts into another family's hue is otherwise invisible until some
+    // key hashes onto it.
+    PALETTES: PALETTES,
   };
 })();

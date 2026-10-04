@@ -232,8 +232,20 @@ wait for the answer.
   lane per **pitch**; keying it on `s` collapses a whole pattern onto one lane
   named after a shared instrument (strudel-agent-uvj.10). Deriving the colour by
   re-inspecting the hap is the defect, so `colourFor` takes the resolved kind.
-  Lane colour vocabulary stays `other`/`note`/`sample`; per-lane palette
-  variation is a separate concern (strudel-agent-uvj.9).
+- **Lane colour is per-lane, and it is a HASH OF THE LANE KEY.** `colourFor(key,
+  kind)` picks from a per-family palette by `hashKey(key) % palette.length`, never
+  by lane index: `laneKeys.sort()` runs every frame, so an index-based colour
+  reassigns itself whenever the lane count or ordering changes and the display
+  flickers between pushes (strudel-agent-uvj.9).
+- **The three family palettes are DISJOINT, and that is load-bearing.** It is
+  what lets a lane's family be asserted by *membership* — "the colour painted is
+  one of the note palette's entries". Hue cannot do this job: the `other` family
+  is grey-violet by design and most of its entries sit inside the note family's
+  blue band, so a hue-banded check accepts an `other` colour as a note colour.
+  That is the uvj.10 defect re-entering through the palette instead of through
+  the resolver, and a hue-banded version of the identity test let mutation
+  `130-viz-lane-colour-decoupled-from-lane` survive. Assert membership, and keep
+  the disjointness test that makes it sound.
 
 ## Standing limitations
 

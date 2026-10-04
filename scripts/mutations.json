@@ -893,8 +893,36 @@
   {
     "name": "130-viz-lane-colour-decoupled-from-lane",
     "file": "srv/static/viz.js",
-    "old": "        ctx.fillStyle = colourFor(laneKinds[lKey]);",
-    "new": "        ctx.fillStyle = colourFor(laneKinds[lKey] === 'note' ? 'other' : laneKinds[lKey]); // deliberately: the colour ignores the resolved kind, so the note branch paints the ungrouped colour",
+    "old": "        ctx.fillStyle = colourFor(lKey, laneKinds[lKey]);",
+    "new": "        ctx.fillStyle = colourFor(lKey, laneKinds[lKey] === 'note' ? 'other' : laneKinds[lKey]); // deliberately: the colour ignores the resolved kind, so the note branch paints the ungrouped colour",
+    "run": "TestVisualizationLaneColourMatchesLaneIdentity|TestVisualizationPerLanePalette"
+  },
+  {
+    "name": "156-viz-per-lane-palette-flattened",
+    "file": "srv/static/viz.js",
+    "old": "  function colourFor(key, kind) {",
+    "new": "  function colourFor(key, kind) {\n    key = 'same'; // deliberately: all keys within a family get the same colour",
+    "run": "TestVisualizationPerLanePalette"
+  },
+  {
+    "name": "157-viz-lane-colour-ignores-the-lane-key",
+    "file": "srv/static/viz.js",
+    "old": "    var idx = hashKey(kStr) % palette.length;",
+    "new": "    var idx = 0; // deliberately: the hash of the lane key is discarded, so every lane in a family collapses onto one colour again",
+    "run": "TestVisualizationPerLanePalette"
+  },
+  {
+    "name": "158-viz-palette-entry-from-the-wrong-family",
+    "file": "srv/static/viz.js",
+    "old": "      '#00e5a3', '#00c853', '#26a69a', '#00e676',",
+    "new": "      '#4f8cff', '#00c853', '#26a69a', '#00e676', // deliberately: a note-blue entry sits in the sample family, so whichever lane hashes here paints a sample in the note colour",
+    "run": "TestVisualizationEveryPaletteEntryStaysInItsFamily"
+  },
+  {
+    "name": "159-viz-colour-for-ignores-the-resolved-kind",
+    "file": "srv/static/viz.js",
+    "old": "    var palette = PALETTES[kind] || PALETTES.other;",
+    "new": "    var palette = PALETTES.sample; // deliberately: the resolved kind is discarded, so every lane is painted from the sample family",
     "run": "TestVisualizationLaneColourMatchesLaneIdentity"
   },
   {

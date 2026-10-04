@@ -65,6 +65,8 @@ The agent uses HTTP; listeners use WebSocket. `/api` request bodies are JSON and
 | `POST /api/hush` | Set transport intent to stopped |
 | `POST /api/eval-result` | Record a browser evaluation result |
 | `POST /api/heartbeat` | Renew the agent liveness lease (decays after 15s) |
+| `POST /api/dry-run` | Evaluate a candidate in a connected browser without publishing it |
+| `POST /api/dry-run-result` | How a browser answers a dry-run (agents do not call this) |
 | `GET /ws` | Listener WebSocket |
 | `GET /` | Browser application |
 | `/static/` | Browser assets |

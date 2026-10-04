@@ -79,6 +79,19 @@ type Server struct {
 	// tests read these.
 	agentSweepTicks atomic.Int64
 	agentSweeps     atomic.Int64
+
+	// dryRuns holds the in-flight dry-runs (strudel-agent-uvj.16). It is here,
+	// on the Server, rather than on the Conductor: a dry-run publishes nothing,
+	// and giving the code path that must not touch the version, the history or
+	// the stored verdict no way to reach the Conductor is what guarantees that.
+	dryRuns *dryRunRegistry
+
+	// dryRunTimeout bounds how long POST /api/dry-run waits for a browser to
+	// answer. It is a field for the same reason wsWriteTimeout and
+	// wsPongTimeout are: the timeout tests must run in tens of milliseconds
+	// rather than spending the production 30s, and the value may not be baked
+	// into a test as a literal. Read only after New, before serving.
+	dryRunTimeout time.Duration
 }
 
 // New builds a Server with its Conductor and its Hub, and the wiring between
@@ -109,8 +122,11 @@ func New() *Server {
 		wsWriteTimeout: defaultWSWriteTimeout,
 		wsPingInterval: defaultWSPingInterval,
 		wsPongTimeout:  defaultWSPongTimeout,
+
+		dryRunTimeout: DefaultDryRunTimeout,
 	}
 	s.Hub = NewHubWithCountHook(HubDefaultSendBuffer, s.listenerCountFrame)
+	s.dryRuns = newDryRunRegistry()
 	return s
 }
 

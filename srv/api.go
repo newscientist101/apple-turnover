@@ -2,6 +2,7 @@ package srv
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -72,6 +73,19 @@ func (s *Server) routes() http.Handler {
 	// sweeper rather than from here (see Server.startAgentSweeper).
 	mux.HandleFunc("POST /api/heartbeat", s.handleAPIHeartbeat)
 	mux.HandleFunc("/api/heartbeat", methodNotAllowed(http.MethodPost))
+
+	// Dry-run: validate a candidate without publishing it (strudel-agent-uvj.16).
+	//
+	// These two are the only endpoints that make an agent WAIT. Every other
+	// write is validate -> commit -> broadcast -> return, and dry-run has no
+	// commit at all: it publishes nothing, so there is no state to return. What
+	// it returns is somebody else's answer, which is why it needs both halves —
+	// a request that asks, and a report that replies.
+	mux.HandleFunc("POST /api/dry-run", s.handleAPIDryRun)
+	mux.HandleFunc("/api/dry-run", methodNotAllowed(http.MethodPost))
+
+	mux.HandleFunc("POST /api/dry-run-result", s.handleAPIDryRunResult)
+	mux.HandleFunc("/api/dry-run-result", methodNotAllowed(http.MethodPost))
 
 	// The listener WebSocket. It follows the /api idiom above rather than
 	// letting net/http answer: the bare pattern is the wrong-verb fallback (405
@@ -270,6 +284,138 @@ func (s *Server) handleAPIAnchor(w http.ResponseWriter, r *http.Request) {
 	snap := s.Conductor.Snapshot()
 	s.broadcast(EventAnchor, snap)
 	writeJSON(w, http.StatusOK, snap)
+}
+
+// dryRunRequest is the POST /api/dry-run body: the same candidate document
+// POST /api/code takes, and nothing else. `message` is deliberately absent --
+// narration describes a published change, and a dry-run publishes nothing, so
+// there is nothing for a listener to be told about it.
+type dryRunRequest struct {
+	Code string `json:"code"`
+}
+
+// handleAPIDryRun evaluates a candidate without publishing it.
+//
+// It is the one endpoint that BLOCKS, and everything about its shape follows
+// from that. There is no commit and no snapshot to return, because a dry-run
+// changes nothing; what it returns is a verdict somebody else produced. So the
+// order is: validate, confirm somebody can actually answer, register an id,
+// broadcast the candidate, then wait -- each step before the one that depends on
+// it.
+//
+// The no-listener check comes BEFORE registering, and it is a 409 rather than a
+// wait. With nobody connected the outcome is already known -- there is no
+// evaluator -- so blocking until the timeout would spend the agent's whole
+// budget to arrive at "unknown" for a condition the server could see at once,
+// and the caller could not tell a missing evaluator from a broken candidate.
+//
+// Nothing here calls into the Conductor. That is not an oversight to be fixed
+// later: the version, the history and the stored verdict must all survive a
+// dry-run untouched, and the cheapest way to guarantee that is for the code path
+// to have no way to reach them.
+func (s *Server) handleAPIDryRun(w http.ResponseWriter, r *http.Request) {
+	var req dryRunRequest
+	if err := decodeBody(r, &req); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+	if strings.TrimSpace(req.Code) == "" {
+		writeError(w, http.StatusBadRequest, "code must not be empty: send the strudel pattern to validate")
+		return
+	}
+
+	if s.Conductor.Snapshot().ListenerCount == 0 {
+		writeError(w, http.StatusConflict,
+			"no listeners connected: cannot dry-run, because the browser is the only evaluator. Open the page in a browser, or publish with POST /api/code and read the verdict back.")
+		return
+	}
+
+	dryReq, answer := s.dryRuns.Register(req.Code)
+
+	// The snapshot is the current state, not the candidate: a dry-run frame tells
+	// a listener what the performance looks like RIGHT NOW, so a client can keep
+	// its panels current while it evaluates something that is not live.
+	s.broadcastDryRun(dryReq)
+
+	verdict, err := s.awaitRegisteredDryRun(r.Context(), dryReq, answer)
+	if err != nil {
+		switch {
+		case errors.Is(err, errDryRunTimeout):
+			writeError(w, http.StatusGatewayTimeout,
+				fmt.Sprintf("%v: no listener answered POST /api/dry-run for id %d within %s. The candidate was not evaluated and nothing was published.",
+					err, dryReq.ID, s.dryRunTimeout))
+		case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+			// The caller gave up first. Its own deadline is what it will report,
+			// so this only has to be honest and brief.
+			writeError(w, http.StatusGatewayTimeout,
+				fmt.Sprintf("the caller stopped waiting for dry-run %d: %v", dryReq.ID, err))
+		default:
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	// The verdict is returned verbatim, with the dry-run's own id echoed so a
+	// caller running several can tell which answer it is holding. It is NOT
+	// stored and NOT broadcast: no listener needs to learn what a candidate that
+	// was never published evaluated to.
+	writeJSON(w, http.StatusOK, verdict)
+}
+
+// dryRunResultRequest is the POST /api/dry-run-result body: the browser's answer
+// to one dry-run. Stats obeys the same JSON-object rule as EvalResult.Stats and
+// is normalized by the same helper, so the three spellings of "no stats" mean
+// the same thing here as they do there.
+type dryRunResultRequest struct {
+	DryRunID int64           `json:"dryRunId"`
+	OK       bool            `json:"ok"`
+	Error    string          `json:"error"`
+	Stats    json.RawMessage `json:"stats"`
+}
+
+// handleAPIDryRunResult accepts a browser's verdict on one dry-run and hands it
+// to the waiting request.
+//
+// It never touches the Conductor, and that is the point: this verdict describes
+// code that was never published, so storing it would overwrite the browser's
+// real verdict for the current version with a statement about a candidate. The
+// stored verdict is the agent's only feedback signal, and a verdict about code
+// that is not live is worse than none, because read back through /api/state it
+// is indistinguishable from a real one.
+//
+// An unknown id is a 404 rather than a silent 200. Every connected listener
+// evaluates and reports, so the losers are expected and normal, but a browser
+// whose report vanished has learned nothing from a quiet success -- and "nobody
+// is waiting for this any more" is worth saying out loud.
+func (s *Server) handleAPIDryRunResult(w http.ResponseWriter, r *http.Request) {
+	var req dryRunResultRequest
+	if err := decodeBody(r, &req); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+
+	stats, err := normalizeStats(req.Stats)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	verdict := DryRunVerdict{
+		ID:    req.DryRunID,
+		OK:    req.OK,
+		Error: req.Error,
+		Stats: stats,
+	}
+	if err := s.dryRuns.Resolve(verdict); err != nil {
+		writeError(w, http.StatusNotFound,
+			fmt.Sprintf("%s: %d (it was never registered, has already been answered, or has expired)", err, req.DryRunID))
+		return
+	}
+
+	// An ack, deliberately NOT a snapshot: nothing changed, so there is no state
+	// to report. It mirrors apiEvalAck's shape for the same reason -- a browser
+	// needs to know its report landed, not what the performance now looks like.
+	writeJSON(w, http.StatusOK, apiEvalAck{Accepted: true, Version: req.DryRunID})
 }
 
 // apiEvalAck is the response to an accepted eval report. The field is named

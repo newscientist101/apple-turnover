@@ -112,15 +112,43 @@ const (
 	// It never bumps the version, for the same reason nothing else here does:
 	// presence is not code.
 	EventAgent = "agent"
+
+	// EventDryRun asks every listener to evaluate a candidate that was NEVER
+	// PUBLISHED, and is answered out of band by POST /api/dry-run-result rather
+	// than by anything on this socket.
+	//
+	// It is a REQUEST, not a transition, which is why it is the one kind whose
+	// meaning does not come from the snapshot it carries: the snapshot says the
+	// performance is unchanged (which is the whole point), and the candidate
+	// rides in the frame's optional `dryRun` member instead. Putting it in the
+	// snapshot would make unpublished code visible as performance state.
+	//
+	// It never bumps the version and never enters history.
+	EventDryRun = "dry-run"
 )
 
 // Event is the single frame shape sent to listeners. Snapshot holds the full
 // Conductor state as of this event, so a listener never has to merge a partial
 // delta into its own copy: it replaces what it holds. That is what makes a
 // reconnecting or lagging listener safe rather than merely usually-right.
+//
+// DryRun is the single OPTIONAL member, and it exists because one kind needs to
+// say something the snapshot cannot. Every other frame is fully described by its
+// kind plus the snapshot, which is the property that lets a client decode any
+// frame with one code path. A dry-run frame has to carry a candidate document
+// that was never published, and the snapshot is the wrong place for it twice
+// over: a snapshot is Conductor state, and the candidate is deliberately NOT
+// state. So the one request-shaped frame carries one extra field, omitted (not
+// null) on every other kind.
+//
+// omitempty rather than a pointer-only tag is what keeps the other frames
+// BYTE-IDENTICAL to what they were before dry-run existed: a nil pointer plus
+// omitempty emits nothing at all, so a client decoding the documented two-field
+// envelope sees exactly two fields on every kind it already knew.
 type Event struct {
-	Kind     string   `json:"kind"`
-	Snapshot Snapshot `json:"snapshot"`
+	Kind     string         `json:"kind"`
+	Snapshot Snapshot       `json:"snapshot"`
+	DryRun   *DryRunRequest `json:"dryRun,omitempty"`
 }
 
 // broadcast encodes one event for listeners and hands it to the Hub.
@@ -145,6 +173,33 @@ type Event struct {
 // on.
 func (s *Server) broadcast(kind string, snap Snapshot) {
 	s.Hub.Broadcast(s.encodeEvent(kind, snap))
+}
+
+// broadcastDryRun asks every listener to evaluate a candidate, without changing
+// any state.
+//
+// It goes through the same Hub and the same encoder as every other frame, so a
+// listener has exactly one decode path; what differs is only that the snapshot
+// attached to it is the current, UNCHANGED one. That is worth stating plainly,
+// because a dry-run frame is the only one whose snapshot does not describe what
+// the frame is about: the code in it was never published and must never reach a
+// live repl.
+//
+// It deliberately does not go through broadcast(), which has no way to attach
+// the optional member. The caller has already validated and confirmed a
+// listener exists, so this is not an accepted-mutation path and needs none of
+// broadcast's "only after commit" discipline — there is no commit.
+func (s *Server) broadcastDryRun(req DryRunRequest) {
+	msg, err := json.Marshal(Event{
+		Kind:     EventDryRun,
+		Snapshot: s.Conductor.Snapshot(),
+		DryRun:   &req,
+	})
+	if err != nil {
+		slog.Warn("encode dry-run event", "id", req.ID, "error", err)
+		return
+	}
+	s.Hub.Broadcast(msg)
 }
 
 // encodeEvent is the single place a frame is built. broadcast and the

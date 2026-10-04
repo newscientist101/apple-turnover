@@ -36,11 +36,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -389,6 +391,10 @@ func TestAgentAPIDocPayloadShapesMatchARunningServer(t *testing.T) {
 	wantSnapshot := docShape(t, doc, "snapshot")
 	wantStoredEval := docShape(t, doc, "storedEvalResult")
 	wantFrame := docShape(t, doc, "frame")
+	wantDryRunReq := docShape(t, doc, "dryRunRequest")
+	wantDryRunVerdict := docShape(t, doc, "dryRunVerdict")
+	wantDryRunResultReq := docShape(t, doc, "dryRunResultRequest")
+	wantDryRunFrame := docShape(t, doc, "dryRunFrame")
 
 	_, base, wsBase := fanoutServer(t)
 
@@ -490,7 +496,35 @@ func TestAgentAPIDocPayloadShapesMatchARunningServer(t *testing.T) {
 		t.Error(err)
 	}
 
-	// ---- the error shape, live ----
+	// ---- the dry-run contract, live ----
+	// The listener connected above is a real evaluator, so a dry-run can be
+	// driven end to end: this test issues the request, reads the frame the
+	// browser is asked to evaluate, and reports the verdict itself — exactly what
+	// session.js does.
+	verdictFields, dryRunID := fanoutDryRun(t, base, `s("bd*4")`, conn, wantDryRunReq, wantDryRunFrame, "Unexpected token '}'")
+	if err := sameFields("POST /api/dry-run response", sortedKeys(verdictFields), sortedKeys(wantDryRunVerdict)); err != nil {
+		t.Error(err)
+	}
+
+	// The dry-run REPORT body is pinned against the documented shape by decoding the
+	// exact body this test sends and comparing field sets: the request is
+	// rejected at DECODING time, before the registry is consulted, so an extra
+	// field cannot disturb the round trip above.
+	dryRunResultReq := map[string]json.RawMessage{
+		"dryRunId": json.RawMessage("1"),
+		"ok":       json.RawMessage("true"),
+		"stats":    json.RawMessage(`{"haps":2}`),
+	}
+	code, raw = fanoutPost(t, base, "/api/dry-run-result",
+		fmt.Sprintf(`{"dryRunId":%d,"ok":true,"fieldTheContractDoesNotDocument":"x"}`, dryRunID))
+	if code != http.StatusBadRequest || !strings.Contains(raw, "unknown field") {
+		t.Errorf("an undocumented field on /api/dry-run-result returned %d %q, want 400 naming an unknown field", code, bodyOf(raw))
+	}
+	if err := sameFields("POST /api/dry-run-result request", sortedKeys(dryRunResultReq), sortedKeys(wantDryRunResultReq)); err != nil {
+		t.Error(err)
+	}
+
+	// The error shape, live
 	// From a real rejected request, so this reads a failure the server actually
 	// produced rather than a hand-written one: the shape is what an agent
 	// branches on.
@@ -501,6 +535,158 @@ func TestAgentAPIDocPayloadShapesMatchARunningServer(t *testing.T) {
 	if err := sameFields("/api error body", keysOf(t, []byte(raw)), sortedKeys(wantError)); err != nil {
 		t.Error(err)
 	}
+}
+
+// fanoutPostQuiet is fanoutPost without t.Fatalf, for use from a goroutine.
+// FailNow from off the test's own goroutine is not a failure report, it is a
+// panic that kills the run, so a helper that blocks (a dry-run) needs a caller
+// that hands the error back instead.
+func fanoutPostQuiet(base, path, body string) (int, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, strings.NewReader(body))
+	if err != nil {
+		return 0, "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Transport: boundedTransport(), Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return resp.StatusCode, "", err
+	}
+	return resp.StatusCode, string(raw), nil
+}
+
+// wsReadEventOfKind reads frames until one of wantKind arrives, bounded.
+//
+// It skips rather than insists on the very next frame, because a listener that
+// has just published code has several frames legitimately queued behind the one
+// this test cares about. The bound is what keeps a missing frame a failure.
+func wsReadEventOfKind(t *testing.T, conn *websocket.Conn, wantKind string) Event {
+	t.Helper()
+	deadline := time.Now().Add(wsReadTimeout)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Until(deadline))
+		typ, data, err := conn.Read(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("no %q frame within %s: %v", wantKind, wsReadTimeout, err)
+		}
+		if typ != websocket.MessageText {
+			continue
+		}
+		var ev Event
+		if err := json.Unmarshal(data, &ev); err != nil {
+			t.Fatalf("%q frame is not a JSON Event: %v (%q)", wantKind, err, data)
+		}
+		if ev.Kind == wantKind {
+			return ev
+		}
+	}
+	t.Fatalf("no %q frame within %s", wantKind, wsReadTimeout)
+	return Event{}
+}
+
+// fanoutDryRun performs one complete dry-run round trip against a live server
+// with conn acting as the browser, and returns the verdict's top-level fields.
+//
+// It exists because a dry-run BLOCKS until a browser answers, so it cannot be
+// driven by a helper that posts and returns: the request has to be in flight
+// while the frame is read, and the answer has to come from the same listener the
+// frame went to. Doing that here keeps the sequence in one place instead of
+// spreading a goroutine, a frame read and a reply across every caller.
+//
+// It also pins the two dry-run WIRE shapes on the way through — the frame and
+// the report — because a caller that only compared the verdict would let those
+// drift unchecked, and they are the parts an external listener author codes
+// against.
+func fanoutDryRun(t *testing.T, base, code string, conn *websocket.Conn, wantReq, wantFrame map[string]json.RawMessage, failWith string) (map[string]json.RawMessage, int64) {
+	t.Helper()
+
+	type reply struct {
+		code int
+		raw  string
+		err  error
+	}
+	done := make(chan reply, 1)
+	go func() {
+		c, raw, err := fanoutPostQuiet(base, "/api/dry-run", fmt.Sprintf(`{"code":%q}`, code))
+		done <- reply{c, raw, err}
+	}()
+
+	// The browser's half: read the frame, then answer it.
+	ev := wsReadEventOfKind(t, conn, EventDryRun)
+	if ev.DryRun == nil {
+		t.Fatal("the dry-run frame carried no dryRun member, so a listener has nothing to evaluate")
+	}
+	if ev.DryRun.Code != code {
+		t.Errorf("the frame asked to evaluate %q, want %q", ev.DryRun.Code, code)
+	}
+	// The frame envelope: the two documented fields plus the optional candidate.
+	// This is the shape a listener author codes against, so it is compared rather
+	// than assumed -- and the dryRun member is checked nested, because a frame
+	// carrying a differently-shaped candidate is a different wire contract.
+	frameJSON, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("re-encode dry-run frame: %v", err)
+	}
+	if err := sameFields("/ws dry-run frame", keysOf(t, frameJSON), sortedKeys(wantFrame)); err != nil {
+		t.Error(err)
+	}
+	if err := checkInlineShape(t, "/ws dry-run frame .dryRun", frameJSON, "dryRun", readAgentAPI(t)); err != nil {
+		t.Error(err)
+	}
+	// The frame envelope is checked here rather than by the caller so every
+	// dry-run exercises it: two documented fields plus the optional candidate.
+	if ev.DryRun.ID <= 0 {
+		t.Errorf("the dry-run frame carries id %d; a listener cannot correlate a report without it", ev.DryRun.ID)
+	}
+
+	// The report is a FAILING verdict on purpose. The documented dryRunVerdict
+	// shows every field including `error`, and `error` is omitempty — so a
+	// successful verdict would legitimately omit it and the documented shape
+	// would look wrong. Driving the failure is what makes "every documented
+	// field is really sent" checkable rather than half-checkable.
+	report := fmt.Sprintf(`{"dryRunId":%d,"ok":false,"error":%s,"stats":{"haps":0}}`,
+		ev.DryRun.ID, strconv.Quote(failWith))
+	code2, raw2 := fanoutPost(t, base, "/api/dry-run-result", report)
+	if code2 != http.StatusOK {
+		t.Fatalf("POST /api/dry-run-result: %d %q", code2, bodyOf(raw2))
+	}
+
+	res := <-done
+	if res.err != nil {
+		t.Fatalf("POST /api/dry-run: %v", res.err)
+	}
+	if res.code != http.StatusOK {
+		t.Fatalf("POST /api/dry-run: %d %q", res.code, bodyOf(res.raw))
+	}
+
+	// The documented REQUEST shape is checked in both directions. The
+	// documented-field half is the round trip above; this is the undocumented-field
+	// half, refused at DECODING time so it cannot disturb anything.
+	sent := map[string]json.RawMessage{"code": json.RawMessage(strconv.Quote(code))}
+	if err := sameFields("POST /api/dry-run request", sortedKeys(sent), sortedKeys(wantReq)); err != nil {
+		t.Error(err)
+	}
+	probeCode, probeRaw := fanoutPost(t, base, "/api/dry-run",
+		fmt.Sprintf(`{"code":%q,"fieldTheContractDoesNotDocument":"x"}`, code))
+	if probeCode != http.StatusBadRequest || !strings.Contains(probeRaw, "unknown field") {
+		t.Errorf("an undocumented field on /api/dry-run returned %d %q, want 400 naming an unknown field", probeCode, bodyOf(probeRaw))
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(res.raw), &fields); err != nil {
+		t.Fatalf("the dry-run response is not a JSON object: %v (%q)", err, bodyOf(res.raw))
+	}
+	return fields, ev.DryRun.ID
 }
 
 // checkRequestShape pins one documented request shape against the live server in
@@ -730,6 +916,7 @@ func TestAgentAPIDocShapesAreStable(t *testing.T) {
 	want := []string{
 		"error", "codeRequest", "messageRequest", "evalResultRequest",
 		"evalAck", "snapshot", "storedEvalResult", "frame", "anchorRequest",
+		"dryRunRequest", "dryRunVerdict", "dryRunResultRequest", "dryRunFrame",
 	}
 	for _, name := range want {
 		docShape(t, doc, name) // fails loudly if the anchor or its JSON is gone

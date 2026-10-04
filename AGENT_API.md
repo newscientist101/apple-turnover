@@ -29,11 +29,13 @@ All `/api` failures use exactly:
 | `POST /api/play` | [no body](#post-apihush--post-apiplay) | snapshot | no |
 | `POST /api/eval-result` | [evalResultRequest](#post-apieval-result) | [evalAck](#post-apieval-result) | no |
 | `POST /api/heartbeat` | [no body](#post-apiheartbeat) | snapshot | no |
+| `POST /api/dry-run` | [dryRunRequest](#post-apidry-run) | [dryRunVerdict](#post-apidry-run) | no |
+| `POST /api/dry-run-result` | [dryRunResultRequest](#post-apidry-run-result) | [evalAck](#post-apidry-run-result) | no |
 | `GET /ws` | WebSocket upgrade | JSON listener frames | no |
 | `GET /` | none | HTML page | no |
 | `/static/` | none | static assets | no |
 
-Every accepted write returns the resulting snapshot except `/api/eval-result`, which returns `{accepted,version}`. A successful write does not create a new URL, so responses are `200`, not `201`.
+Every accepted write returns the resulting snapshot except `/api/eval-result`, which returns `{accepted,version}`, and the two dry-run endpoints, which return a verdict rather than state: `/api/dry-run` returns the browser's verdict on a candidate it did not publish, and `/api/dry-run-result` returns an acknowledgement because nothing changed. A successful write does not create a new URL, so responses are `200`, not `201`.
 
 ### `POST /api/code`
 
@@ -49,6 +51,43 @@ The only endpoint that changes the code document.
 - Unknown fields are rejected.
 - The server does not parse or evaluate the Strudel source.
 - The version increments exactly once.
+
+### `POST /api/dry-run`
+
+Validate a candidate **without publishing it**. This is the one endpoint that blocks: it returns a verdict somebody else produced, not state it stored.
+
+<!-- shape:dryRunRequest -->
+```json
+{"code":"s(\"bd*2, ~ cp\")"}
+```
+
+- `code` is required and must be non-blank. Unknown fields are rejected.
+- The candidate is evaluated by a connected browser and **never becomes the live document**.
+- `version`, `history` and `lastEvalResult` are all left exactly as they were. A dry-run is not a revision.
+- The verdict is **not stored**. `lastEvalResult` continues to describe the published version; read the dry-run's own response instead.
+- With no connected listener this is `409`, immediately — the browser is the only evaluator, so the server answers rather than waiting for an answer that cannot arrive.
+- If a listener is connected but does not answer, this is `504`. The candidate was not evaluated and nothing was published.
+
+<!-- shape:dryRunVerdict -->
+```json
+{"id":1,"ok":false,"error":"Unexpected token '}'","stats":{"haps":0}}
+```
+
+- `id` is the dry-run's own correlation id, not a version. Versions identify published documents.
+- `stats` obeys the same rule as on `/api/eval-result`: it must be a JSON object, and absent, empty and `null` all mean "no stats".
+
+A `200` with `ok:false` is a successful request that found a broken candidate. Only `409` and `504` mean the dry-run itself did not happen.
+
+### `POST /api/dry-run-result`
+
+How a browser answers a dry-run. An agent does not call this.
+
+<!-- shape:dryRunResultRequest -->
+```json
+{"dryRunId":1,"ok":true,"stats":{"haps":4}}
+```
+
+Answers `{accepted,version}` like `/api/eval-result`. Every connected listener evaluates and reports, so the **first** answer is the one returned to the agent and later ones are refused with `404`; a report for an id that was never registered, has already been answered, or has expired is also `404`.
 
 ### `POST /api/message`
 
@@ -197,6 +236,9 @@ Empty `error` and `stats` fields are omitted. That includes a report that sent `
 | `stats` that is not a JSON object | `400` | `stats must be a JSON object, got [1,2]` |
 | Wrong method on an API endpoint | `405` + `Allow` | `method GET not allowed on /api/code, use POST` |
 | Unknown `/api` endpoint | `404` | `no such API endpoint: GET /api/nope` |
+| Dry-run with no listener connected | `409` | `no listeners connected: cannot dry-run` |
+| Dry-run nobody answered | `504` | `no listener answered the dry-run in time` |
+| Dry-run verdict for an unknown or already-answered id | `404` | `unknown dry-run` |
 
 Every `/api` error response is the single-field JSON error object above. Errors outside `/api` use ordinary `net/http` behavior. Messages name the offending field, limit or version so an agent can branch on them, not only on the status.
 
@@ -212,6 +254,8 @@ Every `/api` error response is the single-field JSON error object above. Errors 
 While doing this, beat on `POST /api/heartbeat` more often than every 15 seconds — including while waiting in step 4, which is the step most likely to outlast the lease. An agent that heartbeats only when it has something to push will be reported absent during exactly the wait it is most idle through.
 
 The push response proves only that the document was stored. It is not an evaluation result. With no connected listener, no verdict will arrive.
+
+If you would rather not publish a candidate until it is known to evaluate, `POST /api/dry-run` evaluates it without publishing: step 3 becomes a dry-run, and only a candidate that comes back `ok:true` is worth sending to `/api/code`. It leaves `version`, `history` and `lastEvalResult` untouched, so a broken candidate never becomes the published document. It needs a connected browser just as much as a push does — with none, it is `409` — and it is bounded, returning `504` rather than waiting forever.
 
 Step 5 has one trap: `lastEvalResult` describes whichever version the browser last evaluated, which is not necessarily the version now live. Compare `lastEvalResult.version` against `version` before treating the verdict as an answer about your code. `agentcli state` does that comparison for you and labels the result `CURRENT`, `STALE` or `NONE YET`, naming both versions when they differ; `agentcli state -require-current` turns "not current" into a non-zero exit for a scripted caller.
 
@@ -236,6 +280,7 @@ The stale case applies to older `eval-result` reports. Because both accepted cas
 - Versions are contiguous, unique, monotonic, and never skipped, including under concurrent pushes.
 - Only `POST /api/code` increments the version.
 - Message, anchor, transport, listener-count, agent-presence, and stored evaluation-result changes do not increment it.
+- A dry-run does not increment it either, and adds nothing to the history. A dry-run is not a revision.
 
 ## Listener WebSocket
 
@@ -250,6 +295,15 @@ There is exactly one frame shape:
 
 The client replaces its entire local snapshot; it does not merge deltas.
 
+`dry-run` is the only kind that carries a third member, and only because the snapshot cannot express what it has to say:
+
+<!-- shape:dryRunFrame -->
+```json
+{"kind":"dry-run","snapshot":{...},"dryRun":{"id":1,"code":"s(\"bd*2\")"}}
+```
+
+The candidate is here rather than in the snapshot precisely because it was never published: a snapshot is performance state, and a dry-run exists to leave that state untouched. On every other kind `dryRun` is absent, not null.
+
 <!-- frame-kinds -->
 | kind | sent when |
 |---|---|
@@ -261,6 +315,7 @@ The client replaces its entire local snapshot; it does not merge deltas.
 | `listener-count` | A listener connected, left, or was reaped |
 | `anchor` | Shared timeline changed |
 | `agent` | The agent lease lapsed |
+| `dry-run` | A candidate must be evaluated without being published |
 
 `hush` and `play` intentionally share `transport` because listeners care about the resulting `playing` state.
 

@@ -24,6 +24,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -1722,4 +1723,135 @@ func TestBareHostPortIsAccepted(t *testing.T) {
 	if !strings.Contains(out.String(), "version:") {
 		t.Errorf("stdout %q, want the snapshot", out.String())
 	}
+}
+
+// TestStateReportsSampleResolution covers the CLI half of strudel-agent-uvj.18.
+//
+// `state` must distinguish three states, and the third is the one that matters:
+// ok=true does NOT mean the push will be audible. A pattern naming a sample no
+// listener loaded validates and commits perfectly, so `last eval: ok=true` is
+// true and useless on its own — it was reported as success for code that provably
+// could not sound.
+//
+// The UNKNOWN case is asserted as its own outcome rather than folded into either
+// of the others. A row that printed nothing, or that borrowed the word "resolved"
+// for a check that never ran, would put a green light over a browser with no
+// registry at all — which is the defect this whole change exists to remove.
+func TestStateReportsSampleResolution(t *testing.T) {
+	postVerdict := func(t *testing.T, base string, samplesField string) {
+		t.Helper()
+		if got := runCLI(t, base, `s("bd")`, "push"); got.code != exitOK {
+			t.Fatalf("setup push: exit %d, stderr %q", got.code, got.stderr)
+		}
+		body := fmt.Sprintf(`{"version":%d,"ok":true%s,"stats":{"haps":2}}`,
+			latestVersionFrom(t, base), samplesField)
+		code, raw := postJSON(t, base, "/api/eval-result", body)
+		if code != http.StatusOK {
+			t.Fatalf("POST /api/eval-result %s = %d %s", body, code, raw)
+		}
+	}
+
+	t.Run("resolved", func(t *testing.T) {
+		base := newTestServer(t)
+		postVerdict(t, base, `,"samplesResolved":true`)
+		got := runCLI(t, base, "", "state")
+		if !strings.Contains(got.stdout, "samples:        resolved") {
+			t.Errorf("state did not report resolved samples\nstdout:\n%s", got.stdout)
+		}
+		if strings.Contains(got.stdout, "UNRESOLVED") {
+			t.Errorf("state reported UNRESOLVED for a fully resolved pattern\nstdout:\n%s", got.stdout)
+		}
+	})
+
+	t.Run("unresolved", func(t *testing.T) {
+		base := newTestServer(t)
+		postVerdict(t, base, `,"samplesResolved":false`)
+		got := runCLI(t, base, "", "state")
+		if !strings.Contains(got.stdout, "UNRESOLVED") {
+			t.Errorf("state did not report the unresolved sample finding; ok=true alone would read as success\nstdout:\n%s", got.stdout)
+		}
+		// The finding must not be dressed as a verdict failure: the pattern really
+		// did evaluate, and an agent told otherwise would chase a parse error.
+		if !strings.Contains(got.stdout, "last eval:      version=1 ok=true") {
+			t.Errorf("the existing last-eval row changed\nstdout:\n%s", got.stdout)
+		}
+	})
+
+	t.Run("unknown is not resolved", func(t *testing.T) {
+		base := newTestServer(t)
+		postVerdict(t, base, ``)
+		got := runCLI(t, base, "", "state")
+		if strings.Contains(got.stdout, "samples:") {
+			t.Errorf("state reported a sample finding when nothing was checked; absent must read as unknown, not as health\nstdout:\n%s", got.stdout)
+		}
+	})
+}
+
+// TestStateJSONIsUntouchedByTheSampleRow keeps -json a pure pass-through. The row
+// is prose, and a caller parsing the snapshot must get the snapshot — a CLI that
+// decorated its JSON would break every scripted agent for the sake of a human
+// nicety.
+func TestStateJSONIsUntouchedByTheSampleRow(t *testing.T) {
+	base := newTestServer(t)
+	if got := runCLI(t, base, `s("bd")`, "push"); got.code != exitOK {
+		t.Fatalf("setup push: exit %d, stderr %q", got.code, got.stderr)
+	}
+	body := fmt.Sprintf(`{"version":%d,"ok":true,"samplesResolved":false,"stats":{"haps":2}}`,
+		latestVersionFrom(t, base))
+	if code, raw := postJSON(t, base, "/api/eval-result", body); code != http.StatusOK {
+		t.Fatalf("POST /api/eval-result = %d %s", code, raw)
+	}
+
+	got := runCLI(t, base, "", "-json", "state")
+	if got.code != exitOK {
+		t.Fatalf("state -json: exit %d, stderr %q", got.code, got.stderr)
+	}
+	if strings.Contains(got.stdout, "UNRESOLVED") || strings.Contains(got.stdout, "samples:") {
+		t.Errorf("-json printed the prose row; it must stay the untouched snapshot\nstdout:\n%s", got.stdout)
+	}
+	var snap map[string]any
+	if err := json.Unmarshal([]byte(got.stdout), &snap); err != nil {
+		t.Fatalf("-json output is not JSON: %v (%q)", err, got.stdout)
+	}
+	verdict, ok := snap["lastEvalResult"].(map[string]any)
+	if !ok {
+		t.Fatalf("-json snapshot has no lastEvalResult: %q", got.stdout)
+	}
+	if verdict["samplesResolved"] != false {
+		t.Errorf("-json lastEvalResult.samplesResolved = %v, want false; the field must survive to the machine-readable output", verdict["samplesResolved"])
+	}
+}
+
+// postJSON POSTs a body to the test server and returns the status and raw bytes.
+func postJSON(t *testing.T, base, path, body string) (int, string) {
+	t.Helper()
+	resp, err := http.Post(base+path, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST %s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		t.Fatalf("POST %s: reading body: %v", path, err)
+	}
+	return resp.StatusCode, string(raw)
+}
+
+// latestVersionFrom reads the live version, so a verdict names a version that was
+// really published — a verdict for an unpublished one is a 400, which would fail
+// these cases for entirely the wrong reason.
+func latestVersionFrom(t *testing.T, base string) int64 {
+	t.Helper()
+	resp, err := http.Get(base + "/api/state")
+	if err != nil {
+		t.Fatalf("GET /api/state: %v", err)
+	}
+	defer resp.Body.Close()
+	var snap struct {
+		Version int64 `json:"version"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
+		t.Fatalf("decoding state: %v", err)
+	}
+	return snap.Version
 }

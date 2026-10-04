@@ -464,8 +464,13 @@ func TestAgentAPIDocPayloadShapesMatchARunningServer(t *testing.T) {
 		map[string]any{"epochMs": time.Now().UnixMilli(), "cps": 0.5}); err != nil {
 		t.Error(err)
 	}
+	// samplesResolved is supplied here rather than left out of the sample map: the
+	// check refuses a documented field it has no value for, and the value has to
+	// be a REAL one, because this is the field whose whole point is that `false`
+	// and absent mean different things. Sending `false` proves the server accepts
+	// and stores the negative case, which `true` alone would not.
 	if err := checkRequestShape(t, base, "/api/eval-result", "evalResultRequest", wantEvalReq,
-		map[string]any{"version": latestVersion(t, base), "ok": true, "error": "", "stats": map[string]any{"haps": 1}}); err != nil {
+		map[string]any{"version": latestVersion(t, base), "ok": true, "error": "", "stats": map[string]any{"haps": 1}, "samplesResolved": false}); err != nil {
 		t.Error(err)
 	}
 
@@ -481,9 +486,12 @@ func TestAgentAPIDocPayloadShapesMatchARunningServer(t *testing.T) {
 	// ---- the stored verdict, live ----
 	// Pushed with every optional field present, because the documented stored
 	// shape shows them all: a verdict that omitted `error` would prove nothing
-	// about whether that field is real.
+	// about whether that field is real. `samplesResolved` is present for the same
+	// reason, and set to `false` so the check cannot pass on a value the server
+	// silently defaulted — a stored verdict that always echoed `true` would satisfy
+	// a field-set comparison while defeating the field's entire purpose.
 	code, raw = fanoutPost(t, base, "/api/eval-result",
-		fmt.Sprintf(`{"version":%d,"ok":false,"error":"x is not a function","stats":{"haps":0}}`, latestVersion(t, base)))
+		fmt.Sprintf(`{"version":%d,"ok":false,"error":"x is not a function","stats":{"haps":0},"samplesResolved":false}`, latestVersion(t, base)))
 	if code != http.StatusOK {
 		t.Fatalf("POST /api/eval-result (failing verdict): %d %q", code, bodyOf(raw))
 	}
@@ -514,6 +522,13 @@ func TestAgentAPIDocPayloadShapesMatchARunningServer(t *testing.T) {
 		"dryRunId": json.RawMessage("1"),
 		"ok":       json.RawMessage("true"),
 		"stats":    json.RawMessage(`{"haps":2}`),
+		// The dry-run report carries the same tri-state as the stored verdict, and
+		// it is pinned here for the same reason: the two endpoints are the two ways
+		// an agent asks whether code evaluates, so a field documented on one and
+		// refused by the other would break exactly the pre-check the dry-run exists
+		// for. `false` again, so a server that dropped the value could not pass on
+		// field names alone.
+		"samplesResolved": json.RawMessage("false"),
 	}
 	code, raw = fanoutPost(t, base, "/api/dry-run-result",
 		fmt.Sprintf(`{"dryRunId":%d,"ok":true,"fieldTheContractDoesNotDocument":"x"}`, dryRunID))

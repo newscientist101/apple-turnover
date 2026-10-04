@@ -1057,5 +1057,41 @@
     "old": "\tif !verdict.OK {\n\t\treturn fmt.Errorf(\"the dry-run candidate did not evaluate: %s\", orNone(verdict.Error))\n\t}",
     "new": "\tif false && !verdict.OK { // deliberately: a rejected candidate still exits 0, so `push --dry-run && push` commits it\n\t\treturn fmt.Errorf(\"the dry-run candidate did not evaluate: %s\", orNone(verdict.Error))\n\t}",
     "run": "TestPushDryRunExitsOneOnAFailingCandidate"
+  },
+  {
+    "name": "157-sample-miss-treated-as-resolved",
+    "file": "srv/static/session.js",
+    "old": "if (!Object.prototype.hasOwnProperty.call(registry, normaliseSoundName(name))) {\n        missing[name] = true;\n      }",
+    "new": "if (false && !Object.prototype.hasOwnProperty.call(registry, normaliseSoundName(name))) {\n        missing[name] = true;\n      }"
+  },
+  {
+    "name": "158-absent-registry-claims-resolved",
+    "file": "srv/static/session.js",
+    "old": "if (!report) {\n      return body;\n    }",
+    "new": "if (!report) {\n      body.samplesResolved = true; // deliberately: a browser that could not check reports health\n      return body;\n    }"
+  },
+  {
+    "name": "159-dry-run-drops-the-sample-finding",
+    "file": "srv/static/session.js",
+    "old": "body.stats = collectStats(pattern, probed);\n        reportSamples(body, probed.haps);",
+    "new": "body.stats = collectStats(pattern, probed);"
+  },
+  {
+    "name": "160-parse-failure-invents-a-sample-finding",
+    "file": "srv/static/session.js",
+    "old": "if (ok) {\n      reportSamples(body, haps);\n    }",
+    "new": "reportSamples(body, haps);"
+  },
+  {
+    "name": "161-stored-verdict-collapses-unknown-to-resolved",
+    "file": "srv/conductor.go",
+    "old": "SamplesResolved *bool `json:\"samplesResolved,omitempty\"`",
+    "new": "SamplesResolved *bool `json:\"samplesResolved\"`"
+  },
+  {
+    "name": "162-eval-result-handler-drops-the-finding",
+    "file": "srv/api.go",
+    "old": "\t\tStats:           req.Stats,\n\t\tSamplesResolved: req.SamplesResolved,\n\t}",
+    "new": "\t\tStats:           req.Stats,\n\t\t// deliberately: the browser's samplesResolved is decoded and then\n\t\t// discarded, so every finding is accepted and none is ever stored\n\t}"
   }
 ]

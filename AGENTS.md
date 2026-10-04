@@ -247,6 +247,55 @@ wait for the answer.
   `130-viz-lane-colour-decoupled-from-lane` survive. Assert membership, and keep
   the disjointness test that makes it sound.
 
+### Sample resolution
+
+`ok:true` means a pattern PARSED, EVALUATED and was COMMITTED. It has never meant
+"it will be audible", and strudel-agent-uvj.18 is the bead that made the gap
+measurable: a sample name in no pack validated cleanly and was reported as
+unqualified success.
+
+- **Resolution is a REGISTRY LOOKUP, never playback.** The validating sandbox
+  stubs `defaultOutput` and pins `getTime`, which is what keeps validation free of
+  audio, of the scheduler and of the network. Sample resolution in Strudel happens
+  on the OUTPUT path, so that stub hides it — by design. The fix reads
+  `window.strudel.soundMap`, which is the very map playback consults
+  (`soundMap.get()[name.toLowerCase()]`, yielding nothing for a miss). Removing the
+  `defaultOutput` stub is NOT an option: it would make every validation start a
+  scheduler and fetch over the network, trading a false positive for something
+  worse.
+- **The normalisation is copied from the bundle, not reimplemented.** Verified
+  against the pinned `@strudel/web@1.3.0`: `registerSound` applies
+  `toLowerCase().replace(/\s+/g, "_")` before storing. A resolver that normalised
+  differently would disagree with the audio the user hears, which is the one thing
+  it must never do.
+- **The registry is the source of truth, not the Samples button.** `welcome.html`'s
+  off branch flips a label and unregisters nothing, so a flag-driven resolver would
+  keep reporting a loaded pack after the user turned it off.
+- **ONE resolver feeds both paths.** The eval-result and dry-run reports are two
+  ways an agent asks the same question; a resolver that answered on one and stayed
+  silent on the other would give an agent two answers to one question.
+- **`samplesResolved` is TRI-STATE, and absence is not success.** `true`, `false`,
+  and ABSENT (UNKNOWN) are three distinct facts on the wire, so the field is a
+  `*bool` with `omitempty` on both `EvalResult` and `DryRunVerdict`. A resolver
+  that could not look — no bundle, no registry — must report UNKNOWN. Reporting
+  `true` there would be the original defect wearing a fix's clothes: a green light
+  over a check that never ran.
+- **A parse failure NEVER carries a sample finding.** A syntax error proves nothing
+  about samples; the pattern never got far enough to name one. Attaching
+  `samplesResolved:false` there would invent a defect the agent did not commit, on
+  top of an error that already says what is wrong.
+- **Stored verdicts deep-copy the tri-state**, as they do `stats`. `Snapshot` hands
+  out a copy; a caller that wrote through the pointer would corrupt what the next
+  reader sees, and the write would succeed, so nothing would report it.
+- **It describes ONE reporting browser, not the audience.** Listeners can be in
+  materially different states and the server stores the most recent report, so the
+  value is an observation. Per-listener sample state needs listener identity,
+  which does not exist yet — see `strudel-agent-f79`. A single opaque count would
+  be the same class of defect this one is about, so the limit is documented rather
+  than papered over with a number that cannot be earned.
+- Resolution lives in the browser, so it is proved by executing the SERVED
+  JavaScript (goja), never by translating the algorithm into Go.
+
 ## Standing limitations
 
 These are design properties, not bugs:

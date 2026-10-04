@@ -19,6 +19,8 @@ Browser modules:
 
 The page also has local **Play/Pause** and **Samples** controls. Play/Pause calls the browser REPL directly and does not change the server's `playing` intent.
 
+**Samples** loads `github:tidalcycles/dirt-samples` into that one browser and is likewise page-local: nothing is shared, and pressing it in one tab leaves every other tab without samples. Each browser reports what it could resolve, so a verdict carries `samplesResolved` — see `AGENT_API.md` for the tri-state. Two consequences worth knowing before you rely on it: the stored verdict describes the **reporting** browser rather than the audience (with several listeners it is whichever reported last, and the server has no way to tell you which), and turning Samples "off" unloads nothing — it only relabels the button, so the pack stays resolvable.
+
 ## Requirements
 
 - Go 1.27.1.

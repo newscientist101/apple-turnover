@@ -51,12 +51,38 @@ var ErrStatsNotObject = errors.New("stats must be a JSON object")
 // which keys it reports and the server never interprets them — but it must be a
 // JSON OBJECT; see ErrStatsNotObject. A nil Stats means "none reported" and is
 // omitted from the wire rather than serialised as null.
+//
+// SamplesResolved is the tri-state the bead strudel-agent-uvj.18 is about, and it
+// is a *bool rather than a bool for a reason that is easy to undo by accident.
+// Three facts have to stay distinguishable:
+//
+//	true   every sound the pattern named resolved in the REPORTING browser
+//	false  at least one named sound did not resolve there
+//	nil    UNKNOWN — the reporting browser had no registry to check, or the
+//	       evaluation failed before it named a sound
+//
+// Collapsing nil into false would report "I checked and it failed" for a browser
+// that never checked, and collapsing it into true would report success for a check
+// that never ran. The second is the original defect of this bead wearing a fix's
+// clothes: the system saying SUCCESS for work that provably cannot work. So the
+// field is a pointer with omitempty, and "no registry" travels as an ABSENT field
+// that a reader can tell apart from a false.
+//
+// OK is deliberately NOT folded into this. ok:true means the pattern parsed,
+// evaluated and was committed — it says nothing about whether it will be audible,
+// and an agent optimising against ok alone is optimising against a signal blind to
+// silence. See RecordEvalResult for how the two are stored independently.
 type EvalResult struct {
 	Version int64           `json:"version"`
 	OK      bool            `json:"ok"`
 	Error   string          `json:"error,omitempty"`
 	Stats   json.RawMessage `json:"stats,omitempty"`
 	EpochMS int64           `json:"epochMs"`
+
+	// SamplesResolved is tri-state; see the type comment. It never increments the
+	// version and never enters history: it is a property of a verdict about a
+	// version, not a new document.
+	SamplesResolved *bool `json:"samplesResolved,omitempty"`
 }
 
 // Version is a single published revision of the live code document.
@@ -474,9 +500,25 @@ func (c *Conductor) RecordEvalResult(res EvalResult) (bool, error) {
 		Error:   res.Error,
 		Stats:   stats,
 		EpochMS: time.Now().UnixMilli(),
+		// Copied, not aliased: the caller keeps its *bool, and a later write
+		// through it must not reach back into the stored verdict. The stored
+		// finding is the only sample evidence the agent will ever get for this
+		// version, so it has to be as isolated from the reporter as Stats is.
+		SamplesResolved: cloneBool(res.SamplesResolved),
 	}
 	c.lastEval = &stored
 	return true, nil
+}
+
+// cloneBool copies a tri-state pointer so a stored verdict never aliases the
+// report it came from. nil is UNKNOWN and stays nil — that is the whole point of
+// the tri-state, so this must not be written as "return &*in".
+func cloneBool(in *bool) *bool {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
 }
 
 // normalizeStats validates that opaque report stats really is a JSON object and
@@ -551,6 +593,10 @@ func cloneEvalResult(res *EvalResult) *EvalResult {
 	}
 	cp := *res
 	cp.Stats = cloneRawMessage(res.Stats)
+	// Deep-copied for the same reason as Stats: a caller holding the snapshot must
+	// not be able to write through this pointer and change what the next reader
+	// sees. The shallow struct copy above aliased it.
+	cp.SamplesResolved = cloneBool(res.SamplesResolved)
 	return &cp
 }
 

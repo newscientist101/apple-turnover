@@ -209,6 +209,14 @@ type evalResultRequest struct {
 	OK      bool            `json:"ok"`
 	Error   string          `json:"error"`
 	Stats   json.RawMessage `json:"stats"`
+
+	// SamplesResolved is the tri-state from strudel-agent-uvj.18. It is a POINTER
+	// so that "no registry to check" arrives as nil rather than as false: the
+	// difference between "I looked and it is missing" and "I could not look" is
+	// the difference between a finding and a silence, and decodeBody runs with
+	// DisallowUnknownFields, so a browser that sends this field against a server
+	// that does not declare it gets a 400 rather than a stored verdict.
+	SamplesResolved *bool `json:"samplesResolved"`
 }
 
 // handleAPIEvalResult lets a browser tell the server whether a pushed version
@@ -232,7 +240,13 @@ func (s *Server) handleAPIEvalResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res := EvalResult{Version: req.Version, OK: req.OK, Error: req.Error, Stats: req.Stats}
+	res := EvalResult{
+		Version:         req.Version,
+		OK:              req.OK,
+		Error:           req.Error,
+		Stats:           req.Stats,
+		SamplesResolved: req.SamplesResolved,
+	}
 	stored, err := s.Conductor.RecordEvalResult(res)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -371,6 +385,12 @@ type dryRunResultRequest struct {
 	OK       bool            `json:"ok"`
 	Error    string          `json:"error"`
 	Stats    json.RawMessage `json:"stats"`
+
+	// SamplesResolved is the same tri-state as on /api/eval-result, and the same
+	// pointer for the same reason: the two endpoints are the two ways an agent
+	// asks whether code evaluates, so a resolver that answered on one and stayed
+	// silent on the other would give an agent two answers to one question.
+	SamplesResolved *bool `json:"samplesResolved"`
 }
 
 // handleAPIDryRunResult accepts a browser's verdict on one dry-run and hands it
@@ -401,10 +421,11 @@ func (s *Server) handleAPIDryRunResult(w http.ResponseWriter, r *http.Request) {
 	}
 
 	verdict := DryRunVerdict{
-		ID:    req.DryRunID,
-		OK:    req.OK,
-		Error: req.Error,
-		Stats: stats,
+		ID:              req.DryRunID,
+		OK:              req.OK,
+		Error:           req.Error,
+		Stats:           stats,
+		SamplesResolved: req.SamplesResolved,
 	}
 	if err := s.dryRuns.Resolve(verdict); err != nil {
 		writeError(w, http.StatusNotFound,

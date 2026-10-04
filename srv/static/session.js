@@ -249,10 +249,20 @@
   // Gather per-event stats from queryArc: how many haps the validated
   // pattern produces in its first cycle, plus a small sample of the first
   // hap value so the agent can see what its code actually produced.
-  function collectStats(pattern) {
+  //
+  // The haps are handed back through `out` rather than queried a second time by
+  // the sample resolver. queryArc is a pure query, but running it twice to answer
+  // two questions about the same pattern would make the hap count and the sample
+  // finding describe two different evaluations if the pattern were anything
+  // non-deterministic — two stats that disagree about one pattern, which is
+  // exactly the kind of self-contradictory report an agent cannot act on.
+  function collectStats(pattern, out) {
     var stats = { haps: 0 };
     try {
       var haps = pattern.queryArc(0, 1);
+      if (out) {
+        out.haps = haps;
+      }
       stats.haps = haps.length;
       if (haps.length > 0 && haps[0] && haps[0].value !== undefined) {
         var sample;
@@ -275,10 +285,149 @@
     return stats;
   }
 
-  function postEvalResult(version, ok, error, stats) {
+  // Sound names that are NOT sample lookups, so the resolver must not ask the
+  // registry about them (strudel-agent-uvj.18).
+  //
+  // The first three are what Strudel itself checks for before resolving a name —
+  // its own trigger path returns early on exactly this set — and they are common
+  // in real patterns: `s("bd ~ cp")` is an ordinary bar of drums, and reporting a
+  // rest as an unresolved sample would cry wolf on a melody anyone would write.
+  //
+  // wt_ names are registered through a different door (registerWaveTable) and a
+  // waveform table is not a sample, so asking about it in the sample registry
+  // would be asking the wrong map.
+  var NON_SAMPLE_SOUNDS = ["-", "~", "_"];
+
+  // maxReportedMissing bounds how many unresolved names a report names. An agent
+  // needs the first of them to act on; it does not need all ten thousand.
+  var maxReportedMissing = 20;
+
+  // normaliseSoundName applies the ONE rule the pinned @strudel/web@1.3.0 bundle
+  // applies before it stores or looks up a sound name:
+  //
+  //   registerSound (jt): name.toLowerCase().replace(/\s+/g, "_")
+  //   playback     (Un): soundMap.get()[name.toLowerCase()]
+  //
+  // Matching the bundle exactly is the entire correctness property of this
+  // resolver: a resolver that normalises differently would report a sample the
+  // user loaded as missing, or — far worse — a sample they never loaded as
+  // present. It would then disagree with the audio the user hears, which is the
+  // precise failure this bead exists to stop. So the rule is copied from the
+  // bundle, not reimplemented by intuition.
+  function normaliseSoundName(name) {
+    return String(name).toLowerCase().replace(/\s+/g, "_");
+  }
+
+  // soundRegistry returns the strudel sound map, or null when there is nothing to
+  // ask.
+  //
+  // It reads window.strudel on every call rather than capturing it at load: the
+  // bundle is a CDN script and may not have executed yet, and a page whose bundle
+  // never arrives must degrade to UNKNOWN, not to a confident answer.
+  function soundRegistry() {
+    var scope = (typeof window !== "undefined" && window.strudel) || null;
+    if (!scope || !scope.soundMap || typeof scope.soundMap.get !== "function") {
+      return null;
+    }
+    try {
+      return scope.soundMap.get() || null;
+    } catch (err) {
+      // A registry that throws is not a registry that says "nothing is loaded".
+      return null;
+    }
+  }
+    // collectSampleReport reports whether every sound the validated pattern NAMES
+  // is present in the browser's sample registry (strudel-agent-uvj.18).
+  //
+  // Why this is a registry lookup and not playback: the validating sandbox
+  // discards its output by design, and sample resolution in Strudel happens on
+  // the output path. That stub is what makes validation free of audio, of the
+  // scheduler and of the network, and it must stay. The registry is the very map
+  // playback consults (`soundMap.get()[name.toLowerCase()]`, yielding nothing for
+  // a miss), so reading it answers "would this name sound?" without playing
+  // anything.
+  //
+  // It returns null when the answer is UNKNOWN — no registry, so nothing was
+  // checked — and that null is what the caller turns into an ABSENT field rather
+  // than a false. A resolver that could not look must say so: reporting true there
+  // would be the original defect wearing a fix's clothes, a green light over a
+  // check that never ran.
+  function collectSampleReport(haps) {
+    var registry = soundRegistry();
+    if (!registry) {
+      return null;
+    }
+    var checked = 0;
+    var missing = {};
+    for (var i = 0; i < haps.length; i++) {
+      var value = haps[i] && haps[i].value;
+      if (!value) continue;
+      var name = value.s;
+      // Only a plain string is a sound name. Numbers and undefined are not
+      // lookups, and asking about them would invent a missing sample out of a hap
+      // that never named one.
+      if (typeof name !== "string" || name.length === 0) continue;
+      if (NON_SAMPLE_SOUNDS.indexOf(name) !== -1) continue;
+      if (name.indexOf("wt_") === 0) continue;
+      checked++;
+      if (!Object.prototype.hasOwnProperty.call(registry, normaliseSoundName(name))) {
+        missing[name] = true;
+      }
+    }
+    var names = Object.keys(missing).sort();
+    return {
+      checked: checked,
+      resolved: names.length === 0,
+      // Sorted so two browsers resolving the same pattern report the same list,
+      // and capped so a pathological pattern cannot turn a verdict into an
+      // unbounded payload. totalMissing keeps the true count visible after the cap.
+      missing: names.length > maxReportedMissing ? names.slice(0, maxReportedMissing) : names,
+      totalMissing: names.length,
+    };
+  }
+
+  // reportSamples attaches a sample report to a verdict body.
+  //
+  // The tri-state is load-bearing and is why the field is set only when a report
+  // exists: `samplesResolved` absent means UNKNOWN (no registry to ask), false
+  // means at least one name did not resolve, and true means every name did. A
+  // plain boolean could not tell "healthy" from "never looked", and an agent
+  // optimising against a signal that cannot express its own blindness is
+  // optimising against noise.
+  //
+  // Note what this does NOT do. It never rewrites `ok`, and the failure paths
+  // never call it at all: a parse error proves nothing about samples, because the
+  // pattern never got far enough to name one. Reporting an unresolved sound there
+  // would invent a defect the agent did not commit, on top of an error that
+  // already says what is wrong.
+  function reportSamples(body, haps) {
+    var report = collectSampleReport(haps || []);
+    if (!report) {
+      return body;
+    }
+    body.samplesResolved = report.resolved;
+    body.stats = body.stats || {};
+    body.stats.samples = report;
+    if (!report.resolved) {
+      console.warn("[session] " + report.totalMissing + " sound(s) did not resolve in this browser: " +
+        report.missing.join(", ") + ". The pattern is valid and was committed, but it will be silent here.");
+    }
+    return body;
+  }
+
+  // postEvalResult sends the verdict to the server.
+  //
+  // haps is the hap list collectStats already queried. It is a parameter rather
+  // than a re-query so that the hap count and the sample finding describe ONE
+  // evaluation (see collectStats). It is omitted on the failure paths, which is
+  // what keeps a syntax error from carrying a sample verdict it did not earn.
+  function postEvalResult(version, ok, error, stats, haps) {
     var body = { version: version, ok: ok, stats: stats || { haps: 0 } };
     if (!ok && error) {
       body.error = String(error).slice(0, 500);
+    }
+    if (ok) {
+      reportSamples(body, haps);
     }
     return fetch(EVAL_RESULT_PATH, {
       method: "POST",
@@ -315,7 +464,12 @@
           : "evaluation produced no pattern";
       } else {
         body.ok = true;
-        body.stats = collectStats(pattern);
+        // The same resolver, on the same evaluation, as the real verdict: an
+        // agent that dry-runs a candidate and is told nothing, then pushes it and
+        // is told "unresolved", has been given two answers to one question.
+        var probed = {};
+        body.stats = collectStats(pattern, probed);
+        reportSamples(body, probed.haps);
       }
     } catch (err) {
       body.ok = false;
@@ -435,7 +589,10 @@
     // POST /api/eval-result report are the agent's feedback loop, and delaying
     // them behind a bar line would stall the loop for no coherence gain. Only
     // the audio commit waits for the bar.
-    var stats = collectStats(pattern);
+    // The haps are kept so the sample resolver reports on the SAME evaluation
+    // whose hap count this is; see collectStats.
+    var probed = {};
+    var stats = collectStats(pattern, probed);
     var anchor = snapshot.anchor || null;
     if (anchor) {
       latestAnchor = anchor;
@@ -460,7 +617,7 @@
     // describes the commit that is actually pending rather than the previous one.
     updateSyncStatusUI();
 
-    return postEvalResult(version, true, "", stats);
+    return postEvalResult(version, true, "", stats, probed.haps);
   }
 
   // Schedule one validated pattern for the next shared cycle boundary and
@@ -641,6 +798,11 @@
   window.strudelSession = {
     buildSandbox: buildSandbox,
     collectStats: collectStats,
+    // collectSampleReport is exposed alongside collectStats so the headless
+    // harness can drive the resolver directly and assert on its tri-state —
+    // including the UNKNOWN (absent registry) case, which is unreachable through
+    // the report path once a registry exists.
+    collectSampleReport: collectSampleReport,
     isNewCodeVersion: isNewCodeVersion,
     applyVersion: applyVersion,
     postEvalResult: postEvalResult,

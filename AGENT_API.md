@@ -75,6 +75,7 @@ Validate a candidate **without publishing it**. This is the one endpoint that bl
 
 - `id` is the dry-run's own correlation id, not a version. Versions identify published documents.
 - `stats` obeys the same rule as on `/api/eval-result`: it must be a JSON object, and absent, empty and `null` all mean "no stats".
+- `samplesResolved` carries the same tri-state as a stored verdict, for the same reason: a dry-run is how an agent checks a candidate *before* publishing it, so a candidate naming an unloaded sample must be catchable here rather than only after it is live.
 
 A `200` with `ok:false` is a successful request that found a broken candidate. Only `409` and `504` mean the dry-run itself did not happen.
 
@@ -84,10 +85,12 @@ How a browser answers a dry-run. An agent does not call this.
 
 <!-- shape:dryRunResultRequest -->
 ```json
-{"dryRunId":1,"ok":true,"stats":{"haps":4}}
+{"dryRunId":1,"ok":true,"stats":{"haps":4},"samplesResolved":true}
 ```
 
 Answers `{accepted,version}` like `/api/eval-result`. Every connected listener evaluates and reports, so the **first** answer is the one returned to the agent and later ones are refused with `404`; a report for an id that was never registered, has already been answered, or has expired is also `404`.
+
+`samplesResolved` is the same tri-state as on `/api/eval-result` — `true`, `false`, or absent for UNKNOWN — and the two endpoints resolve identically on purpose. A browser that answered on one path and stayed silent on the other would give an agent two answers to one question.
 
 ### `POST /api/message`
 
@@ -149,13 +152,34 @@ A browser reports the result of evaluating a published version in its sandbox RE
 
 <!-- shape:evalResultRequest -->
 ```json
-{"version":7,"ok":false,"error":"x is not a function","stats":{"haps":0}}
+{"version":7,"ok":false,"error":"x is not a function","stats":{"haps":0},"samplesResolved":true}
 ```
 
 - `version` is required and must name a published version.
 - `ok` is the browser's verdict.
 - `error` is optional.
 - `stats` is optional and must be a **JSON object**; its keys are opaque and echoed back verbatim. Omit it, or send `null`, to report no stats. A scalar or an array is rejected with `400` — the server stores and echoes this field, so a non-object would leave `stats.haps` silently `undefined` for every reader.
+- `samplesResolved` is optional and **tri-state**. See [Sample resolution](#sample-resolution).
+
+### Sample resolution
+
+`ok:true` means the pattern **parsed, evaluated and was committed**. It does not mean it will be audible, and the difference is not academic: `s("bd totally_not_a_real_sample_xyz")` evaluates perfectly, names a sample that exists in no pack, and is committed to the live document. Before `samplesResolved` existed that was reported to the agent as unqualified success — the system saying SUCCESS for work that provably cannot work.
+
+`samplesResolved` closes that gap. It is a **tri-state**, and all three states are distinct on the wire:
+
+| Value | Meaning |
+|---|---|
+| `true` | Every sound the pattern named resolved in the **reporting** browser's registry. |
+| `false` | At least one named sound did **not** resolve there. |
+| *absent* | **Unknown.** The reporting browser had no sample registry to check, or the evaluation failed before the pattern named a sound. |
+
+Read the absent case as its own answer, not as a quiet `false`. A browser that could not check anything has learned nothing about your samples, and a client that folds "unknown" into either `true` or `false` puts a verdict on a check that never ran — the original defect wearing a fix's clothes. That is why the field is optional and tri-state rather than a boolean: a plain `false` cannot say "I looked and it is missing" while a missing key says "I could not look".
+
+The named sounds, when any are unresolved, are listed in `stats.samples.missing` (sorted and capped; `stats.samples.totalMissing` gives the true count). Those keys are opaque like the rest of `stats` — the server stores and echoes them without interpreting them.
+
+**It describes one browser, not the audience.** Every listener evaluates and reports, and the server stores the most recent report for a version, so `samplesResolved` is the answer of whichever browser reported last. Listeners can be in materially different states — one may have loaded a sample pack while another has not — so with more than one listener the stored value is an observation, not a guarantee. Per-listener sample state would need listener identity, which this API does not have. Treat `false` as "at least one listener could not resolve this".
+
+`ok` and `samplesResolved` are stored independently and neither implies the other: a pattern that parses is not thereby audible, and a missing sample is not a parse failure.
 
 `accepted:true` means the report was understood, not necessarily stored. A valid report older than the stored verdict is accepted but discarded as stale.
 
@@ -215,10 +239,12 @@ A stored verdict adds the server timestamp:
 
 <!-- shape:storedEvalResult -->
 ```json
-{"version":7,"ok":false,"error":"x is not a function","stats":{"haps":0},"epochMs":1757000000123}
+{"version":7,"ok":false,"error":"x is not a function","stats":{"haps":0},"samplesResolved":true,"epochMs":1757000000123}
 ```
 
 Empty `error` and `stats` fields are omitted. That includes a report that sent `"stats":null`: a `null` means "no stats", so it is dropped rather than echoed back as `null`.
+
+`samplesResolved` is omitted when it is UNKNOWN. The omission is meaningful and is not a formatting accident — see [Sample resolution](#sample-resolution).
 
 ## Errors and status codes
 
@@ -258,6 +284,10 @@ The push response proves only that the document was stored. It is not an evaluat
 If you would rather not publish a candidate until it is known to evaluate, `POST /api/dry-run` evaluates it without publishing: step 3 becomes a dry-run, and only a candidate that comes back `ok:true` is worth sending to `/api/code`. It leaves `version`, `history` and `lastEvalResult` untouched, so a broken candidate never becomes the published document. It needs a connected browser just as much as a push does — with none, it is `409` — and it is bounded, returning `504` rather than waiting forever.
 
 Step 5 has one trap: `lastEvalResult` describes whichever version the browser last evaluated, which is not necessarily the version now live. Compare `lastEvalResult.version` against `version` before treating the verdict as an answer about your code. `agentcli state` does that comparison for you and labels the result `CURRENT`, `STALE` or `NONE YET`, naming both versions when they differ; `agentcli state -require-current` turns "not current" into a non-zero exit for a scripted caller.
+
+Step 5 has a second trap, and it is the one that makes a closed loop an optimistic phrase. **`ok:true` means the code parsed, evaluated and was committed. It does not mean it will be audible.** A pattern naming a sample that exists in no pack passes every check this system makes and is committed to the live document; it simply produces no sound. Read `lastEvalResult.samplesResolved` as well — `false` names the sounds that did not resolve, and an absent field means nothing was checked, which is not the same as everything being fine. See [Sample resolution](#sample-resolution) for the tri-state and for why it describes one reporting browser rather than the whole audience. `agentcli state` prints this as a `samples:` row.
+
+The practical shape of a loop that closes on audible output, rather than on syntax: push, read the verdict, and if `ok` is true while `samplesResolved` is `false`, treat the push as **not yet working** — the names are in `stats.samples.missing`. A sample pack is loaded per browser by a page-local control, so an agent cannot load one itself; the useful move is to name the problem in `message` so whoever is at the keyboard can press Samples, or to rewrite the pattern against sounds that are already present.
 
 ## Validate-then-commit
 

@@ -104,6 +104,12 @@ type evalResult struct {
 	Error   string          `json:"error,omitempty"`
 	Stats   json.RawMessage `json:"stats,omitempty"`
 	EpochMS int64           `json:"epochMs"`
+
+	// SamplesResolved is a POINTER for the same reason the server's is: nil means
+	// UNKNOWN — no registry was available, so nothing was checked. A plain bool
+	// here would make "I could not look" read as "I looked and it failed", and
+	// `state` would print a confident row over a check that never ran.
+	SamplesResolved *bool `json:"samplesResolved,omitempty"`
 }
 
 // evalAck mirrors the one response that is not a snapshot. `accepted` means the

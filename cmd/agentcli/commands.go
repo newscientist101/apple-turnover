@@ -241,6 +241,21 @@ func cmdState(ctx context.Context, c *client, args []string, out, stderr io.Writ
 	// today, and a caller scraping `last eval:` must keep working. The new row only
 	// adds the comparison the reader was having to make by eye.
 	fmt.Fprintf(out, "verdict:        %s\n", verdictLine(*snap))
+	// The sample row is ADDED, never a rewording: `last eval:` below is byte-for-byte
+	// what it has always printed, because a caller scraping it must keep working.
+	//
+	// It exists because ok=true does NOT mean the push will be audible. A pattern
+	// naming a sample no listener has loaded validates and commits perfectly, and
+	// the only evidence is this field (strudel-agent-uvj.18). All three states are
+	// printed distinctly, and an UNKNOWN verdict says nothing was checked rather
+	// than borrowing a word that implies health.
+	if v := snap.LastEvalResult; v != nil && v.SamplesResolved != nil {
+		if *v.SamplesResolved {
+			fmt.Fprintf(out, "samples:        resolved\n")
+		} else {
+			fmt.Fprintf(out, "samples:        UNRESOLVED -- the pattern is valid and committed, but a sound it names did not resolve in the reporting browser\n")
+		}
+	}
 	if v := snap.LastEvalResult; v != nil {
 		fmt.Fprintf(out, "last eval:      version=%d ok=%t", v.Version, v.OK)
 		if v.Error != "" {

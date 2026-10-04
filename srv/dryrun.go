@@ -75,6 +75,12 @@ type DryRunVerdict struct {
 	OK    bool            `json:"ok"`
 	Error string          `json:"error,omitempty"`
 	Stats json.RawMessage `json:"stats,omitempty"`
+
+	// SamplesResolved mirrors EvalResult.SamplesResolved, tri-state and all: nil
+	// means UNKNOWN, false means a named sound did not resolve, true means every
+	// named sound did. See EvalResult for why this is a pointer and why it must
+	// not be folded into OK.
+	SamplesResolved *bool `json:"samplesResolved,omitempty"`
 }
 
 // ErrNoDryRun is returned by Resolve for an id that was never registered, has

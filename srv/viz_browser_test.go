@@ -26,8 +26,10 @@ package srv
 // than re-deriving its arithmetic in Go.
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -48,15 +50,15 @@ const vizJSPrelude = `
 var console = { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} };
 window.devicePixelRatio = 1;
 
-var __ctxCalls = { fillRect: [], stroke: [], fillText: [] };
+var __ctxCalls = { fillRect: [], stroke: [], fillText: [], order: [] };
 var __ctx2d = {
   fillStyle: "", strokeStyle: "", lineWidth: 1, font: "", textBaseline: "",
   canvas: null,
   save: function () {}, restore: function () {}, scale: function () {},
   beginPath: function () {}, moveTo: function () {}, lineTo: function () {},
-  fillRect: function (x, y, w, h) { __ctxCalls.fillRect.push({ x: x, y: y, w: w, h: h }); },
+  fillRect: function (x, y, w, h) { var rec = { x: x, y: y, w: w, h: h, fillStyle: __ctx2d.fillStyle }; __ctxCalls.fillRect.push(rec); __ctxCalls.order.push({ op: "fillRect", w: w, h: h, fillStyle: __ctx2d.fillStyle }); },
   stroke: function () { __ctxCalls.stroke.push(1); },
-  fillText: function (text, x, y) { __ctxCalls.fillText.push({ text: text, x: x, y: y }); },
+  fillText: function (text, x, y) { __ctxCalls.fillText.push({ text: text, x: x, y: y }); __ctxCalls.order.push({ op: "fillText", text: text }); },
 };
 var __canvas = {
   width: 0, height: 0,
@@ -181,6 +183,208 @@ func TestVisualizationRendersHapLanesFromTheServedJS(t *testing.T) {
 	// Two lane separator lines plus the playhead.
 	if strokes := rt.eval("window.__ctxCalls.stroke.length").ToInteger(); strokes < 3 {
 		t.Errorf("stroked %d time(s), want at least 3 (lane separators + playhead)", strokes)
+	}
+}
+
+// vizLaneLabels returns the lane labels the real renderer drew, in draw order.
+func vizLaneLabels(rt *syncRuntime) []string {
+	rt.t.Helper()
+	raw := rt.eval(`JSON.stringify(window.__ctxCalls.fillText.map(function (t) { return t.text; }))`).String()
+	var labels []string
+	if err := json.Unmarshal([]byte(raw), &labels); err != nil {
+		rt.t.Fatalf("decoding lane labels %s: %v", raw, err)
+	}
+	return labels
+}
+
+func containsLabel(labels []string, want string) bool {
+	for _, l := range labels {
+		if l == want {
+			return true
+		}
+	}
+	return false
+}
+
+func laneNames(styles map[string][]string) []string {
+	names := make([]string, 0, len(styles))
+	for k := range styles {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// vizLaneBlockStyles returns, per lane label, the fillStyles the real renderer
+// actually assigned when it painted that lane's blocks.
+//
+// The colour must be read at PAINT time, from the recorded call, not from
+// ctx.fillStyle after the frame: the background fill, every lane label and the
+// playhead overwrite fillStyle, so reading it late reports whatever the last
+// painter left behind. This is the trap AGENTS.md calls out for the CSS pulse —
+// asserting a value the code merely mentions proves nothing about the value it
+// used. Likewise the label/block pairing is recovered from the interleaved call
+// trace rather than assumed, because fillText and fillRect are recorded in
+// separate arrays.
+func vizLaneBlockStyles(rt *syncRuntime) map[string][]string {
+	rt.t.Helper()
+	raw := rt.eval(`(function () {
+  var rect = __canvas.getBoundingClientRect();
+  var out = [];
+  var current = null;
+  for (var i = 0; i < window.__ctxCalls.order.length; i++) {
+    var c = window.__ctxCalls.order[i];
+    if (c.op === "fillText") {
+      current = c.text;
+    } else if (c.op === "fillRect" && c.w < rect.width && c.h < rect.height) {
+      out.push({ lane: current, style: c.fillStyle });
+    }
+  }
+  return JSON.stringify(out);
+})()`).String()
+
+	var blocks []struct {
+		Lane  string `json:"lane"`
+		Style string `json:"style"`
+	}
+	if err := json.Unmarshal([]byte(raw), &blocks); err != nil {
+		rt.t.Fatalf("decoding lane block styles %s: %v", raw, err)
+	}
+	byLane := map[string][]string{}
+	for _, b := range blocks {
+		byLane[b.Lane] = append(byLane[b.Lane], b.Style)
+	}
+	return byLane
+}
+
+// TestVisualizationLanesNotesByPitchNotBySound (issue strudel-agent-uvj.10)
+//
+// A pitched hap carries its pitch on `note`/`n` AND its instrument on `s`, as in
+// `note("c4").sound("piano")` or `n("0 2 4").s("saw")`. Those are ordinary
+// Strudel idioms, and the pinned @strudel/web@1.3.0 bundle registers `note` and
+// `n` as two names for the SAME control (`{note:Fo}=w(["note","n"])`) while `s`
+// is a separate sound control.
+//
+// viz.js used to key lanes first-match with `value.s` tested FIRST, so a shared
+// instrument became the lane key and every pitch in the pattern collapsed onto
+// ONE lane. The sound is not a lane's identity: a pitched hap is a lane per
+// PITCH.
+func TestVisualizationLanesNotesByPitchNotBySound(t *testing.T) {
+	rt := newVizRuntime(t)
+
+	rt.run(`
+	  window.strudelViz.onSnapshot({ anchor: { epochMs: 0, cps: 0.5 } });
+	  window.strudelViz.setPattern({
+	    queryArc: function (begin, end) {
+	      return [
+	        { whole: { begin: 0.0, end: 0.5 }, value: { note: "c4", s: "piano" } },
+	        { whole: { begin: 0.5, end: 1.0 }, value: { note: "e4", s: "piano" } },
+	        { whole: { begin: 0.0, end: 0.5 }, value: { note: "g4", s: "piano" } },
+	        { whole: { begin: 0.5, end: 1.0 }, value: { note: "b4", s: "piano" } },
+	      ];
+	    },
+	  });
+	  window.__runOneFrame();
+	`)
+
+	labels := vizLaneLabels(rt)
+	for _, l := range labels {
+		if l == "piano" {
+			t.Fatalf("lane labels = %v: a shared sound became the lane key, so all four pitches collapsed onto one lane", labels)
+		}
+	}
+	for _, want := range []string{"c4", "e4", "g4", "b4"} {
+		if !containsLabel(labels, want) {
+			t.Errorf("lane labels = %v, want one lane per pitch including %q", labels, want)
+		}
+	}
+	if len(labels) != 4 {
+		t.Errorf("drew %d lane(s) (%v), want 4: one per pitch", len(labels), labels)
+	}
+}
+
+// TestVisualizationLanesNKeyedHaps (issue strudel-agent-uvj.10) proves the `n`
+// spelling of the note control is treated as a pitch. viz.js only ever read
+// `value.note`, so a pattern written with `n` — very common, it is the SAME
+// control — put every hap into the single `other` lane.
+func TestVisualizationLanesNKeyedHaps(t *testing.T) {
+	rt := newVizRuntime(t)
+
+	rt.run(`
+	  window.strudelViz.onSnapshot({ anchor: { epochMs: 0, cps: 0.5 } });
+	  window.strudelViz.setPattern({
+	    queryArc: function (begin, end) {
+	      return [
+	        { whole: { begin: 0.0, end: 0.5 }, value: { n: "c4" } },
+	        { whole: { begin: 0.5, end: 1.0 }, value: { n: "e4" } },
+	      ];
+	    },
+	  });
+	  window.__runOneFrame();
+	`)
+
+	labels := vizLaneLabels(rt)
+	if len(labels) != 2 {
+		t.Fatalf("lane labels = %v, want 2 lanes: `n` is an alias of `note`, so each n-keyed hap is its own lane", labels)
+	}
+	for _, want := range []string{"c4", "e4"} {
+		if !containsLabel(labels, want) {
+			t.Errorf("lane labels = %v, want %q: n-keyed haps lose their pitch lane", labels, want)
+		}
+	}
+}
+
+// TestVisualizationLaneColourMatchesLaneIdentity (issue strudel-agent-uvj.10)
+// proves the note colour branch is actually REACHED, and that colour agrees with
+// the lane the hap was filed under.
+//
+// viz.js derived the colour by re-sniffing `valItem.note !== undefined`
+// independently of how it had chosen the lane key, so the two could disagree: a
+// {note, s} hap was keyed under its sound but painted as a note. Asserting the
+// fillStyle the real code assigned proves the branch executed; asserting that
+// the source merely contains "#4f8cff" would pass just as happily on a branch
+// that never runs.
+func TestVisualizationLaneColourMatchesLaneIdentity(t *testing.T) {
+	const noteColour = "#4f8cff"
+	const sampleColour = "#00e5a3"
+
+	rt := newVizRuntime(t)
+
+	rt.run(`
+	  window.strudelViz.onSnapshot({ anchor: { epochMs: 0, cps: 0.5 } });
+	  window.strudelViz.setPattern({
+	    queryArc: function (begin, end) {
+	      return [
+	        { whole: { begin: 0.0, end: 0.5 }, value: { note: "c4", s: "piano" } },
+	        { whole: { begin: 0.5, end: 1.0 }, value: { s: "bd" } },
+	      ];
+	    },
+	  });
+	  window.__runOneFrame();
+	`)
+
+	styles := vizLaneBlockStyles(rt)
+
+	for _, c := range []struct{ lane, want string }{
+		{"c4", noteColour},
+		{"bd", sampleColour},
+	} {
+		got := styles[c.lane]
+		if len(got) == 0 {
+			t.Fatalf("no block painted in lane %q (lanes seen: %v)", c.lane, laneNames(styles))
+		}
+		for _, s := range got {
+			if s != c.want {
+				t.Errorf("block in lane %q painted %q, want %q: lane identity and colour disagree", c.lane, s, c.want)
+			}
+		}
+	}
+
+	// Exactly two lanes. Before the fix the pitched hap was keyed under "piano",
+	// so the lanes were "bd" and "piano" — no lane named after a pitch existed
+	// to carry the note colour at all.
+	if len(styles) != 2 {
+		t.Errorf("lanes seen = %v, want exactly [bd c4]: a sound or an ungrouped value is leaking in as a lane", laneNames(styles))
 	}
 }
 

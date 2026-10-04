@@ -30,6 +30,45 @@
     return isNaN(num) ? 0 : num;
   }
 
+  // Resolve a hap's value into the lane it belongs to.
+  //
+  // Precedence is EXPLICIT here rather than first-match, because first-match
+  // ordering silently decides this: whichever recognised field is tested first
+  // wins for every hap carrying it, so a later field can never take precedence
+  // and the semantics are accidental.
+  //
+  // The order is: a pitched hap is a lane per PITCH; an unpitched one is a lane
+  // per SOUND. Pitch is resolved first (on `note`, then on `n` — the pinned
+  // @strudel/web@1.3.0 bundle registers them as two names for the same control,
+  // `{note:Fo}=w(["note","n"])`, and reading only one of them loses the pitch
+  // lane for every pattern written with the other). Crucially `s` is only
+  // consulted when there is NO pitch: a hap like `note("c4").sound("piano")` or
+  // `n("0 2 4").s("saw")` carries both, and keying it on `s` collapsed every
+  // pitch in the pattern onto one lane named after the shared instrument.
+  //
+  // The same resolver supplies the colour, so lane identity and colour cannot
+  // disagree — deciding them separately is what let a {note, s} hap be filed
+  // under its sound while painted as a note.
+  function laneFor(value) {
+    if (!value || typeof value !== 'object') {
+      return { key: 'other', kind: 'other' };
+    }
+    var pitch = value.note !== undefined && value.note !== null && value.note !== '' ? value.note : value.n;
+    if (pitch !== undefined && pitch !== null && pitch !== '') {
+      return { key: String(pitch), kind: 'note' };
+    }
+    if (typeof value.s === 'string' && value.s.length > 0) {
+      return { key: value.s, kind: 'sample' };
+    }
+    return { key: 'other', kind: 'other' };
+  }
+
+  function colourFor(kind) {
+    if (kind === 'other') return '#8888aa';
+    if (kind === 'note') return '#4f8cff';
+    return '#00e5a3';
+  }
+
   function draw() {
     var canvas = document.getElementById('canvas');
     if (!canvas) {
@@ -103,29 +142,28 @@
     // Group haps into lanes
     var laneMap = {};
     var laneKeys = [];
+    var laneKinds = {};
 
     for (var i = 0; i < haps.length; i++) {
       var hap = haps[i];
       if (!hap) continue;
-      var value = hap.value;
-      var key = 'other';
-      if (value && typeof value === 'object') {
-        if (typeof value.s === 'string' && value.s.length > 0) {
-          key = value.s;
-        } else if (value.note !== undefined && value.note !== null && value.note !== '') {
-          key = String(value.note);
-        }
-      }
+      var lane = laneFor(hap.value);
+      var key = lane.key;
       if (!laneMap[key]) {
         laneMap[key] = [];
         laneKeys.push(key);
       }
+      // A lane keeps the kind of the first hap filed under it. Every hap with
+      // the same key resolves to the same kind (the key IS derived from the
+      // kind), so this cannot drift.
+      laneKinds[key] = lane.kind;
       laneMap[key].push(hap);
     }
 
     if (laneKeys.length === 0) {
       laneKeys = ['other'];
       laneMap['other'] = [];
+      laneKinds['other'] = 'other';
     }
 
     laneKeys.sort();
@@ -167,9 +205,10 @@
         var blockY = laneTop + 4;
         var blockH = Math.max(4, laneHeight - 8);
 
-        var valItem = hItem.value;
-        var isNote = valItem && typeof valItem === 'object' && valItem.note !== undefined;
-        ctx.fillStyle = (lKey === 'other' ? '#8888aa' : (isNote ? '#4f8cff' : '#00e5a3'));
+        // The colour comes from the lane's resolved kind, not from re-inspecting the
+        // hap: deriving it separately is what let a {note, s} hap be filed under
+        // its sound while painted as a note (issue strudel-agent-uvj.10).
+        ctx.fillStyle = colourFor(laneKinds[lKey]);
         ctx.fillRect(x1, blockY, blockW, blockH);
       }
     }

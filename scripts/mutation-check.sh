@@ -238,6 +238,9 @@ MUTATIONS=$(cat <<'EOF'
 123-indicator-pulse-is-unconditional|srv/static/style.css|.status-indicator.agent-connected .status-dot {|.status-indicator .status-dot { // deliberately: the pulse runs again whether an agent is alive or dead|TestAgentIndicatorTemplateAndStyleAreWired
 126-viz-pattern-never-queried|srv/static/viz.js|    if (currentPattern && typeof currentPattern.queryArc === 'function') {|    if (false) { // deliberately: the pattern is never consulted, so no lane is ever drawn|TestVisualizationRendersHapLanesFromTheServedJS
 127-viz-lane-blocks-not-drawn|srv/static/viz.js|        ctx.fillRect(x1, blockY, blockW, blockH);|        // deliberately: lane blocks are never drawn|TestVisualizationRendersHapLanesFromTheServedJS
+128-viz-lane-key-prefers-s-over-note|srv/static/viz.js|    var pitch = value.note !== undefined && value.note !== null && value.note !== '' ? value.note : value.n;|    var pitch = value.s; // deliberately: the sound wins the first match, collapsing every pitch in a {note, s} pattern onto one lane|TestVisualizationLanesNotesByPitchNotBySound|TestVisualizationLaneColourMatchesLaneIdentity
+129-viz-n-keyed-haps-lose-their-pitch|srv/static/viz.js|    var pitch = value.note !== undefined && value.note !== null && value.note !== '' ? value.note : value.n;|    var pitch = value.note; // deliberately: only the `note` spelling is read, so `n` haps fall through to the sample/other branch|TestVisualizationLanesNKeyedHaps
+130-viz-lane-colour-decoupled-from-lane|srv/static/viz.js|        ctx.fillStyle = colourFor(laneKinds[lKey]);|        ctx.fillStyle = colourFor(laneKinds[lKey] === 'note' ? 'other' : laneKinds[lKey]); // deliberately: the colour ignores the resolved kind, so the note branch paints the ungrouped colour|TestVisualizationLaneColourMatchesLaneIdentity
 EOF
 )
 

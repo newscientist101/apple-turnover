@@ -187,6 +187,15 @@ Every listener event has exactly this shape:
   waveform branch was removed because the pinned bundle exposes no reachable,
   connected analyser path for it (strudel-agent-uvj.2), and an unwired scope
   would have reported sound that was never observed.
+- Lane identity and lane colour come from **one** resolver (`laneFor`), so they
+  cannot disagree. Precedence is **explicit**, not first-match: pitch
+  (`note`, then `n` — one control with two spellings in the pinned bundle) wins,
+  then the sound (`s`), then `other`. A hap carrying both pitch and sound is a
+  lane per **pitch**; keying it on `s` collapses a whole pattern onto one lane
+  named after a shared instrument (strudel-agent-uvj.10). Deriving the colour by
+  re-inspecting the hap is the defect, so `colourFor` takes the resolved kind.
+  Lane colour vocabulary stays `other`/`note`/`sample`; per-lane palette
+  variation is a separate concern (strudel-agent-uvj.9).
 
 ## Standing limitations
 

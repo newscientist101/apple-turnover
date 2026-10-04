@@ -395,6 +395,7 @@ func TestAgentAPIDocPayloadShapesMatchARunningServer(t *testing.T) {
 	wantDryRunVerdict := docShape(t, doc, "dryRunVerdict")
 	wantDryRunResultReq := docShape(t, doc, "dryRunResultRequest")
 	wantDryRunFrame := docShape(t, doc, "dryRunFrame")
+	wantSyncReq := docShape(t, doc, "syncResultRequest")
 
 	_, base, wsBase := fanoutServer(t)
 
@@ -472,6 +473,32 @@ func TestAgentAPIDocPayloadShapesMatchARunningServer(t *testing.T) {
 	if err := checkRequestShape(t, base, "/api/eval-result", "evalResultRequest", wantEvalReq,
 		map[string]any{"version": latestVersion(t, base), "ok": true, "error": "", "stats": map[string]any{"haps": 1}, "samplesResolved": false}); err != nil {
 		t.Error(err)
+	}
+
+	// ---- the drift report, both documented shapes ----
+	//
+	// The doc prints the SCHEDULED shape under the anchor, so that is what
+	// checkRequestShape is pointed at. driftMs is given a real non-zero value
+	// rather than 0: a server that stored a constant, or that dropped the value
+	// and defaulted it, would still pass on field NAMES alone, and 0 is exactly
+	// the reading an agent must be able to trust.
+	if err := checkRequestShape(t, base, "/api/sync-result", "syncResultRequest", wantSyncReq,
+		map[string]any{
+			"version":  latestVersion(t, base),
+			"driftMs":  12,
+			"targetMs": time.Now().UnixMilli(),
+			"actualMs": time.Now().UnixMilli(),
+		}); err != nil {
+		t.Error(err)
+	}
+	// The UNSCHEDULED shape is a second documented body rather than an optional
+	// variant, so it is pinned separately. It is the case an agent acts on most
+	// directly -- "no listener could align at all" -- and a server that quietly
+	// accepted it as driftMs:0 would report a listener that never aligned as
+	// perfectly aligned.
+	unsched := fmt.Sprintf(`{"version":%d,"unscheduled":true}`, latestVersion(t, base))
+	if code, raw := fanoutPost(t, base, "/api/sync-result", unsched); code != http.StatusOK {
+		t.Errorf("the documented unscheduled report %s was returned %d %q, want 200: AGENT_API.md documents a shape the server will not accept", unsched, code, bodyOf(raw))
 	}
 
 	// ---- the eval ack, live ----
@@ -911,6 +938,18 @@ func TestAgentAPIDocDocumentsTheLoop(t *testing.T) {
 		{"that the agent frame fires only on a lapse", "held** lease lapsing"},
 		{"that a heartbeat broadcasts nothing", "A heartbeat broadcasts nothing"},
 		{"that presence never bumps the version", "agent-presence, and stored evaluation-result changes do not increment"},
+		// The DRIFT-visibility claim. This is the bead (strudel-agent-uvj.15) in
+		// doc form: drift was measured, painted into a status line and dropped, so
+		// "the browser reports observed drift" was true only to a human watching
+		// the tab while the agent the document addresses could not see any of it.
+		// Each needle below is a step of the recovery path an agent has to be
+		// able to follow without reading the source.
+		{"that an agent can read drift at all", "you read it from `lastSync` on `GET /api/state`"},
+		{"where the drift report is sent", "`POST /api/sync-result`"},
+		{"that no observation yet is not zero drift", "not the same as zero drift"},
+		{"that unscheduled means alignment was not attempted", "claimed no bar position at all"},
+		{"that drift describes one browser and not the audience", "one reporting browser, not the audience"},
+		{"that re-anchoring is the documented recovery for an observed drift", "When to re-anchor"},
 	} {
 		if !docStates(doc, must.needle) {
 			t.Errorf("AGENT_API.md no longer states %s (looked for %q): this is the guidance an external agent codes its loop from", must.what, must.needle)
@@ -932,6 +971,7 @@ func TestAgentAPIDocShapesAreStable(t *testing.T) {
 		"error", "codeRequest", "messageRequest", "evalResultRequest",
 		"evalAck", "snapshot", "storedEvalResult", "frame", "anchorRequest",
 		"dryRunRequest", "dryRunVerdict", "dryRunResultRequest", "dryRunFrame",
+		"syncResultRequest",
 	}
 	for _, name := range want {
 		docShape(t, doc, name) // fails loudly if the anchor or its JSON is gone

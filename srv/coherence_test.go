@@ -641,7 +641,15 @@ var document = {
   getElementById: function () { return null; },
   activeElement: null,
 };
-var fetch = function () { return { then: function () { return { catch: function () {} }; } }; };
+// The stub models the PROMISE surface production actually uses: both "then" and
+// "catch". Modelling only "then" was survivable while every fetch call sat inside
+// an async function, where a missing method became a silently swallowed rejection;
+// it is not survivable now, because the sync report is sent from a timer callback
+// where the same TypeError propagates into the caller. A harness that throws on the
+// served bytes is reporting its own inaccuracy, not a defect in the client -- so
+// the stub is fixed rather than the production call being weakened to suit it.
+var fetch = function () { return { then: function () { return apiStub(); }, catch: function () { return apiStub(); } }; };
+function apiStub() { return { then: function () { return apiStub(); }, catch: function () { return apiStub(); } }; }
 // A record of every commit, so the test can assert on WHEN setPattern happened
 // rather than on a console line nobody reads.
 window.__setPatternCalls = [];
@@ -649,7 +657,7 @@ function makeLive() {
   return {
     setPattern: function (p, autostart) {
       window.__setPatternCalls.push({ at: Date.now(), autostart: autostart });
-      return { then: function (cb) { return { catch: function () {} }; } };
+      return apiStub();
     },
   };
 }

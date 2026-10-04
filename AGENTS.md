@@ -171,6 +171,56 @@ Every listener event has this shape:
 - With no usable anchor, the client commits immediately and marks the state `unscheduled`.
 - Synchronization behavior is proved by executing the served browser JavaScript, not by duplicating its arithmetic in Go tests.
 
+### Drift reporting
+
+Drift is measured in the browser, so drift reporting is proved in the browser.
+The defect this section exists for (strudel-agent-uvj.15) is the purest example
+in the repository of a **claimed but unverified** capability: sync.js computed
+drift, session.js painted it into `#sync-status`, and then it was dropped. The
+only outbound call in any browser asset was the eval-result POST, so
+`README`'s "residual drift is visible" and `AGENT_API.md`'s "the browser reports
+observed drift" were true only to a human watching the tab — and an agent, the
+consumer both documents address, could not observe any of it and so could not
+know when re-anchoring was needed.
+
+- **THE ASSERTION IS ON THE WIRE, NOT ON THE RENDERER.** A Go test that checks
+  the server accepts a `driftMs` field passes against exactly the broken code:
+  the field validates, stores and echoes while the browser still sends nothing.
+  `srv/sync_browser_test.go` drives the served bytes in goja and asserts on the
+  body that would have been POSTed. This is the same rule as the agent badge,
+  and it exists because the original drift tests all stopped at the display.
+- **AN OBSERVATION IS NOT A VERDICT.** Drift has its own endpoint rather than a
+  field in the eval-result `stats`, and the reason is **call order**, not taste:
+  `applyVersion` arms the boundary timer and *then* POSTs the verdict, so at that
+  instant the drift does not exist yet. Folding it in would mean posting one
+  version twice — with the second POST overwriting the agent's verdict — or
+  stalling the feedback loop behind a bar line.
+- **UNSCHEDULED IS NOT `driftMs:0`.** One says the commit landed on the bar line
+  it targeted; the other says there was no bar line at all. Collapsing them makes
+  a listener that never aligned look perfectly aligned, which stops an agent
+  re-anchoring a system that needs it. The server refuses a report carrying
+  **exactly one** of the two claims; both or neither is `400`.
+- **`lastSync:null` IS NOT ZERO DRIFT.** "Nobody has measured" and "measured as
+  perfect" are different facts, so the field is a `*SyncObservation` with
+  `driftMs` itself a `*int64`. Folding the absent case into a zero is how a
+  silent system keeps looking healthy.
+- **SYNC DATA NEVER BUMPS THE VERSION** and never enters history. It is evidence
+  about a commit that already happened; storing it as a document would put a
+  second entry for one push in the history.
+- **THE NEWEST ARRIVAL WINS, INCLUDING AN OLDER VERSION** — the deliberate
+  asymmetry with `RecordEvalResult`, which discards a stale *verdict*. A verdict
+  is about the document; an observation is about *when* a commit landed, and a
+  listener that committed version 1 late can report it after version 2 is
+  published. Discarding it would drop the evidence the feature exists to deliver.
+- **`lastSync` DESCRIBES ONE BROWSER, NOT THE AUDIENCE.** The newest report wins
+  and listeners have no identity, so this is an observation rather than a
+  guarantee. The wording discipline is the one used for `samplesResolved`
+  (strudel-agent-uvj.18); per-listener drift belongs with `strudel-agent-f79`.
+  No opaque count is invented, because nothing here could earn one.
+- **A REFUSED REPORT BROADCASTS NOTHING.** A `sync` frame therefore always
+  describes a measurement the server stored, and it is the opposite direction of
+  information from an `anchor` frame: one is a command, the other is evidence.
+
 ### Dry-run
 
 `POST /api/dry-run` evaluates a candidate **without publishing it**, so a broken

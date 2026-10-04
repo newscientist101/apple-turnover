@@ -30,6 +30,11 @@
   var WS_PATH = "/ws";
   var EVAL_RESULT_PATH = "/api/eval-result";
   var DRY_RUN_RESULT_PATH = "/api/dry-run-result";
+  // How a listener tells the server where its commit landed (strudel-agent-uvj.15).
+  // It is NOT part of the eval-result POST: that one is sent before the boundary
+  // timer fires, so the drift does not exist yet at the time it goes out. See
+  // recordObservation.
+  var SYNC_RESULT_PATH = "/api/sync-result";
   var RECONNECT_BASE_MS = 1000;
   var RECONNECT_MAX_MS = 15000;
 
@@ -632,27 +637,96 @@
       latestAnchor = anchor;
     }
     if (!sync() || !sync().usableAnchor(anchor)) {
-      if (sync()) {
-        sync().observe({ version: version, unscheduled: true });
-      }
-      updateSyncStatusUI();
+      recordObservation({ version: version, unscheduled: true });
       return commitNow(commit, version, stats, pattern);
     }
     var handle = sync().scheduleAtBoundary(function (at) {
-      sync().observe({
+      recordObservation({
         version: version,
         cycle: sync().cyclePosition(anchor, at.actualMs),
         targetMs: at.targetMs,
         actualMs: at.actualMs,
         driftMs: at.driftMs,
       });
-      updateSyncStatusUI();
       return commitNow(commit, version, stats, pattern);
     }, anchor, Date.now(), sync().LEAD_MS);
     // pendingCommit is assigned by the CALLER, which already owns it and
     // cancels it before scheduling. Setting it here as well gave one variable
     // two owners, and the countdown below depends on which write landed.
     return handle;
+  }
+
+  // recordObservation is the ONE place a drift observation is born
+  // (strudel-agent-uvj.15).
+  //
+  // It exists so the three consumers of an observation cannot disagree. The
+  // status line, sync.js's own record and the report to the server all read the
+  // same object, which is the same discipline laneFor/colourFor follows for lane
+  // identity: derive it once, feed everybody from that.
+  //
+  // It is also why the report lives on its own endpoint rather than inside the
+  // eval-result body. This function runs when the boundary timer FIRES, which is
+  // strictly after applyVersion has already POSTed the eval verdict -- at that
+  // earlier instant the drift did not exist yet, so folding it into the verdict
+  // would mean posting one version twice and letting the second post overwrite
+  // the agent's verdict, or stalling that verdict behind a bar line. Drift is a
+  // property of a commit at a bar; an evaluation is not.
+  //
+  // The unscheduled case is reported as unscheduled rather than as driftMs:0.
+  // Those are different claims: one says the commit landed on the bar line it
+  // targeted, the other says there was no bar line at all. Collapsing them would
+  // make a listener that never aligned look perfectly aligned, and would stop an
+  // agent re-anchoring a system that needs it.
+  function recordObservation(observation) {
+    if (sync()) {
+      sync().observe(observation);
+    }
+    updateSyncStatusUI();
+    postSyncResult(observation);
+  }
+
+  // postSyncResult sends one observation to POST /api/sync-result so an agent can
+  // read it back from GET /api/state.
+  //
+  // Without it the drift was measured, shown to whoever was looking at the tab,
+  // and discarded -- so the drift visibility the docs promised was reachable only
+  // by a human, and an agent could not know when re-anchoring was needed.
+  //
+  // The body is built from the observation object itself rather than from
+  // variables reconstructed here, so the number reported to the server is
+  // provably the number the client measured and painted.
+  //
+  // A failure is warned about and swallowed for the same reason postEvalResult's
+  // is: the report is feedback, not part of the audio path, and a server that is
+  // briefly unreachable must not take the music down with it.
+  function postSyncResult(observation) {
+    if (!observation) {
+      return undefined;
+    }
+    var body = { version: observation.version };
+    if (observation.unscheduled) {
+      body.unscheduled = true;
+    } else {
+      // Only a scheduled observation has a bar line to be late against. An
+      // absent driftMs would be refused by the server as claiming nothing at
+      // all, which is the correct answer to a measurement that did not happen.
+      if (typeof observation.driftMs !== "number") {
+        console.warn("[session] scheduled commit produced no drift measurement; not reporting it");
+        return undefined;
+      }
+      body.driftMs = Math.round(observation.driftMs);
+      if (typeof observation.targetMs === "number") {
+        body.targetMs = Math.round(observation.targetMs);
+        body.actualMs = Math.round(observation.actualMs);
+      }
+    }
+    return fetch(SYNC_RESULT_PATH, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).catch(function (err) {
+      console.warn("[session] failed to report sync result:", err);
+    });
   }
 
   // The commit itself, plus everything that describes it: the viz hook, the log
@@ -811,6 +885,13 @@
     // property that matters most — that it never commits to the live repl.
     dryRunCandidate: dryRunCandidate,
     scheduleCommit: scheduleCommit,
+    // recordObservation and postSyncResult are exposed so the headless harness can
+    // prove an observation actually REACHES the server. Calling the renderer and
+    // asserting it looked right is the mistake this bead exists to correct: drift
+    // was painted into #sync-status for months and no test noticed it never left
+    // the browser, because every test of it stopped at the display.
+    recordObservation: recordObservation,
+    postSyncResult: postSyncResult,
     getLastVersion: function () { return lastVersion; },
     getCurrentPattern: function () { return currentPattern; },
     getPendingCommit: function () { return pendingCommit; },

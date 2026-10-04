@@ -85,6 +85,76 @@ type EvalResult struct {
 	SamplesResolved *bool `json:"samplesResolved,omitempty"`
 }
 
+// ErrInvalidSyncObservation is returned by RecordSyncObservation when a report
+// does not make exactly one claim: neither a measured drift nor "unscheduled",
+// or both at once.
+//
+// The rule lives in the Conductor rather than only in the HTTP handler, for the
+// same reason normalizeStats does: an invariant enforced at one call site is
+// enforced once. And it is a real rule rather than pedantry. A report carrying
+// neither would store as a successful observation while claiming nothing at all
+// -- which is precisely the shape of the original defect, where the browser
+// measured drift and dropped it. A report carrying both asserts that the commit
+// landed on a bar line AND that there was no bar line, and the honest response to
+// that is to refuse it rather than pick a winner.
+var ErrInvalidSyncObservation = errors.New("a sync report must carry exactly one of driftMs or unscheduled")
+
+// SyncObservation is one browser's measurement of when its commit of a version
+// actually landed, relative to the shared bar grid (strudel-agent-uvj.15).
+//
+// It exists because drift was measured in the browser, painted into #sync-status
+// and then dropped: the only outbound call in any browser asset was the
+// eval-result POST. README and AGENT_API.md both presented drift as the signal
+// that drives recovery, so an agent driving over HTTP could not observe any of
+// it and could not know when to re-anchor.
+//
+// It is deliberately NOT part of EvalResult. Drift is a property of a COMMIT at
+// a bar and is measured at a different instant from an evaluation; the two also
+// have different lifetimes, since an observation can arrive after the version it
+// describes has been superseded. Folding it into the verdict would make one
+// stored value describe two moments.
+//
+// DriftMS is a POINTER, and that is the load-bearing part of the type. There are
+// three distinct facts and all three must survive:
+//
+//	nil  Unscheduled is false and no drift was measured -- NOT YET, which is not
+//	     the same claim as a measured zero
+//	&0   the commit landed exactly on the bar line it targeted
+//	&n   the commit landed n ms after that line
+//
+// A plain int64 cannot express the first two apart, and collapsing them makes a
+// browser that has not committed yet indistinguishable from one that is
+// perfectly aligned -- a silent system reading as a healthy one.
+//
+// EpochMS is the SERVER's receipt stamp, not the browser's clock. The browser
+// has already demonstrated that its clock disagrees with the server's (that is
+// what drift is), so stamping with the reporter's time would make freshness
+// unreadable. An agent compares it against its own reads of the server clock.
+type SyncObservation struct {
+	// Version is the published version whose commit this describes.
+	Version int64 `json:"version"`
+
+	// DriftMS is the measured lateness against the targeted bar line, or nil when
+	// Unscheduled is true.
+	DriftMS *int64 `json:"driftMs,omitempty"`
+
+	// Unscheduled records that there was NO usable anchor, so the browser
+	// committed immediately and claimed no bar position at all. See the type
+	// comment for why this is not driftMs:0.
+	Unscheduled bool `json:"unscheduled,omitempty"`
+
+	// TargetMS and ActualMS are the browser's own boundary arithmetic, carried so
+	// an agent can see WHICH bar line the measurement was taken against. They are
+	// diagnostic context; the bar grid itself is the shared anchor.
+	TargetMS int64 `json:"targetMs,omitempty"`
+	ActualMS int64 `json:"actualMs,omitempty"`
+
+	// EpochMS is the server's receipt time in epoch milliseconds, stamped on
+	// store. A browser-supplied value is deliberately not accepted for this: see
+	// the type comment.
+	EpochMS int64 `json:"epochMs"`
+}
+
 // Version is a single published revision of the live code document.
 type Version struct {
 	Version int64  `json:"version"`
@@ -125,6 +195,13 @@ type Snapshot struct {
 	ListenerCount    int           `json:"listenerCount"`
 	LastEvalResult   *EvalResult   `json:"lastEvalResult"`
 	Agent            AgentPresence `json:"agent"`
+
+	// LastSync is the most recent drift observation any listener reported, or nil
+	// if none ever has. It is a POINTER for the same reason Agent is a value and
+	// LastEvalResult is a pointer: Snapshot must not expose mutable internal
+	// state, and the nil/absent case is a fact of its own ("nothing observed
+	// yet") rather than a zero value. See SyncObservation.
+	LastSync *SyncObservation `json:"lastSync"`
 }
 
 // Conductor owns the single live performance. It is safe for concurrent use:
@@ -147,6 +224,12 @@ type Conductor struct {
 	listeners int
 
 	lastEval *EvalResult
+
+	// lastSync is the newest drift observation a listener reported. Like
+	// lastEval it is a verdict-adjacent fact about the performance rather than
+	// part of the document: it never increments the version and never enters
+	// history.
+	lastSync *SyncObservation
 
 	// agentLastSeenMS is the lease: when an agent last proved it was alive.
 	// 0 means no agent has ever been seen. There is deliberately no companion
@@ -510,6 +593,83 @@ func (c *Conductor) RecordEvalResult(res EvalResult) (bool, error) {
 	return true, nil
 }
 
+// RecordSyncObservation stores one browser's measurement of where its commit of
+// a version landed (strudel-agent-uvj.15).
+//
+// Three properties are load-bearing and each is easy to undo by accident:
+//
+//  1. It NEVER touches the version, the code document or the history. An
+//     observation is evidence about a commit that has already happened; storing
+//     it as though it were a document would put a second entry for one push in
+//     the history and make a commit look like an edit.
+//  2. The newest ARRIVAL wins, unconditionally -- including an observation
+//     naming an OLDER version than the newest one stored. This is a deliberate
+//     asymmetry with RecordEvalResult, which discards a stale verdict so a
+//     straggling client cannot regress the agent's view of the code. The two
+//     facts are not comparable: a verdict is about the document, and the newest
+//     verdict is the one the agent wants; an observation is about WHEN a
+//     listener's commit landed, and a listener that committed version 1 late can
+//     perfectly well report that after version 2 was published. Discarding it
+//     would drop the exact evidence an agent needs to know the audience is
+//     drifting.
+//  3. The report must make EXACTLY ONE claim. See ErrInvalidSyncObservation.
+//
+// The stored copy is deep: the caller's *int64 does not alias it, and neither
+// does anything a later Snapshot hands out.
+func (c *Conductor) RecordSyncObservation(obs SyncObservation) error {
+	// Body validation BEFORE version validation, both are 400s to the caller, so
+	// the order is only visible in the message -- and a report wrong in two ways
+	// should be diagnosed by the check the sender can act on.
+	if err := validateSyncObservation(obs); err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if obs.Version <= 0 || obs.Version > c.version {
+		return fmt.Errorf("%w: %d (latest is %d)", ErrUnknownVersion, obs.Version, c.version)
+	}
+
+	// The receipt stamp is the SERVER's clock, overwriting anything the reporter
+	// sent: freshness is only comparable against the clock the agent reads
+	// /api/state with.
+	stored := cloneSyncObservation(obs)
+	stored.EpochMS = c.nowMS()
+	c.lastSync = stored
+	return nil
+}
+
+// validateSyncObservation enforces the exactly-one-claim rule. It is separate
+// from the store so the rule reads as one statement of what a valid observation
+// IS, and so the guard cannot drift away from the field it protects.
+//
+// It is written as an equality of the two booleans rather than as two separate
+// refusals, so the "both" case and the "neither" case cannot be handled
+// inconsistently later.
+func validateSyncObservation(obs SyncObservation) error {
+	if (obs.DriftMS != nil) == obs.Unscheduled {
+		return fmt.Errorf("%w (driftMs present=%t, unscheduled=%t)",
+			ErrInvalidSyncObservation, obs.DriftMS != nil, obs.Unscheduled)
+	}
+	return nil
+}
+
+// cloneSyncObservation deep-copies an observation so neither the reporter nor a
+// snapshot holder can write through the *int64 drift into Conductor internals.
+//
+// This is the same reason cloneEvalResult copies Stats and SamplesResolved: the
+// write would succeed, so nothing would report it, and the next reader would see
+// a value nobody measured.
+func cloneSyncObservation(obs SyncObservation) *SyncObservation {
+	cp := obs
+	if obs.DriftMS != nil {
+		d := *obs.DriftMS
+		cp.DriftMS = &d
+	}
+	return &cp
+}
+
 // cloneBool copies a tri-state pointer so a stored verdict never aliases the
 // report it came from. nil is UNKNOWN and stays nil — that is the whole point of
 // the tri-state, so this must not be written as "return &*in".
@@ -578,6 +738,7 @@ func (c *Conductor) snapshotLocked() Snapshot {
 		Playing:          c.playing,
 		ListenerCount:    c.listeners,
 		LastEvalResult:   cloneEvalResult(c.lastEval),
+		LastSync:         cloneSyncObservationPtr(c.lastSync),
 		// Derived here rather than stored, so every snapshot is consistent with
 		// the instant it was built. c.nowMS is called under the lock the caller
 		// already holds, so the timestamp cannot drift mid-snapshot.
@@ -598,6 +759,21 @@ func cloneEvalResult(res *EvalResult) *EvalResult {
 	// sees. The shallow struct copy above aliased it.
 	cp.SamplesResolved = cloneBool(res.SamplesResolved)
 	return &cp
+}
+
+// cloneSyncObservationPtr is cloneSyncObservation at the pointer level, for the
+// Snapshot path where the stored value may legitimately be nil ("nothing
+// observed yet"). It is kept beside the value clone so the nil case and the
+// copy case are one function's business rather than two callers'.
+//
+// It matters that a snapshot gets a FRESH allocation every time. Handing back
+// the stored pointer would make two successive snapshots alias one another, so a
+// caller mutating the first would silently rewrite the second's evidence.
+func cloneSyncObservationPtr(obs *SyncObservation) *SyncObservation {
+	if obs == nil {
+		return nil
+	}
+	return cloneSyncObservation(*obs)
 }
 
 // cloneRawMessage copies opaque JSON so returned bytes never alias the stored

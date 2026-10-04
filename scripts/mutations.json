@@ -56,8 +56,8 @@
   {
     "name": "10-eval-ack-lies",
     "file": "srv/api.go",
-    "old": "apiEvalAck{Accepted: true, Version: req.Version}",
-    "new": "apiEvalAck{Accepted: false, Version: req.Version}"
+    "old": "writeJSON(w, http.StatusOK, apiEvalAck{Accepted: true, Version: req.Version})\n}\n\n// anchorRequest",
+    "new": "writeJSON(w, http.StatusOK, apiEvalAck{Accepted: false, Version: req.Version})\n}\n\n// anchorRequest"
   },
   {
     "name": "11-message-bumps-version",
@@ -1135,5 +1135,82 @@
     "old": "\treturn fmt.Errorf(\"timed out waiting for a verdict for version %d: no browser reported one \"+\n\t\t\"(that version is still unevaluated)\", want)",
     "new": "\treturn usagef(\"timed out waiting for a verdict for version %d: no browser reported one \"+\n\t\t\"(that version is still unevaluated)\", want) // deliberately: exit 2 mislabels a valid command line as a caller mistake",
     "run": "TestWaitTimesOutWithTheVersionItWasWaitingFor|TestWaitDoesNotWeakenTheExitCodeContract"
+  },
+  {
+    "name": "169-sync-report-is-never-sent",
+    "file": "srv/static/session.js",
+    "old": "    updateSyncStatusUI();\n    postSyncResult(observation);",
+    "new": "    updateSyncStatusUI();\n    // deliberately: this is the original defect -- drift measured, painted, dropped\n    void postSyncResult;",
+    "run": "TestDriftReachesTheServerOverTheWire"
+  },
+  {
+    "name": "170-unscheduled-commit-is-flattened-to-zero-drift",
+    "file": "srv/static/session.js",
+    "old": "    if (observation.unscheduled) {\n      body.unscheduled = true;\n    } else {",
+    "new": "    if (observation.unscheduled) {\n      body.driftMs = 0;\n    } else {",
+    "run": "TestUnscheduledCommitIsReportedNotFlattened"
+  },
+  {
+    "name": "171-sync-report-sent-on-arrival-before-the-drift-exists",
+    "file": "srv/static/session.js",
+    "old": "    pendingCommit = scheduleCommit(function () {",
+    "new": "    postSyncResult({ version: version, driftMs: 0 });\n    pendingCommit = scheduleCommit(function () {",
+    "run": "TestDriftReachesTheServerOverTheWire"
+  },
+  {
+    "name": "172-sync-report-uses-a-hardcoded-zero",
+    "file": "srv/static/session.js",
+    "old": "      body.driftMs = Math.round(observation.driftMs);",
+    "new": "      body.driftMs = 0; // deliberately: a constant passes a field-name check and fails the measured one",
+    "run": "TestDriftReachesTheServerOverTheWire"
+  },
+  {
+    "name": "173-observation-bumps-the-version",
+    "file": "srv/conductor.go",
+    "old": "\tstored := cloneSyncObservation(obs)\n\tstored.EpochMS = c.nowMS()\n\tc.lastSync = stored\n\treturn nil",
+    "new": "\tstored := cloneSyncObservation(obs)\n\tstored.EpochMS = c.nowMS()\n\tc.lastSync = stored\n\tc.version++ // deliberately: an observation is evidence, not a revision\n\treturn nil",
+    "run": "TestSyncResultDoesNotBumpTheVersion|TestRecordSyncObservationStoresWithoutTouchingThePerformance"
+  },
+  {
+    "name": "174-snapshot-aliases-the-stored-observation",
+    "file": "srv/conductor.go",
+    "old": "\treturn cloneSyncObservation(*obs)",
+    "new": "\treturn obs // deliberately: hands the stored pointer to every snapshot holder",
+    "run": "TestSnapshotLastSyncIsCopiedNotAliased"
+  },
+  {
+    "name": "175-absent-drift-serialises-as-zero",
+    "file": "srv/conductor.go",
+    "old": "\tDriftMS *int64 `json:\"driftMs,omitempty\"`",
+    "new": "\tDriftMS *int64 `json:\"driftMs\"` // deliberately: an unscheduled observation now serialises a null drift, and a zero-drift one looks identical to a bare value",
+    "run": "TestUnscheduledObservationIsStoredAsUnscheduled|TestSnapshotLastSyncIsNullUntilAnObservationArrives"
+  },
+  {
+    "name": "176-a-report-claiming-nothing-is-accepted",
+    "file": "srv/conductor.go",
+    "old": "\tif (obs.DriftMS != nil) == obs.Unscheduled {",
+    "new": "\tif false {",
+    "run": "TestRecordSyncObservationRequiresExactlyOneClaim"
+  },
+  {
+    "name": "177-stale-observation-is-discarded",
+    "file": "srv/conductor.go",
+    "old": "\tif obs.Version <= 0 || obs.Version > c.version {\n\t\treturn fmt.Errorf(\"%w: %d (latest is %d)\", ErrUnknownVersion, obs.Version, c.version)\n\t}",
+    "new": "\tif obs.Version <= 0 || obs.Version > c.version {\n\t\treturn fmt.Errorf(\"%w: %d (latest is %d)\", ErrUnknownVersion, obs.Version, c.version)\n\t}\n\tif c.lastSync != nil && obs.Version < c.lastSync.Version {\n\t\treturn nil // deliberately: applies the verdict's staleness rule to a fact it does not describe\n\t}",
+    "run": "TestTheNewestObservationWinsRegardlessOfVersion"
+  },
+  {
+    "name": "178-refused-sync-report-is-broadcast",
+    "file": "srv/api.go",
+    "old": "\tif err := s.Conductor.RecordSyncObservation(obs); err != nil {\n\t\twriteError(w, http.StatusBadRequest, err.Error())\n\t\treturn\n\t}",
+    "new": "\tif err := s.Conductor.RecordSyncObservation(obs); err != nil {\n\t\twriteError(w, http.StatusBadRequest, err.Error())\n\t}\n\t// deliberately: falls through to broadcast a measurement the server refused",
+    "run": "TestSyncResultBroadcastsItsOwnFrameAndNothingOnRefusal"
+  },
+  {
+    "name": "179-observation-epoch-comes-from-the-reporter",
+    "file": "srv/conductor.go",
+    "old": "\tstored.EpochMS = c.nowMS()",
+    "new": "\t// deliberately: keeps whatever the reporter sent, so freshness is read against a clock the agent cannot see",
+    "run": "TestRecordSyncObservationStoresWithoutTouchingThePerformance"
   }
 ]

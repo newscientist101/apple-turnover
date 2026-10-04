@@ -266,7 +266,36 @@ func cmdState(ctx context.Context, c *client, args []string, out, stderr io.Writ
 	} else {
 		fmt.Fprintf(out, "last eval:      none yet\n")
 	}
+	// The drift row is ADDED, never a rewording, for the same reason the samples
+	// row is: it exists because drift was measured in the browser and thrown away,
+	// so `state` could not tell an agent when to re-anchor. All three states print
+	// distinctly, and UNKNOWN says nothing has been observed rather than borrowing
+	// a zero that would read as "perfectly aligned".
+	fmt.Fprintf(out, "drift:          %s\n", driftLine(snap.LastSync))
 	return verdictFailure(*requireCurrent, *snap)
+}
+
+// driftLine renders the three states of lastSync as three distinct words.
+//
+// The absent case is the one that matters. An observation that has never been
+// made and an observation of zero drift are different facts, and printing
+// either as "0ms" would tell an agent a system nobody has measured is
+// perfectly aligned -- which is the exact failure this bead exists to remove.
+func driftLine(obs *syncObservation) string {
+	switch {
+	case obs == nil:
+		return "none observed yet -- no listener has committed, so nothing is known about alignment"
+	case obs.Unscheduled:
+		return "UNSCHEDULED -- a listener committed with no usable anchor and claimed no bar position; re-anchor"
+	case obs.DriftMS == nil:
+		// Unreachable through the wire, since the server refuses a report
+		// carrying neither claim. It is named rather than folded into a zero so
+		// that a future server which relaxed the rule cannot make this command
+		// quietly claim a measurement nobody made.
+		return "UNKNOWN -- the report claimed neither a drift nor an unscheduled commit"
+	default:
+		return fmt.Sprintf("+%dms on version %d (bar line %d, landed %d)", *obs.DriftMS, obs.Version, obs.TargetMS, obs.ActualMS)
+	}
 }
 
 // codeRequest is the documented POST /api/code body. Message is omitempty so an

@@ -1864,6 +1864,71 @@ func TestStateReportsSampleResolution(t *testing.T) {
 	})
 }
 
+// TestStateReportsDrift pins the row that makes drift reachable from the CLI at
+// all (strudel-agent-uvj.15). Before this, the drift row did not exist and the
+// browser's measurement never reached the server, so no `state` invocation could
+// have shown it.
+//
+// The three cases are the whole point and are asserted separately, because the
+// failure mode is a collapse: a system nobody has measured must not read like one
+// measured as perfect.
+func TestStateReportsDrift(t *testing.T) {
+	// pushThen pushes a version and returns its number, since a drift report has
+	// to name a published one.
+	pushThen := func(t *testing.T, base string) int64 {
+		t.Helper()
+		if got := runCLI(t, base, `s("bd")`, "push"); got.code != exitOK {
+			t.Fatalf("setup push: exit %d, stderr %q", got.code, got.stderr)
+		}
+		return latestVersionFrom(t, base)
+	}
+
+	t.Run("no observation is not zero drift", func(t *testing.T) {
+		base := newTestServer(t)
+		pushThen(t, base)
+		got := runCLI(t, base, "", "state")
+		if !strings.Contains(got.stdout, "drift:          none observed yet") {
+			t.Errorf("state did not say that no drift has been observed; an unmeasured system must not read as an aligned one\nstdout:\n%s", got.stdout)
+		}
+		// The dangerous form: a bare number with nothing before it.
+		if strings.Contains(got.stdout, "drift:          0ms") {
+			t.Errorf("state printed a bare zero drift for an unmeasured system\nstdout:\n%s", got.stdout)
+		}
+	})
+
+	t.Run("measured drift names the version and the bar line", func(t *testing.T) {
+		base := newTestServer(t)
+		v := pushThen(t, base)
+		body := fmt.Sprintf(`{"version":%d,"driftMs":12,"targetMs":1757000002025,"actualMs":1757000002037}`, v)
+		if code, raw := postJSON(t, base, "/api/sync-result", body); code != http.StatusOK {
+			t.Fatalf("POST /api/sync-result %s = %d %s", body, code, raw)
+		}
+		got := runCLI(t, base, "", "state")
+		if !strings.Contains(got.stdout, "+12ms") {
+			t.Errorf("state did not report the observed drift\nstdout:\n%s", got.stdout)
+		}
+		if !strings.Contains(got.stdout, "on version 1") {
+			t.Errorf("state did not say which version the drift describes\nstdout:\n%s", got.stdout)
+		}
+	})
+
+	t.Run("unscheduled is not flattened to a drift of zero", func(t *testing.T) {
+		base := newTestServer(t)
+		v := pushThen(t, base)
+		body := fmt.Sprintf(`{"version":%d,"unscheduled":true}`, v)
+		if code, raw := postJSON(t, base, "/api/sync-result", body); code != http.StatusOK {
+			t.Fatalf("POST /api/sync-result %s = %d %s", body, code, raw)
+		}
+		got := runCLI(t, base, "", "state")
+		if !strings.Contains(got.stdout, "UNSCHEDULED") {
+			t.Errorf("state did not report the unscheduled commit; a listener that never aligned must not read as aligned\nstdout:\n%s", got.stdout)
+		}
+		if strings.Contains(got.stdout, "+0ms") {
+			t.Errorf("an unscheduled commit printed as a zero drift\nstdout:\n%s", got.stdout)
+		}
+	})
+}
+
 // TestStateJSONIsUntouchedByTheSampleRow keeps -json a pure pass-through. The row
 // is prose, and a caller parsing the snapshot must get the snapshot — a CLI that
 // decorated its JSON would break every scripted agent for the sake of a human

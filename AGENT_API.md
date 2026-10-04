@@ -31,11 +31,12 @@ All `/api` failures use exactly:
 | `POST /api/heartbeat` | [no body](#post-apiheartbeat) | snapshot | no |
 | `POST /api/dry-run` | [dryRunRequest](#post-apidry-run) | [dryRunVerdict](#post-apidry-run) | no |
 | `POST /api/dry-run-result` | [dryRunResultRequest](#post-apidry-run-result) | [evalAck](#post-apidry-run-result) | no |
+| `POST /api/sync-result` | [syncResultRequest](#post-apisync-result) | [evalAck](#post-apisync-result) | no |
 | `GET /ws` | WebSocket upgrade | JSON listener frames | no |
 | `GET /` | none | HTML page | no |
 | `/static/` | none | static assets | no |
 
-Every accepted write returns the resulting snapshot except `/api/eval-result`, which returns `{accepted,version}`, and the two dry-run endpoints, which return a verdict rather than state: `/api/dry-run` returns the browser's verdict on a candidate it did not publish, and `/api/dry-run-result` returns an acknowledgement because nothing changed. A successful write does not create a new URL, so responses are `200`, not `201`.
+Every accepted write returns the resulting snapshot except `/api/eval-result`, which returns `{accepted,version}`, and the three browser-report endpoints, which acknowledge rather than return state: the two dry-run endpoints (`/api/dry-run` returns the browser's verdict on a candidate it did not publish; `/api/dry-run-result` returns an acknowledgement because nothing changed) and `/api/sync-result`, whose stored observation is read back from `lastSync` on `GET /api/state`. A successful write does not create a new URL, so responses are `200`, not `201`.
 
 ### `POST /api/code`
 
@@ -92,6 +93,54 @@ Answers `{accepted,version}` like `/api/eval-result`. Every connected listener e
 
 `samplesResolved` is the same tri-state as on `/api/eval-result` — `true`, `false`, or absent for UNKNOWN — and the two endpoints resolve identically on purpose. A browser that answered on one path and stayed silent on the other would give an agent two answers to one question.
 
+### `POST /api/sync-result`
+
+How a browser reports where its commit of a version actually landed. An agent does not call this; it **reads** the result from `lastSync`.
+
+<!-- shape:syncResultRequest -->
+```json
+{"version":7,"driftMs":12,"targetMs":1757000002025,"actualMs":1757000002037}
+```
+
+A browser with no usable anchor sends instead:
+
+```json
+{"version":7,"unscheduled":true}
+```
+
+- `version` is required and must name a published version.
+- **Exactly one** of `driftMs` or `unscheduled` is required. Sending both, or neither, is `400`.
+- `driftMs` is how many milliseconds late the commit landed against the bar line it targeted. It may legitimately be `0`.
+- `targetMs` and `actualMs` are optional context: which bar line the measurement was taken against.
+- `epochMs` is **not accepted**. The server stamps receipt time itself, because the browser's clock is exactly what disagrees with the server's and freshness is only comparable against the clock `GET /api/state` is read with.
+- It never bumps the version and never enters the history. An observation is evidence about a commit, not a new document.
+
+Answers `{accepted,version}` like `/api/eval-result`. Nothing is stored that the report does not earn: a refused report is not kept and **broadcasts nothing**.
+
+#### Why drift has its own endpoint
+
+It is tempting to fold `driftMs` into the existing `/api/eval-result` `stats`, which needs no new route at all. That does not work, and the reason is ordering rather than taste.
+
+The browser POSTs its eval verdict **immediately after arming** the bar-line timer; the drift is not known until that timer **fires**, which is later. So a verdict carrying its own drift could only be sent twice for one version — and the second POST would overwrite the agent's verdict with a report about a different subject. The alternative, delaying the verdict until the commit lands, stalls the agent's feedback loop behind a bar line.
+
+Drift is a property of a **commit at a bar**; an evaluation is not. They are measured at different instants and have different lifetimes: an observation can arrive after the version it describes has been superseded, and it is stored even then. That is also why an observation naming an **older** version is kept where a stale *verdict* would be discarded.
+
+#### Reading drift
+
+Read `lastSync`. All three of these states are distinct, and the third is the one a naive reader collapses:
+
+| `lastSync` | Meaning |
+|---|---|
+| `null` | No listener has reported an observation **yet**. Nothing is known about drift — which is not the same as everything being fine. |
+| `{"unscheduled":true}` | A browser committed with **no usable anchor**, so it claimed no bar position at all. Alignment was not attempted. |
+| `{"driftMs":0}` | A commit landed **exactly** on the bar line it targeted. This is the healthy reading. |
+
+Treat `lastSync:null` as unknown, never as zero. A system that has never reported is indistinguishable from a healthy one if you fold the two, and that is how a silently broken audience keeps looking fine.
+
+**It describes one reporting browser, not the audience.** Every listener measures its own commit against the shared anchor and the server keeps the **most recent** report, so `lastSync` is the answer of whichever browser reported last. Listeners can be in materially different states — one machine's event loop may be 200 ms behind another's — so with more than one listener this is an observation, not a guarantee. Per-listener drift needs listener identity, which this API does not have. Re-anchoring on a large single-listener reading is the documented recovery for drift; with several listeners, treat one browser's number as a floor rather than the spread.
+
+Use `epochMs` on the observation to judge freshness: it is the server's receipt time, so compare it against your own reads rather than against the browser's clock.
+
 ### `POST /api/message`
 
 Narration only.
@@ -131,7 +180,7 @@ This system provides **bar-aligned, not sample-accurate, cross-machine synchroni
 
 Strudel's `NeoCyclist` does not provide a cross-machine audio clock. The application's synchronization mechanism is the shared anchor plus a client commit deferred to the next cycle boundary. Re-anchoring is the recovery mechanism for drift.
 
-The browser reports observed drift. Without a usable anchor it reports `unscheduled` rather than inventing a bar position.
+The browser reports observed drift to `POST /api/sync-result`, and you read it from `lastSync` on `GET /api/state`. Without a usable anchor it reports `unscheduled` rather than inventing a bar position. See [Reading drift](#reading-drift) — in particular, `lastSync:null` means nothing has been observed yet, which is not the same as zero drift.
 
 Do not describe the system as lockstep or sample-accurate.
 
@@ -216,7 +265,8 @@ This is liveness, not a session. The server cannot distinguish an agent that cra
   "playing":true,
   "listenerCount":3,
   "lastEvalResult":null,
-  "agent":{"active":true,"lastSeenMs":1757000000123}
+  "agent":{"active":true,"lastSeenMs":1757000000123},
+  "lastSync":null
 }
 ```
 
@@ -232,6 +282,7 @@ This is liveness, not a session. The server cannot distinguish an agent that cra
 | `lastEvalResult` | Stored browser verdict, or `null` before one is stored |
 | `agent.active` | Whether an agent heartbeat landed within the TTL |
 | `agent.lastSeenMs` | Server timestamp of the last heartbeat; `0` if no agent has ever connected |
+| `lastSync` | Newest listener drift observation, or `null` before one is reported. See [Reading drift](#reading-drift) |
 
 `anchor.cps` defaults to `0.5` cycles per second. `history` is bounded at 32 versions.
 
@@ -285,6 +336,16 @@ Step 4 has CLI support: `agentcli wait -version N` polls `GET /api/state` until 
 - **They do not heartbeat for you.** There is no `agentcli heartbeat` command, so a wait long enough to outlast the 15-second lease still needs your own `POST /api/heartbeat`. Keep the wait inside the lease, or beat on it from elsewhere.
 
 The push response proves only that the document was stored. It is not an evaluation result. With no connected listener, no verdict will arrive.
+
+### When to re-anchor
+
+Re-anchoring is the documented recovery for drift, and step 5 is where you act on it. Read `lastSync`:
+
+- **`null`** — nothing observed yet. A browser that has not committed tells you nothing; this is not a healthy reading.
+- **`unscheduled:true`** — a listener committed with no usable anchor. Re-anchor.
+- **a large `driftMs`** — listeners are landing late against the bar grid. `POST /api/anchor` replaces the shared timeline and is what pulls them back onto it.
+
+A small `driftMs` is normal; bar alignment reduces drift, it cannot eliminate it, since there is no cross-machine sample clock. The number that should worry you is one that **grows** across successive pushes, because that is a listener falling behind the grid rather than jittering around it. With several listeners, remember `lastSync` is the newest report from one browser, not the spread — see [Reading drift](#reading-drift).
 
 If you would rather not publish a candidate until it is known to evaluate, `POST /api/dry-run` evaluates it without publishing: step 3 becomes a dry-run, and only a candidate that comes back `ok:true` is worth sending to `/api/code`. It leaves `version`, `history` and `lastEvalResult` untouched, so a broken candidate never becomes the published document. It needs a connected browser just as much as a push does — with none, it is `409` — and it is bounded, returning `504` rather than waiting forever.
 
@@ -351,10 +412,13 @@ The candidate is here rather than in the snapshot precisely because it was never
 | `anchor` | Shared timeline changed |
 | `agent` | The agent lease lapsed |
 | `dry-run` | A candidate must be evaluated without being published |
+| `sync` | A listener reported where its commit landed |
 
 `hush` and `play` intentionally share `transport` because listeners care about the resulting `playing` state.
 
 `agent` is sent on exactly one occasion: a **held** lease lapsing. A heartbeat broadcasts nothing, and a server that has never seen an agent never announces one going away, because never-seen is the initial state rather than a transition. A client therefore treats `agent` as "the agent you were watching has gone", and re-reads `agent.active` from the frame rather than inferring the timing itself.
+
+`sync` is the opposite direction of information from `anchor`. An `anchor` frame is a command every listener must obey; a `sync` frame is evidence coming back that the shared grid did or did not hold. Do not treat one as the other: re-anchoring because some listener was 12 ms late would be noise, and ignoring a large reading because no anchor changed would lose the only recovery signal there is. A refused sync report broadcasts nothing, so a `sync` frame always describes a measurement the server actually stored.
 
 ### Subscribe, then snapshot
 

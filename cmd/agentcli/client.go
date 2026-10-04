@@ -82,6 +82,25 @@ type snapshot struct {
 	Playing          bool        `json:"playing"`
 	ListenerCount    int         `json:"listenerCount"`
 	LastEvalResult   *evalResult `json:"lastEvalResult"`
+
+	// LastSync is the newest drift observation a listener reported, or nil when
+	// none ever has. The POINTER is the whole point, exactly as SamplesResolved
+	// is: nil means UNKNOWN (nothing has been observed yet) and must never be
+	// rendered as a drift of zero, or `state` would print a confident healthy
+	// row over a system nobody has measured.
+	LastSync *syncObservation `json:"lastSync"`
+}
+
+// syncObservation mirrors the server's SyncObservation. DriftMS is a pointer for
+// the same reason: a measured zero and an absent measurement are different
+// claims, and unscheduled means no bar line existed at all.
+type syncObservation struct {
+	Version     int64  `json:"version"`
+	DriftMS     *int64 `json:"driftMs,omitempty"`
+	Unscheduled bool   `json:"unscheduled,omitempty"`
+	TargetMS    int64  `json:"targetMs,omitempty"`
+	ActualMS    int64  `json:"actualMs,omitempty"`
+	EpochMS     int64  `json:"epochMs"`
 }
 
 type anchor struct {

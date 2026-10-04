@@ -27,7 +27,7 @@ const dryRunPrelude = sessionJSPrelude + `
 window.__fetches = [];
 var fetch = function (path, init) {
   window.__fetches.push({ path: path, body: init && init.body ? JSON.parse(init.body) : null });
-  return { then: function (cb) { return { catch: function () {} }; } };
+  return apiStub();
 };
 // A sandbox whose evaluate outcome the test chooses, and which RECORDS that it
 // was called — the two things a dry-run test needs to assert on.

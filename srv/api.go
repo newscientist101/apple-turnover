@@ -87,6 +87,15 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/dry-run-result", s.handleAPIDryRunResult)
 	mux.HandleFunc("/api/dry-run-result", methodNotAllowed(http.MethodPost))
 
+	// Drift reporting: how a listener tells the server where its commit landed
+	// (strudel-agent-uvj.15). Like /api/dry-run-result this is a report only a
+	// browser sends, and like /api/eval-result it answers with an ack rather than
+	// a snapshot -- but unlike either, an agent READS the stored observation back
+	// from GET /api/state, because drift is what an agent uses to decide whether
+	// to re-anchor.
+	mux.HandleFunc("POST /api/sync-result", s.handleAPISyncResult)
+	mux.HandleFunc("/api/sync-result", methodNotAllowed(http.MethodPost))
+
 	// The listener WebSocket. It follows the /api idiom above rather than
 	// letting net/http answer: the bare pattern is the wrong-verb fallback (405
 	// plus Allow), while a WebSocket request without valid upgrade headers is
@@ -437,6 +446,71 @@ func (s *Server) handleAPIDryRunResult(w http.ResponseWriter, r *http.Request) {
 	// to report. It mirrors apiEvalAck's shape for the same reason -- a browser
 	// needs to know its report landed, not what the performance now looks like.
 	writeJSON(w, http.StatusOK, apiEvalAck{Accepted: true, Version: req.DryRunID})
+}
+
+// syncResultRequest is the POST /api/sync-result body: how a browser reports
+// where its commit of a version actually landed (strudel-agent-uvj.15).
+//
+// It mirrors SyncObservation except for epochMs, which the SERVER stamps on
+// store. A browser-supplied receipt time would be unreadable: the browser's
+// clock is precisely what disagrees with the server's, and freshness is only
+// comparable against the clock the agent reads /api/state with.
+//
+// DriftMS is *int64 rather than int64 so "no drift measured" and "measured zero"
+// stay apart on the wire; see the SyncObservation type comment for why that
+// distinction is the whole point of the field.
+type syncResultRequest struct {
+	Version     int64  `json:"version"`
+	DriftMS     *int64 `json:"driftMs,omitempty"`
+	Unscheduled bool   `json:"unscheduled,omitempty"`
+	TargetMS    int64  `json:"targetMs,omitempty"`
+	ActualMS    int64  `json:"actualMs,omitempty"`
+}
+
+// handleAPISyncResult records a listener's drift observation and publishes it.
+//
+// The endpoint exists because measured drift never left the browser: the client
+// computed it, painted it into #sync-status and dropped it, so the drift
+// visibility README and AGENT_API.md promised was reachable only by a human
+// looking at the tab. An agent could not tell when listeners had drifted apart
+// and so could not know when to re-anchor, which is the documented recovery
+// mechanism.
+//
+// It is deliberately its own report rather than a field on /api/eval-result.
+// applyVersion POSTs the eval verdict immediately after ARMING the boundary
+// timer, so at that instant the drift does not exist yet; folding it in would
+// mean stalling the agent's feedback loop behind a bar line, or POSTing one
+// version twice and letting the second POST overwrite the verdict. Drift is
+// measured about a COMMIT, at a bar, at a different instant from an evaluation.
+//
+// An ack, not a snapshot, for the same reason as the dry-run report: the browser
+// needs to know its measurement landed. The observation itself is read from
+// GET /api/state, which is the agent's path.
+func (s *Server) handleAPISyncResult(w http.ResponseWriter, r *http.Request) {
+	var req syncResultRequest
+	if err := decodeBody(r, &req); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+
+	obs := SyncObservation{
+		Version:     req.Version,
+		DriftMS:     req.DriftMS,
+		Unscheduled: req.Unscheduled,
+		TargetMS:    req.TargetMS,
+		ActualMS:    req.ActualMS,
+	}
+	if err := s.Conductor.RecordSyncObservation(obs); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Broadcast only after the store accepted, like every other accepted
+	// mutation here. A listener told about a measurement the server refused would
+	// be describing drift that does not exist.
+	s.broadcast(EventSync, s.Conductor.Snapshot())
+
+	writeJSON(w, http.StatusOK, apiEvalAck{Accepted: true, Version: req.Version})
 }
 
 // apiEvalAck is the response to an accepted eval report. The field is named

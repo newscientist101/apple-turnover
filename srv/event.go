@@ -125,6 +125,29 @@ const (
 	//
 	// It never bumps the version and never enters history.
 	EventDryRun = "dry-run"
+
+	// EventSync is a drift observation one listener measured about its own commit
+	// (POST /api/sync-result, strudel-agent-uvj.15).
+	//
+	// It is its own kind, and NOT a fold into EventAnchor, because it is the
+	// opposite direction of information. An anchor is a command the server issues
+	// and every listener must obey; a sync observation is evidence coming back
+	// that the shared grid did or did not hold. A client that treated one as the
+	// other would either re-anchor because some listener was 12ms late, or ignore
+	// a real drift because no anchor had changed -- and the second is the failure
+	// this feature exists to prevent, since an agent that cannot see drift cannot
+	// know when re-anchoring is needed.
+	//
+	// It IS broadcast, unlike EventAgent's heartbeat: a listener seeing how far
+	// its peers actually landed is new information rather than a renewal of
+	// something every listener already believes, and an operator watching any one
+	// tab can otherwise see only their own.
+	//
+	// It never bumps the version, never enters history, and a REFUSED report is
+	// never broadcast -- for the same reason as every other accepted-mutation
+	// rule here: listeners must never be told about a measurement the server did
+	// not store.
+	EventSync = "sync"
 )
 
 // Event is the single frame shape sent to listeners. Snapshot holds the full

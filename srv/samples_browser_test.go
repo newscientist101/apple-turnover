@@ -48,7 +48,7 @@ const samplesPrelude = sessionJSPrelude + `
 window.__fetches = [];
 var fetch = function (path, init) {
   window.__fetches.push({ path: path, body: init && init.body ? JSON.parse(init.body) : null });
-  return { then: function (cb) { return { catch: function () {} }; } };
+  return apiStub();
 };
 
 // The haps the next evaluate() will report, and the outcome it will have.

@@ -69,6 +69,7 @@ The agent uses HTTP; listeners use WebSocket. `/api` request bodies are JSON and
 | `POST /api/heartbeat` | Renew the agent liveness lease (decays after 15s) |
 | `POST /api/dry-run` | Evaluate a candidate in a connected browser without publishing it |
 | `POST /api/dry-run-result` | How a browser answers a dry-run (agents do not call this) |
+| `POST /api/sync-result` | How a browser reports where its commit landed; read back from `lastSync` |
 | `GET /ws` | Listener WebSocket |
 | `GET /` | Browser application |
 | `/static/` | Browser assets |
@@ -111,7 +112,7 @@ agentcli push --dry-run -f candidate.js && agentcli push -f candidate.js
 - **No server-side audio.** The server stores documents and relays state.
 - **Browser-only evaluation.** Invalid Strudel can be accepted by the server and fail only when a browser evaluates it.
 - **Bar-aligned, not sample-accurate.** The shared anchor plus next-cycle commit aligns listeners to bars. Different machines can still differ within a bar.
-- **Residual drift is visible.** The browser reports observed drift and uses `unscheduled` when no usable anchor exists.
+- **Residual drift is visible to the agent, not just to a human.** The browser reports where each commit landed to `POST /api/sync-result`, and an agent reads it from `lastSync` on `GET /api/state` (or `agentcli state`). Without a usable anchor it reports `unscheduled` rather than inventing a bar position, and `lastSync` is `null` — not zero — until some listener has actually committed. It is the newest report from **one** browser, not the spread across listeners.
 - **Re-anchoring is recovery.** `POST /api/anchor` replaces the shared timeline.
 - **No persistence.** Restarting the server resets the performance to version 0 with an empty history.
 - **Network required at page load.** The pinned browser dependencies are not vendored.

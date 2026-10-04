@@ -33,6 +33,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -75,6 +76,82 @@ func newTestServer(t *testing.T) string {
 		t.Fatalf("test server bound %s, the production port; tests must not collide with it", addr)
 	}
 	return "http://" + addr
+}
+
+// newCountingTestServer boots the real handler tree behind a counting proxy and
+// returns its base URL, a counter of GET /api/state requests, plus a bounded
+// cleanup.
+//
+// `wait` is the first command whose cost is its number of READS rather than its
+// output, so "returned immediately" and "kept polling" are claims about how many
+// requests reached the server. Asserting them on a wall clock would be flaky;
+// counting them is exact, and it is the difference between proving the poll loop
+// short-circuits and merely observing that it was quick.
+func newCountingTestServer(t *testing.T) (base string, stateReads *int32) {
+	t.Helper()
+	var reads int32
+	inner := srv.New().Handler()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/state" {
+			atomic.AddInt32(&reads, 1)
+		}
+		inner.ServeHTTP(w, r)
+	}))
+	t.Cleanup(func() {
+		done := make(chan struct{})
+		go func() {
+			ts.Close()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Errorf("httptest.Server.Close did not return within 5s; a handler is wedged")
+		}
+	})
+
+	addr := ts.Listener.Addr().String()
+	if strings.HasSuffix(addr, ":8000") {
+		t.Fatalf("test server bound %s, the production port; tests must not collide with it", addr)
+	}
+	return "http://" + addr, &reads
+}
+
+// idleListener connects a listener that never answers anything.
+//
+// Several `wait` cases need listenerCount > 0 for the RIGHT reason — a browser is
+// connected, it simply has not reported yet — and a bare websocket is the honest
+// way to produce that state. dryRunEvaluator cannot be reused: it answers
+// dry-runs, which is behaviour these tests specifically must not have.
+func idleListener(t *testing.T, base string) func() {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(base, "http") + "/ws"
+	conn, _, err := websocket.Dial(context.Background(), wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial %s: %v", wsURL, err)
+	}
+	// The connection must be held open, or listenerCount drops back to 0 and the
+	// wait under test fails fast for a reason that has nothing to do with the case.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			if _, _, err := conn.Read(ctx); err != nil {
+				cancel()
+				return
+			}
+			cancel()
+		}
+	}()
+	return func() {
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Errorf("the idle-listener goroutine did not stop within 5s")
+		}
+	}
 }
 
 // invocation is one CLI run's observable behaviour.
@@ -1854,4 +1931,485 @@ func latestVersionFrom(t *testing.T, base string) int64 {
 		t.Fatalf("decoding state: %v", err)
 	}
 	return snap.Version
+}
+
+// reportVerdict posts a verdict for a specific version directly, so a test can put
+// the server into a state the CLI itself would not create on demand — a verdict
+// arriving LATER than the wait began is the whole point of the command.
+func reportVerdict(t *testing.T, base string, version int64, ok bool) {
+	t.Helper()
+	body := fmt.Sprintf(`{"version":%d,"ok":%t,"stats":{"haps":2}}`, version, ok)
+	if code, raw := postJSON(t, base, "/api/eval-result", body); code != http.StatusOK {
+		t.Fatalf("POST /api/eval-result %s = %d %s", body, code, raw)
+	}
+}
+
+// verdictArrivingAfter reports a verdict for want after a delay, standing in for a
+// browser that evaluates a little late. The returned channel is closed once the
+// report has landed, so a test can join the goroutine instead of racing it.
+func verdictArrivingAfter(t *testing.T, base string, want int64, ok bool, delay time.Duration) <-chan struct{} {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		time.Sleep(delay)
+		reportVerdict(t, base, want, ok)
+	}()
+	return done
+}
+
+// ---------------------------------------------------------------------------
+// wait (strudel-agent-uvj.13)
+// ---------------------------------------------------------------------------
+
+// TestWaitReturnsImmediatelyWhenTheVerdictIsAlreadyThere proves the common case
+// costs exactly one read.
+//
+// The value is in the COUNT, not the wall clock: a poll loop that slept first and
+// then checked would still "return immediately" under any timing assertion loose
+// enough to keep the suite green, while adding a fixed latency to every agent
+// iteration that already had its answer.
+func TestWaitReturnsImmediatelyWhenTheVerdictIsAlreadyThere(t *testing.T) {
+	base, reads := newCountingTestServer(t)
+	publishVerdictForCurrent(t, base, `s("bd*2")`, true)
+	before := atomic.LoadInt32(reads)
+
+	got := runCLI(t, base, "", "wait")
+
+	if got.code != exitOK {
+		t.Fatalf("wait: exit %d, stdout %q, stderr %q", got.code, got.stdout, got.stderr)
+	}
+	if !strings.Contains(got.stdout, "v1") {
+		t.Errorf("wait did not name the version it waited for\nstdout:\n%s", got.stdout)
+	}
+	if n := atomic.LoadInt32(reads) - before; n != 1 {
+		t.Errorf("wait made %d state reads for an already-present verdict, want exactly 1: "+
+			"the answer was on the first read, so polling past it is wasted budget", n)
+	}
+}
+
+// TestWaitBlocksUntilTheRequestedVerdictArrives is the case the command exists
+// for: the answer is not there yet and turns up later. The stored verdict must be
+// the NEW one, so a wait that woke on the first poll and printed the older verdict
+// would fail here.
+func TestWaitBlocksUntilTheRequestedVerdictArrives(t *testing.T) {
+	base, _ := newCountingTestServer(t)
+	stop := idleListener(t, base)
+	defer stop()
+	publishVerdictForCurrent(t, base, `s("bd*2")`, true)
+	// A second version, so the stored v1 verdict is stale and must NOT satisfy a
+	// wait for v2.
+	if got := runCLI(t, base, `s("hh cp")`, "push"); got.code != exitOK {
+		t.Fatalf("setup second push: exit %d, stderr %q", got.code, got.stderr)
+	}
+
+	// Comfortably longer than one poll interval, so the wait is forced to actually
+	// poll rather than getting lucky on its first read.
+	arrived := verdictArrivingAfter(t, base, 2, false, 300*time.Millisecond)
+
+	got := runCLI(t, base, "", "-timeout", "5s", "wait", "-version", "2")
+	<-arrived
+
+	if got.code != exitOK {
+		t.Fatalf("wait -version 2: exit %d, stdout %q, stderr %q", got.code, got.stdout, got.stderr)
+	}
+	// Asserted on the BODY: an "ok" line over the v1 verdict would be
+	// indistinguishable by exit code alone, which is the whole defect.
+	if !strings.Contains(got.stdout, "v2") || !strings.Contains(got.stdout, "ok=false") {
+		t.Errorf("wait did not report the failing v2 verdict it waited for\nstdout:\n%s", got.stdout)
+	}
+}
+
+// TestWaitNeverAcceptsAnOlderVerdictAsSatisfying is the CRITICAL regression test.
+//
+// The bug this command was written to make impossible is an agent sleeping too
+// little, reading a verdict for the PREVIOUS version and concluding its bad push
+// worked. So the exact state that provokes it — a real verdict, for the wrong
+// (older) version — must NOT end the wait and must not produce a success line.
+func TestWaitNeverAcceptsAnOlderVerdictAsSatisfying(t *testing.T) {
+	base, reads := newCountingTestServer(t)
+	stop := idleListener(t, base)
+	defer stop()
+	publishVerdictForCurrent(t, base, `s("bd*2")`, true) // v1 verdict, ok=true
+	if got := runCLI(t, base, `s("hh cp")`, "push"); got.code != exitOK {
+		t.Fatalf("setup second push: exit %d, stderr %q", got.code, got.stderr)
+	}
+
+	// A short budget: v2 is never evaluated here, so a correct wait spends all of
+	// it and then fails.
+	got := runCLI(t, base, "", "-timeout", "400ms", "wait", "-version", "2")
+
+	if got.code == exitOK {
+		t.Fatalf("wait exited 0 on a verdict for v1 while waiting for v2 — the exact confusion "+
+			"this command exists to prevent\nstdout:\n%s\nstderr:\n%s", got.stdout, got.stderr)
+	}
+	if got.code != exitError {
+		t.Errorf("wait exited %d, want %d (the server did not give the caller what it asked for)",
+			got.code, exitError)
+	}
+	if strings.Contains(got.stdout, "ok=true") {
+		t.Errorf("wait printed the STALE v1 verdict's ok=true as if it were the answer for v2\nstdout:\n%s", got.stdout)
+	}
+	if !strings.Contains(got.stderr, "version 2") {
+		t.Errorf("the failure does not name the version it was still waiting for\nstderr:\n%s", got.stderr)
+	}
+	if n := atomic.LoadInt32(reads); n < 2 {
+		t.Errorf("wait made %d state reads and gave up; an older verdict must not end the wait", n)
+	}
+}
+
+// TestWaitTimesOutWithTheVersionItWasWaitingFor pins the timeout path: non-zero,
+// names the version, and prints NO success line.
+//
+// The last part is the one that matters. A wait that consumed its whole budget and
+// then printed "ok" anyway would be worse than no wait at all, because to anything
+// reading the output it is indistinguishable from a real answer.
+func TestWaitTimesOutWithTheVersionItWasWaitingFor(t *testing.T) {
+	base, _ := newCountingTestServer(t)
+	stop := idleListener(t, base)
+	defer stop()
+	if got := runCLI(t, base, `s("bd*2")`, "push"); got.code != exitOK {
+		t.Fatalf("setup push: exit %d, stderr %q", got.code, got.stderr)
+	}
+
+	got := runCLI(t, base, "", "-timeout", "400ms", "wait")
+
+	if got.code == exitOK {
+		t.Fatalf("wait exited 0 after its timeout with nothing evaluated\nstdout:\n%s\nstderr:\n%s",
+			got.stdout, got.stderr)
+	}
+	// The code is 1, not 2, and this asserts it rather than merely "not 0". The
+	// command line was valid and every request WAS answered — the caller just did
+	// not get what it asked for, which is what 1 already means. Exit 2 would claim
+	// the caller mistyped something, and a script branching on it would send the
+	// agent off to fix a command line that was fine.
+	if got.code != exitError {
+		t.Errorf("a timed-out wait exited %d, want %d\nstderr: %s", got.code, exitError, got.stderr)
+	}
+	if !strings.Contains(got.stderr, "version 1") {
+		t.Errorf("the timeout does not name the version it was waiting for\nstderr:\n%s", got.stderr)
+	}
+	if strings.Contains(got.stdout, "ok=") || strings.Contains(got.stdout, "verdict:") {
+		t.Errorf("wait printed a verdict row on the timeout path; there is no verdict\nstdout:\n%s", got.stdout)
+	}
+}
+
+// TestWaitFailsFastWithNoListenersConnected is the design constraint the bead
+// flags as easy to miss.
+//
+// With nobody listening, no verdict will EVER arrive. Polling to the timeout would
+// burn the caller's whole budget to reach a conclusion available on the first read,
+// and — worse — would report it as a mere timeout, hiding the actual diagnosis
+// behind "try again later".
+//
+// The elapsed-time assertion is what makes this a fail-fast test rather than an
+// "it eventually errored" one: the budget is 3s and the wait must finish well
+// inside it.
+func TestWaitFailsFastWithNoListenersConnected(t *testing.T) {
+	base, _ := newCountingTestServer(t)
+	if got := runCLI(t, base, `s("bd*2")`, "push"); got.code != exitOK {
+		t.Fatalf("setup push: exit %d, stderr %q", got.code, got.stderr)
+	}
+
+	start := time.Now()
+	got := runCLI(t, base, "", "-timeout", "3s", "wait")
+	elapsed := time.Since(start)
+
+	if got.code == exitOK {
+		t.Fatalf("wait exited 0 with no listeners connected\nstdout:\n%s\nstderr:\n%s",
+			got.stdout, got.stderr)
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Errorf("wait took %v against a 3s budget; it must fail fast when no verdict can arrive", elapsed)
+	}
+	if !strings.Contains(strings.ToLower(got.stderr), "listener") {
+		t.Errorf("the failure does not say that no listeners are connected, which is the actual diagnosis\nstderr:\n%s", got.stderr)
+	}
+}
+
+// TestWaitRefusesAVersionTheServerNeverPublished covers a typo'd -version.
+// Versions are monotonic and never reused, so v99 can never exist and no verdict
+// can ever name it: waiting is pointless by construction.
+func TestWaitRefusesAVersionTheServerNeverPublished(t *testing.T) {
+	base, _ := newCountingTestServer(t)
+	stop := idleListener(t, base)
+	defer stop()
+	if got := runCLI(t, base, `s("bd*2")`, "push"); got.code != exitOK {
+		t.Fatalf("setup push: exit %d, stderr %q", got.code, got.stderr)
+	}
+
+	start := time.Now()
+	got := runCLI(t, base, "", "-timeout", "3s", "wait", "-version", "99")
+	elapsed := time.Since(start)
+
+	if got.code == exitOK {
+		t.Fatalf("wait exited 0 waiting for a version that was never published\nstdout:\n%s", got.stdout)
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Errorf("wait took %v; an unpublished version cannot be waited for", elapsed)
+	}
+	if !strings.Contains(got.stderr, "99") {
+		t.Errorf("the failure does not name the version asked for\nstderr:\n%s", got.stderr)
+	}
+}
+
+// TestWaitAcceptsANewerVerdictAndSaysSo covers the one case where "satisfied" is
+// not "about the code you asked about": the performance moved on and a LATER
+// version was evaluated. The wait ends — the caller learns its push is not the live
+// one — but it must not claim the verdict is about the requested version.
+func TestWaitAcceptsANewerVerdictAndSaysSo(t *testing.T) {
+	base, _ := newCountingTestServer(t)
+	stop := idleListener(t, base)
+	defer stop()
+	// v1 and v2 exist; the stored verdict is for v2 while we ask about v1.
+	if got := runCLI(t, base, `s("bd*2")`, "push"); got.code != exitOK {
+		t.Fatalf("setup push 1: exit %d, stderr %q", got.code, got.stderr)
+	}
+	if got := runCLI(t, base, `s("hh cp")`, "push"); got.code != exitOK {
+		t.Fatalf("setup push 2: exit %d, stderr %q", got.code, got.stderr)
+	}
+	reportVerdict(t, base, 2, true)
+
+	got := runCLI(t, base, "", "-timeout", "1s", "wait", "-version", "1")
+	if got.code != exitOK {
+		t.Fatalf("wait -version 1 with a v2 verdict: exit %d, stdout %q, stderr %q",
+			got.code, got.stdout, got.stderr)
+	}
+	if !strings.Contains(got.stdout, "v2") {
+		t.Errorf("wait did not name the version the verdict it returned actually belongs to\nstdout:\n%s", got.stdout)
+	}
+	if !strings.Contains(got.stdout, "v1") {
+		t.Errorf("wait did not say which version was asked for\nstdout:\n%s", got.stdout)
+	}
+}
+
+// TestWaitRefusesWhenNothingHasBeenPublished covers the empty performance.
+//
+// The default -version resolves to whatever is live, which on a fresh server is 0 —
+// and 0 is the EMPTY document, which the server never stores a verdict for. Left
+// alone the caller is told to wait for "version 0", which names no document they
+// pushed and cannot ever be satisfied.
+func TestWaitRefusesWhenNothingHasBeenPublished(t *testing.T) {
+	base, _ := newCountingTestServer(t)
+	got := runCLI(t, base, "", "wait")
+
+	if got.code != exitError {
+		t.Errorf("wait on an empty performance: exit %d, want %d\nstderr: %s", got.code, exitError, got.stderr)
+	}
+	if strings.Contains(got.stderr, "no listeners") {
+		t.Errorf("wait blamed the missing listener on an empty performance; there is nothing to evaluate yet\nstderr: %s", got.stderr)
+	}
+	if !strings.Contains(got.stderr, "nothing has been published") {
+		t.Errorf("the failure does not explain that there is nothing to wait for\nstderr:\n%s", got.stderr)
+	}
+}
+
+// TestWaitJSONModeEmitsTheSnapshot keeps -json a pure pass-through, as `state`
+// established. A wait that decorated its JSON would break the jq pipeline this
+// mode exists for.
+func TestWaitJSONModeEmitsTheSnapshot(t *testing.T) {
+	base, _ := newCountingTestServer(t)
+	publishVerdictForCurrent(t, base, `s("bd*2")`, false)
+
+	got := runCLI(t, base, "", "-json", "wait")
+	if got.code != exitOK {
+		t.Fatalf("wait -json: exit %d, stdout %q, stderr %q", got.code, got.stdout, got.stderr)
+	}
+	var snap snapshot
+	if err := json.Unmarshal([]byte(got.stdout), &snap); err != nil {
+		t.Fatalf("-json output is not decodable: %v\ngot: %q", err, got.stdout)
+	}
+	if snap.Version != 1 || snap.LastEvalResult == nil || snap.LastEvalResult.OK {
+		t.Errorf("-json snapshot = %+v, want version 1 with a stored failing verdict", snap)
+	}
+}
+
+// TestWaitHelpExitsZeroAndSendsNothing keeps the uvj.12 contract intact for the
+// new command: help is a successful request, and it must not contact the server.
+func TestWaitHelpExitsZeroAndSendsNothing(t *testing.T) {
+	base, reads := newCountingTestServer(t)
+	got := runCLI(t, base, "", "wait", "-h")
+
+	if got.code != exitOK {
+		t.Errorf("wait -h: exit %d, want %d (help is a request that succeeded)", got.code, exitOK)
+	}
+	if !strings.Contains(got.stderr, "-version") {
+		t.Errorf("wait -h did not document -version\nstderr:\n%s", got.stderr)
+	}
+	if n := atomic.LoadInt32(reads); n != 0 {
+		t.Errorf("wait -h contacted the server (%d state reads); help must be answerable offline", n)
+	}
+}
+
+// TestWaitUsageErrorsExitTwoAndSendNothing keeps 2 meaning "the command line was
+// wrong" and nothing-sent.
+//
+// The -interval cases matter more than they look: a zero or negative interval is a
+// plausible typo, and accepting it would mean either a busy loop hammering the
+// server or a sleep that never fires.
+func TestWaitUsageErrorsExitTwoAndSendNothing(t *testing.T) {
+	base, reads := newCountingTestServer(t)
+	cases := [][]string{
+		{"wait", "-nope"},
+		{"wait", "-version", "abc"},
+		{"wait", "extra-arg"},
+		{"wait", "-interval", "0"},
+		{"wait", "-interval", "-5ms"},
+	}
+	for _, args := range cases {
+		got := runCLI(t, base, "", args...)
+		if got.code != exitUsage {
+			t.Errorf("%v: exit %d, want %d\nstderr: %s", args, got.code, exitUsage, got.stderr)
+		}
+	}
+	if n := atomic.LoadInt32(reads); n != 0 {
+		t.Errorf("a usage error sent %d requests; nothing should have been sent", n)
+	}
+}
+
+// TestWaitDoesNotWeakenTheExitCodeContract restates the whole table for the new
+// command, so a future change cannot quietly redefine an exit code. In particular a
+// wait timeout is 1 — the same code as a refusal or an unreachable server — and
+// NOT 2, because the command line was valid and the request was answered.
+func TestWaitDoesNotWeakenTheExitCodeContract(t *testing.T) {
+	base := newTestServer(t)
+	publishVerdictForCurrent(t, base, `s("bd*2")`, true)
+
+	if got := runCLI(t, base, "", "wait"); got.code != exitOK {
+		t.Errorf("a satisfied wait: exit %d, want %d", got.code, exitOK)
+	}
+	if got := runCLI(t, base, "", "wait", "-bogus"); got.code != exitUsage {
+		t.Errorf("a bad flag: exit %d, want %d", got.code, exitUsage)
+	}
+	if got := runCLI(t, reserveClosedPort(t), "", "wait"); got.code != exitError {
+		t.Errorf("an unreachable server: exit %d, want %d", got.code, exitError)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// push --wait
+// ---------------------------------------------------------------------------
+
+// TestPushWaitClosesTheLoopInOneCommand proves the convenience wrapper actually
+// wraps: one command publishes AND reports the verdict for the version it
+// published.
+//
+// The version identity is the substance. A --wait that re-read the current version,
+// or waited on the pre-push one, would be waiting for the wrong thing while looking
+// entirely correct — so v2 exists and is evaluated while v1 is what got pushed.
+func TestPushWaitClosesTheLoopInOneCommand(t *testing.T) {
+	base, _ := newCountingTestServer(t)
+	stop := idleListener(t, base)
+	defer stop()
+	// A v1 verdict exists before the push, so a wrapper that waited on "whatever
+	// verdict is stored" would satisfy itself instantly with the WRONG one.
+	publishVerdictForCurrent(t, base, `s("bd*2")`, true)
+
+	arrived := verdictArrivingAfter(t, base, 2, false, 300*time.Millisecond)
+
+	got := runCLI(t, base, `s("hh cp")`, "-timeout", "5s", "push", "--wait")
+	<-arrived
+
+	if got.code != exitOK {
+		t.Fatalf("push --wait: exit %d, stdout %q, stderr %q", got.code, got.stdout, got.stderr)
+	}
+	if !strings.Contains(got.stdout, "pushed version 2") {
+		t.Errorf("push --wait did not report the push\nstdout:\n%s", got.stdout)
+	}
+	// ok=false is the v2 verdict; the stale v1 verdict is ok=true, so this asserts
+	// both that it waited and that it waited for the right one.
+	if !strings.Contains(got.stdout, "v2") || !strings.Contains(got.stdout, "ok=false") {
+		t.Errorf("push --wait did not report the verdict for the version it published\nstdout:\n%s", got.stdout)
+	}
+}
+
+// TestPushWaitFailsWhenNoVerdictArrives proves the wrapper does not report the
+// push as a success it cannot back up: publishing worked, evaluating did not, and
+// the exit code says so.
+func TestPushWaitFailsWhenNoVerdictArrives(t *testing.T) {
+	base, _ := newCountingTestServer(t)
+	stop := idleListener(t, base)
+	defer stop()
+
+	got := runCLI(t, base, `s("bd*2")`, "-timeout", "400ms", "push", "--wait")
+
+	if got.code != exitError {
+		t.Errorf("push --wait with no verdict: exit %d, want %d\nstdout:\n%s\nstderr:\n%s",
+			got.code, exitError, got.stdout, got.stderr)
+	}
+	// The push itself really happened — the wrapper must not be reporting failure
+	// by rolling its own work back.
+	if got := runCLI(t, base, "", "-json", "state"); !strings.Contains(got.stdout, `"version":1`) {
+		t.Errorf("push --wait did not publish, so it did not wait\nstdout:\n%s", got.stdout)
+	}
+}
+
+// TestPushWaitRefusesToCombineWithDryRun covers the incompatible pair.
+//
+// A dry-run publishes NOTHING, so there is no new version and no verdict will ever
+// arrive for one. Accepting the pair means a guaranteed timeout at best, and at
+// worst a wait for a version number that was never issued.
+func TestPushWaitRefusesToCombineWithDryRun(t *testing.T) {
+	base, reads := newCountingTestServer(t)
+	got := runCLI(t, base, `s("bd*2")`, "push", "--dry-run", "--wait")
+
+	if got.code != exitUsage {
+		t.Errorf("push --dry-run --wait: exit %d, want %d\nstderr: %s", got.code, exitUsage, got.stderr)
+	}
+	if n := atomic.LoadInt32(reads); n != 0 {
+		t.Errorf("the refused combination sent %d requests; a usage error sends nothing", n)
+	}
+	if got := runCLI(t, base, "", "-json", "state"); !strings.Contains(got.stdout, `"version":0`) {
+		t.Errorf("the refused combination published something\nstdout:\n%s", got.stdout)
+	}
+}
+
+// TestPushWaitJSONModeKeepsBothLines proves -json stays parseable per LINE under
+// --wait: the push snapshot, then the snapshot the wait ended on. A caller taking
+// the last line gets the final state; nobody is silently handed a concatenated
+// blob that no longer parses.
+func TestPushWaitJSONModeKeepsBothLines(t *testing.T) {
+	base, _ := newCountingTestServer(t)
+	stop := idleListener(t, base)
+	defer stop()
+	publishVerdictForCurrent(t, base, `s("bd*2")`, true)
+
+	// A verdict for the version THIS push creates, so the wait really ends on one
+	// rather than being satisfied by the v1 verdict that is already stored.
+	arrived := verdictArrivingAfter(t, base, 2, true, 200*time.Millisecond)
+
+	got := runCLI(t, base, `s("hh cp")`, "-timeout", "5s", "-json", "push", "--wait")
+	<-arrived
+	if got.code != exitOK {
+		t.Fatalf("push -json --wait: exit %d, stdout %q, stderr %q", got.code, got.stdout, got.stderr)
+	}
+	lines := strings.Split(strings.TrimSpace(got.stdout), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("push -json --wait printed %d lines, want 2 (the push, then the verdict):\n%s",
+			len(lines), got.stdout)
+	}
+	for i, line := range lines {
+		var snap snapshot
+		if err := json.Unmarshal([]byte(line), &snap); err != nil {
+			t.Errorf("line %d is not a decodable snapshot: %v\nline: %q", i+1, err, line)
+		}
+	}
+}
+
+// TestPushWithoutWaitIsUnchanged guards the existing surface. --wait is ADDITIVE: a
+// plain push must still print the byte-for-byte line it always has, or every
+// existing caller and every existing test changes meaning.
+func TestPushWithoutWaitIsUnchanged(t *testing.T) {
+	base, reads := newCountingTestServer(t)
+	got := runCLI(t, base, `s("bd*2")`, "push")
+
+	if got.code != exitOK {
+		t.Fatalf("push: exit %d, stderr %q", got.code, got.stderr)
+	}
+	if got.stdout != "pushed version 1\n" {
+		t.Errorf("push printed %q, want the byte-for-byte line it has always printed", got.stdout)
+	}
+	if n := atomic.LoadInt32(reads); n != 0 {
+		t.Errorf("a plain push made %d state reads; only --wait polls", n)
+	}
 }

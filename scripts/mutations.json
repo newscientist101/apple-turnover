@@ -1093,5 +1093,47 @@
     "file": "srv/api.go",
     "old": "\t\tStats:           req.Stats,\n\t\tSamplesResolved: req.SamplesResolved,\n\t}",
     "new": "\t\tStats:           req.Stats,\n\t\t// deliberately: the browser's samplesResolved is decoded and then\n\t\t// discarded, so every finding is accepted and none is ever stored\n\t}"
+  },
+  {
+    "name": "163-cli-wait-accepts-an-older-verdict",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\t\tif v := snap.LastEvalResult; v != nil && !verdictIsStale(v.Version, want) {",
+    "new": "\t\tif v := snap.LastEvalResult; v != nil { // deliberately: the staleness guard is gone, so a verdict for the PREVIOUS version satisfies the wait and an agent concludes a bad push worked",
+    "run": "TestWaitNeverAcceptsAnOlderVerdictAsSatisfying|TestWaitBlocksUntilTheRequestedVerdictArrives"
+  },
+  {
+    "name": "164-cli-wait-timeout-reports-success",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\t\tcase <-ctx.Done():\n\t\t\treturn waitTimedOut(want)",
+    "new": "\t\tcase <-ctx.Done():\n\t\t\treturn nil // deliberately: the budget expired with no verdict, and the wait claims success anyway",
+    "run": "TestWaitTimesOutWithTheVersionItWasWaitingFor|TestPushWaitFailsWhenNoVerdictArrives"
+  },
+  {
+    "name": "165-cli-wait-ignores-the-listener-count",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\t\tif snap.ListenerCount == 0 {\n\t\t\treturn fmt.Errorf(\"no listeners are connected, so no browser will ever report a verdict \"+\n\t\t\t\t\"for version %d; open the page in a browser first\", want)\n\t\t}",
+    "new": "\t\t// deliberately: with nobody listening no verdict can ever arrive, and the wait burns its whole timeout to say so",
+    "run": "TestWaitFailsFastWithNoListenersConnected"
+  },
+  {
+    "name": "166-cli-push-wait-watches-the-pre-push-version",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\treturn waitForVerdict(ctx, c, snap.Version, *interval, out)",
+    "new": "\treturn waitForVerdict(ctx, c, snap.Version-1, *interval, out) // deliberately: --wait reports the previous version's verdict, which is code the caller did not just publish",
+    "run": "TestPushWaitClosesTheLoopInOneCommand"
+  },
+  {
+    "name": "167-cli-push-wait-allows-dry-run",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\tif *dryRun && *wait {\n\t\treturn usagef(\"push --dry-run --wait cannot be combined: a dry-run publishes nothing, \" +\n\t\t\t\"so there is no version to wait a verdict for\")\n\t}",
+    "new": "\t// deliberately: a dry-run publishes nothing, so this combination waits for a version that was never issued",
+    "run": "TestPushWaitRefusesToCombineWithDryRun"
+  },
+  {
+    "name": "168-cli-wait-timeout-is-a-usage-error",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\treturn fmt.Errorf(\"timed out waiting for a verdict for version %d: no browser reported one \"+\n\t\t\"(that version is still unevaluated)\", want)",
+    "new": "\treturn usagef(\"timed out waiting for a verdict for version %d: no browser reported one \"+\n\t\t\"(that version is still unevaluated)\", want) // deliberately: exit 2 mislabels a valid command line as a caller mistake",
+    "run": "TestWaitTimesOutWithTheVersionItWasWaitingFor|TestWaitDoesNotWeakenTheExitCodeContract"
   }
 ]

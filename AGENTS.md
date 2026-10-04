@@ -366,7 +366,11 @@ The CLI is a documented agent interface, so its exit codes are a contract:
 - `0` success, including a **help request** at both the top level and per
   subcommand.
 - `1` the server refused, could not be reached, or did not return what the caller
-  asked for.
+  asked for. This now covers four distinct situations, all of which share the
+  property that **the command line was valid and the request was answered**:
+  `-require-current` refusing a stale verdict, `eval-result -force` refusing a
+  destructive overwrite, `push --dry-run` reporting a failing candidate, and
+  `wait` timing out. None of them is a usage mistake, so none may exit `2`.
 - `2` the command line was wrong; nothing was sent.
 
 Help is a successful request, not a usage mistake. Each subcommand parses its own
@@ -435,6 +439,52 @@ an invented report silently replaced a genuine one while "testing the endpoint"
   extra request. It is an **observation**, not a guarantee: another reporter
   could store a verdict between the read and the write, which is the same
   wording discipline `anchor`'s comparison follows.
+
+### Waiting for a verdict in the CLI
+
+`agentcli wait` (and `push --wait`) close step 4 of the agent loop, which is the
+only step with no command — so every agent author hand-wrote the same
+sleep-and-poll, and during live testing it was written by hand about a dozen times
+in one session. The invariants are chosen so the defect it prevents cannot come
+back through a refactor.
+
+- **SATISFACTION REUSES `verdictIsStale`.** It is the single comparison defining
+  staleness, shared with `state` and `eval-result`. A second comparison written
+  for `wait` could drift, and then two commands would call the same version current
+  in one and stale in the other — the exact split strudel-agent-uvj.14 closed.
+- **AN OLDER VERDICT NEVER SATISFIES THE WAIT.** This is the regression the
+  command exists to prevent: sleeping too little, reading the PREVIOUS version's
+  verdict, and concluding a bad push worked. It needs its own explicit test rather
+  than incidental coverage, and mutation row `163-cli-wait-accepts-an-older-verdict`
+  guards it.
+- **THE BUDGET IS THE EXISTING `-timeout`,** established once in `run()` and
+  shared by the push and the wait. There is no second budget flag: two deadlines
+  would let a command spend twice what the caller asked for. The sleep is a
+  `select` on `ctx.Done()`, so `-timeout` bounds the WAIT and not merely each
+  request — a plain `time.Sleep` would overshoot by up to one interval per poll.
+- **IT FAILS FAST WHEN `listenerCount == 0`,** because no verdict can then EVER
+  arrive. Polling to the timeout would spend the caller's whole budget to reach a
+  conclusion available on the first read, and would report it as a bare timeout,
+  hiding the diagnosis behind "try again later". The check runs on EVERY poll, not
+  just the first, so a listener that disconnects mid-wait gives the same message.
+  This is the constraint most easily missed, hence mutation row
+  `165-cli-wait-ignores-the-listener-count`.
+- **NO SUCCESS LINE WITHOUT A VERDICT.** On the timeout path there is no verdict,
+  so nothing about `ok` is printed. A wait that burned its budget and printed "ok"
+  anyway would be worse than no wait: it is indistinguishable from a real answer.
+- **`push --wait` WAITS FOR THE VERSION THE SERVER RETURNED,** not a re-read and
+  not the pre-push version. It calls the same `waitForVerdict` the `wait` command
+  does; a second copy of that loop would be a second place for the
+  never-accept-an-older-verdict invariant to be got wrong.
+- **IT ADDS NO ENDPOINT.** It is a bounded client-side poll loop over
+  `GET /api/state`, so the one-command-to-one-endpoint claim in
+  `cmd/agentcli/main.go` still holds. A timeout exits `1`, never `2` — the command
+  line was valid and the reads were answered (row
+  `168-cli-wait-timeout-is-a-usage-error`).
+- **IT DOES NOT HEARTBEAT.** There is no `agentcli heartbeat`, so a wait long
+  enough to outlast the presence lease still needs the caller's own
+  `POST /api/heartbeat`. This is documented in `AGENT_API.md` and `README.md`
+  rather than papered over with a subcommand that would touch a second endpoint.
 
 ## Boundedness in tests
 

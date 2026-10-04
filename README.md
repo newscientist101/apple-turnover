@@ -134,6 +134,12 @@ bin/agentcli eval-result -version 1 -ok=false -force
 
 # Before acting on a verdict, insist that it is about the code that is live.
 bin/agentcli state -require-current || echo "the verdict is not about the current version"
+
+# Block until a browser has evaluated a version, instead of sleeping and polling.
+bin/agentcli wait -version 8
+
+# Publish and wait in one command. -timeout covers both halves.
+echo 's("bd*2, ~ cp")' | bin/agentcli push --wait
 ```
 
 Base URL:
@@ -144,7 +150,25 @@ $STRUDEL_AGENT_URL environment override
 http://localhost:8000 default
 ```
 
-`-timeout` defaults to 10s per request; `-json` emits raw JSON. Exit codes are `0` for success, `1` when the server refused, could not be reached, or did not return what was asked for, and `2` for invalid CLI usage. Server error text is passed through unchanged on stderr.
+`-timeout` defaults to 10s per request, and is the whole budget for a command that waits; `-json` emits raw JSON. Exit codes are `0` for success, `1` when the server refused, could not be reached, or did not return what was asked for, and `2` for invalid CLI usage. Server error text is passed through unchanged on stderr.
+
+### Waiting for a verdict
+
+`wait` closes step 4 of the agent loop, the one step that had no command:
+
+```bash
+bin/agentcli wait              # whatever version is live when the wait starts
+bin/agentcli wait -version 8   # exactly version 8
+echo 's("bd*2")' | bin/agentcli push --wait   # publish, then wait for that version
+```
+
+It polls `GET /api/state` until a verdict for the requested version exists. Three properties are the reason to use it rather than writing the loop yourself:
+
+- **A verdict for an OLDER version never satisfies it.** This is the whole point. Sleeping too little and reading the previous version's verdict is how an agent convinces itself a bad push worked, and `wait` cannot be talked into it however long it polls.
+- **It is bounded by `-timeout`, and fails fast when nobody is listening.** With no connected listener no verdict will ever arrive, so rather than burn the whole budget to report "try again later" it says so on its first read and names the version it was waiting for. On timeout it prints no verdict row at all and exits `1` — not `2`, because the command line was valid and the requests were answered.
+- **`push --wait` waits for the version the server just handed back**, so it cannot report a verdict about code you did not publish. It cannot be combined with `--dry-run`: a dry-run publishes nothing, so there is no version to wait for.
+
+`wait` does not heartbeat for you — there is no `agentcli heartbeat` — so keep the wait inside the 15-second presence lease or beat on `POST /api/heartbeat` yourself.
 
 ### Verdict currency
 

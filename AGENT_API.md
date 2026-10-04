@@ -279,6 +279,11 @@ Every `/api` error response is the single-field JSON error object above. Errors 
 
 While doing this, beat on `POST /api/heartbeat` more often than every 15 seconds — including while waiting in step 4, which is the step most likely to outlast the lease. An agent that heartbeats only when it has something to push will be reported absent during exactly the wait it is most idle through.
 
+Step 4 has CLI support: `agentcli wait -version N` polls `GET /api/state` until `lastEvalResult.version >= N`, and `agentcli push --wait` publishes and then waits for the version it published. Both are bounded by the CLI's own `-timeout` and neither can be satisfied by a verdict for an older version, so the sleep-too-little failure — reading the previous version's verdict and concluding a bad push worked — is not something you can write by hand any more. Two things to know about them:
+
+- **With no listener connected they fail fast**, rather than polling to the timeout and reporting "try again later". No browser means no verdict will ever arrive, so the CLI says so on its first read. Check `listenerCount` in the snapshot if you are driving this yourself.
+- **They do not heartbeat for you.** There is no `agentcli heartbeat` command, so a wait long enough to outlast the 15-second lease still needs your own `POST /api/heartbeat`. Keep the wait inside the lease, or beat on it from elsewhere.
+
 The push response proves only that the document was stored. It is not an evaluation result. With no connected listener, no verdict will arrive.
 
 If you would rather not publish a candidate until it is known to evaluate, `POST /api/dry-run` evaluates it without publishing: step 3 becomes a dry-run, and only a candidate that comes back `ok:true` is worth sending to `/api/code`. It leaves `version`, `history` and `lastEvalResult` untouched, so a broken candidate never becomes the published document. It needs a connected browser just as much as a push does — with none, it is `409` — and it is bounded, returning `504` rather than waiting forever.

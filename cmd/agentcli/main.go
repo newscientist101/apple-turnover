@@ -24,6 +24,15 @@ package main
 // now; the CLI simply declines to send a request whose consequence the caller
 // did not ask for.
 //
+// `wait` and `push --wait` (strudel-agent-uvj.13) add NO endpoint either. They are
+// a bounded client-side poll loop over GET /api/state — the endpoint `state`
+// already maps to — and the point of them is that step 4 of the documented agent
+// loop ("wait for a browser to submit POST /api/eval-result") is the one step that
+// had no command, so every agent author hand-rolled the same sleep-and-poll and
+// most got the timing subtly wrong. A wait keyed on the version cannot be fooled
+// by a verdict for the PREVIOUS version, which is precisely how a hand-rolled one
+// convinces an agent its bad push worked.
+//
 // Two properties are worth stating up front, because both are easy to get
 // quietly wrong in a convenience wrapper:
 //
@@ -84,10 +93,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "  state [-require-current]   print the current snapshot, and whether its verdict is current\n")
 		fmt.Fprintf(stderr, "  push [-f file] [-m text]  publish a new document (default: stdin)\n")
 		fmt.Fprintf(stderr, "  push --dry-run              evaluate a document without publishing it\n")
+		fmt.Fprintf(stderr, "  push --wait                 publish a document, then wait for its verdict\n")
 		fmt.Fprintf(stderr, "  message <text>            set the agent narration\n")
 		fmt.Fprintf(stderr, "  hush                      stop the performance\n")
 		fmt.Fprintf(stderr, "  play                      resume the performance\n")
 		fmt.Fprintf(stderr, "  eval-result [flags]       report how the last version evaluated\n")
+		fmt.Fprintf(stderr, "  wait [-version N]          block until a browser reports a verdict for that version\n")
 		fmt.Fprintf(stderr, "  anchor [flags]            re-anchor the shared timeline (-epoch-ms, -cps)\n")
 		fmt.Fprintf(stderr, "\nflags:\n")
 		fs.PrintDefaults()
@@ -135,6 +146,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = cmdTransport(ctx, c, "play", true, cmdArgs, stdout, stderr)
 	case "eval-result":
 		err = cmdEvalResult(ctx, c, cmdArgs, stdout, stderr)
+	case "wait":
+		err = cmdWait(ctx, c, cmdArgs, stdout, stderr)
 	case "anchor":
 		err = cmdAnchor(ctx, c, cmdArgs, stdout, stderr)
 	case "help", "-h", "--help":

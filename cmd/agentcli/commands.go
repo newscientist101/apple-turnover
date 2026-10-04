@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 )
 
 // errHelpRequested is returned by a subcommand when the caller asked for its help
@@ -287,12 +288,32 @@ func cmdPush(ctx context.Context, c *client, args []string, stdin io.Reader, out
 	file := fs.String("f", "", "read the document from this file (\"-\" or omitted means stdin)")
 	message := fs.String("m", "", "narration shown to listeners beside the code")
 	dryRun := fs.Bool("dry-run", false, "evaluate the document in a connected browser WITHOUT publishing it")
+	wait := fs.Bool("wait", false,
+		"after publishing, wait for that exact version's verdict (the -timeout budget covers both)")
+	interval := fs.Duration("wait-interval", waitPollInterval,
+		"with -wait, how long to sleep between reads of the state")
 	if err := parseFlags(fs, args, stderr); err != nil {
 		return err
 	}
 	if fs.NArg() > 0 {
 		return usagef("push takes no positional arguments (use -f for a file, or pipe on stdin), got %q",
 			strings.Join(fs.Args(), " "))
+	}
+
+	// The two flags are REFUSED together rather than reconciled, and the check runs
+	// before the document is even read so nothing is sent. A dry-run publishes
+	// nothing, so there is no new version and no verdict will ever arrive for one:
+	// accepting the pair would guarantee a timeout, or worse, wait on a version
+	// number that was never issued.
+	if *dryRun && *wait {
+		return usagef("push --dry-run --wait cannot be combined: a dry-run publishes nothing, " +
+			"so there is no version to wait a verdict for")
+	}
+	if *wait && *interval <= 0 {
+		return usagef("push --wait needs a positive -wait-interval, got %s", *interval)
+	}
+	if *interval < minWaitPollInterval {
+		*interval = minWaitPollInterval
 	}
 
 	doc, err := readDocument(*file, stdin)
@@ -317,10 +338,25 @@ func cmdPush(ctx context.Context, c *client, args []string, stdin io.Reader, out
 		return err
 	}
 	if c.jsonOutput {
-		return writeJSONLine(out, snap)
+		if err := writeJSONLine(out, snap); err != nil {
+			return err
+		}
+	} else {
+		fmt.Fprintf(out, "pushed version %d\n", snap.Version)
 	}
-	fmt.Fprintf(out, "pushed version %d\n", snap.Version)
-	return nil
+	if !*wait {
+		return nil
+	}
+
+	// The version the SERVER handed back is the one waited on — not a re-read, and
+	// not the pre-push version. Those are different bugs wearing the same disguise:
+	// a `--wait` watching the wrong number would look completely correct while
+	// reporting a verdict about code the caller did not just publish.
+	//
+	// There is no fresh budget here. The single deadline run() established covers
+	// the push AND the wait, so `-timeout 10s push --wait` is ten seconds in total
+	// rather than ten of push followed by another ten of waiting.
+	return waitForVerdict(ctx, c, snap.Version, *interval, out)
 }
 
 // dryRunRequest is the documented POST /api/dry-run body. It is `code` alone:
@@ -601,6 +637,211 @@ func cmdEvalResult(ctx context.Context, c *client, args []string, out, stderr io
 		return nil
 	}
 	fmt.Fprintf(out, "eval-result: stored for version %d (ok=%t)\n", ack.Version, *ok)
+	return nil
+}
+
+// waitPollInterval is how long the wait sleeps between reads of /api/state.
+//
+// It is short because the cost of being wrong in one direction is asymmetric: a
+// wait that polls too slowly adds latency to every agent iteration, while one
+// that polls too fast only costs a few GETs against a server that answers them
+// from memory. 250ms keeps a typical browser evaluation (well under a second) from
+// feeling like a wait at all.
+const waitPollInterval = 250 * time.Millisecond
+
+// minWaitPollInterval floors -interval. Without it, `-interval 1ns` is a valid
+// parse and a tight loop that hammers the server for the whole budget — a footgun
+// reachable by typo, and the reason the flag is validated rather than trusted.
+const minWaitPollInterval = 10 * time.Millisecond
+
+// cmdWait blocks until a browser has reported an evaluation for the requested
+// version, and then prints that verdict.
+//
+// It exists because step 4 of the documented agent loop — "wait for a browser to
+// submit POST /api/eval-result" — is the one step with no CLI support, so every
+// agent author hand-rolls the same sleep-and-poll loop and most get the timing
+// subtly wrong. The failure mode is not a cosmetic delay: sleeping too little and
+// reading a verdict for the PREVIOUS version is the concrete way an agent convinces
+// itself a bad push succeeded. Keying the wait on the version removes that whole
+// class of error, which is why an older verdict never satisfies this command no
+// matter how long it has been polling.
+//
+// FOUR properties are load-bearing, and each is a bug its absence reintroduces:
+//
+//  1. SATISFACTION REUSES verdictIsStale. "Is this verdict behind the version I
+//     care about" already exists and is already the single definition shared with
+//     `state` and `eval-result` (strudel-agent-uvj.14). A second comparison written
+//     here could drift from it, and then two commands would call the same version
+//     current in one and stale in the other.
+//
+//  2. IT IS BOUNDED BY THE EXISTING -timeout, and the sleep is interruptible via
+//     ctx.Done(). AGENTS.md is explicit that a hang is a test failure, not a
+//     waiting strategy; a CLI that waits forever is worse than one that does not
+//     exist. No new budget flag is introduced — the single deadline set once in
+//     run() covers the first read and every poll.
+//
+//  3. IT FAILS FAST WHEN NOBODY IS LISTENING. With listenerCount == 0 no verdict
+//     will ever arrive, so polling to the timeout would spend the caller's whole
+//     budget to reach a conclusion available on the first read — and would report
+//     it as a bare timeout, hiding the diagnosis behind "try again later". The
+//     check is repeated on EVERY poll, not just the first, so a listener that
+//     disconnects mid-wait produces the same clear message instead of a mystery.
+//
+//  4. IT NEVER PRINTS A SUCCESS LINE WITHOUT A VERDICT. On the timeout path there
+//     is no verdict, so nothing about `ok` is printed at all. A wait that burned
+//     its budget and then said "ok" anyway would be worse than no wait: it is
+//     indistinguishable from a real answer to anything reading the output.
+//
+// Every failure exits 1, not 2. The command line was valid and the request WAS
+// answered — the caller simply did not get what it asked for, which is what 1
+// already means (the same reasoning as verdictFailure and as pushDryRun's failing
+// verdict). It is deliberately not a fourth code: widening the documented 0/1/2
+// contract for one command's benefit costs every existing scripted caller more than
+// it buys.
+//
+// -version defaults to 0, meaning "whatever is live when the wait starts", because
+// the common case is "wait for the push I just made" and the caller usually does
+// not have the number to hand. An EXPLICIT -version is honoured exactly, including
+// one naming a version the server never published — refused immediately rather
+// than waited on, because versions are monotonic and never reused, so no verdict
+// can ever name it.
+func cmdWait(ctx context.Context, c *client, args []string, out, stderr io.Writer) error {
+	fs := flag.NewFlagSet("wait", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	ver := fs.Int64("version", 0,
+		"the version to wait for (default: whatever is live when the wait starts)")
+	interval := fs.Duration("interval", waitPollInterval,
+		"how long to sleep between reads of the state")
+	if err := parseFlags(fs, args, stderr); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return usagef("wait takes no positional arguments, got %q", strings.Join(fs.Args(), " "))
+	}
+	if *ver < 0 {
+		return usagef("wait needs -version 1 or greater, got %d", *ver)
+	}
+	if *interval <= 0 {
+		return usagef("wait needs a positive -interval, got %s", *interval)
+	}
+	if *interval < minWaitPollInterval {
+		*interval = minWaitPollInterval
+	}
+
+	want := *ver
+	return waitForVerdict(ctx, c, want, *interval, out)
+}
+
+// waitForVerdict is the poll loop, separated from flag parsing so `push --wait`
+// reuses the EXACT same code rather than a second copy of it.
+//
+// That reuse is the point, not tidiness. The loop carries the load-bearing
+// invariant of this command — an older verdict never satisfies it — and a second
+// copy is a second place for that invariant to be got wrong, with only one of them
+// covered by the tests written against the first.
+func waitForVerdict(ctx context.Context, c *client, want int64, interval time.Duration, out io.Writer) error {
+	for {
+		snap, err := c.get(ctx, "/api/state")
+		if err != nil {
+			// A read that failed because the budget ran out is a TIMEOUT, not a
+			// transport error, and it must say which version it gave up on. The
+			// client's own deadline message would not.
+			if ctx.Err() != nil {
+				return waitTimedOut(want)
+			}
+			return err
+		}
+
+		// A zero want resolves on the first read and then never moves: re-resolving
+		// it each poll would silently retarget the wait at whatever the performance
+		// had advanced to, which is the opposite of waiting for a KNOWN version.
+		if want == 0 {
+			want = snap.Version
+			// Version 0 is the empty document, and RecordEvalResult rejects a report
+			// for it, so no verdict can ever exist for it. Refusing here says "there
+			// is nothing to evaluate yet" rather than making the caller read "version
+			// 0" and wonder which document they are waiting on.
+			if want == 0 {
+				return fmt.Errorf("nothing has been published yet (version 0 is the empty document, " +
+					"which is never evaluated); push something first, or name a -version that exists")
+			}
+		}
+
+		// Versions are monotonic and never reused, so a snapshot older than the
+		// requested version means the request can never be satisfied.
+		if snap.Version < want {
+			return fmt.Errorf("version %d does not exist: the latest published version is %d, "+
+				"and versions are never reused, so no verdict can arrive for it", want, snap.Version)
+		}
+
+		// The one comparison that decides satisfaction. An OLDER verdict is stale
+		// by this command's own definition and must never end the wait — and
+		// `push --wait` passes the version the server just handed back, so it
+		// cannot accidentally wait on the pre-push version either.
+		if v := snap.LastEvalResult; v != nil && !verdictIsStale(v.Version, want) {
+			return reportWaited(c, *snap, want, out)
+		}
+
+		if snap.ListenerCount == 0 {
+			return fmt.Errorf("no listeners are connected, so no browser will ever report a verdict "+
+				"for version %d; open the page in a browser first", want)
+		}
+
+		// The sleep is interruptible, so -timeout is a real bound on the WAIT and
+		// not merely on each individual request. A plain time.Sleep would overshoot
+		// the budget by up to one interval every time.
+		select {
+		case <-ctx.Done():
+			return waitTimedOut(want)
+		case <-time.After(interval):
+		}
+	}
+}
+
+// waitTimedOut is the single expiry error.
+//
+// want is 0 only if the budget expired before the very first read returned, in
+// which case no version was ever resolved and the message says so rather than
+// naming v0.
+func waitTimedOut(want int64) error {
+	if want <= 0 {
+		return fmt.Errorf("timed out before a single state read completed, so no verdict was awaited")
+	}
+	return fmt.Errorf("timed out waiting for a verdict for version %d: no browser reported one "+
+		"(that version is still unevaluated)", want)
+}
+
+// reportWaited prints the verdict the wait was for.
+//
+// When the verdict belongs to a NEWER version than the one asked for, that is
+// stated rather than smoothed over: the wait is satisfied — a later version was
+// evaluated, so the code the caller cared about certainly ran — but the caller must
+// not read it as "my push is the live one and here is its verdict".
+func reportWaited(c *client, snap snapshot, want int64, out io.Writer) error {
+	if c.jsonOutput {
+		return writeJSONLine(out, snap)
+	}
+	v := snap.LastEvalResult
+	if v.Version > want {
+		fmt.Fprintf(out, "wait: v%d verdict arrived (ok=%t) -- NOT the v%d you waited for; "+
+			"the performance moved on and v%d is now live\n", v.Version, v.OK, want, snap.Version)
+	} else {
+		fmt.Fprintf(out, "wait: v%d verdict arrived (ok=%t)\n", v.Version, v.OK)
+	}
+	if v.Error != "" {
+		fmt.Fprintf(out, "wait: error: %s\n", v.Error)
+	}
+	if v.SamplesResolved != nil {
+		if *v.SamplesResolved {
+			fmt.Fprintf(out, "wait: samples: resolved\n")
+		} else {
+			fmt.Fprintf(out, "wait: samples: UNRESOLVED -- the pattern is valid and committed, "+
+				"but a sound it names did not resolve in the reporting browser\n")
+		}
+	}
+	if haps, ok := statsHaps(v.Stats); ok {
+		fmt.Fprintf(out, "wait: %d haps\n", haps)
+	}
 	return nil
 }
 

@@ -47,6 +47,7 @@ Then open `http://localhost:8000/`.
 | `make test` | Run the ordinary Go test suite |
 | `make verify` | `gofmt`, `go vet`, build, and race-enabled tests |
 | `make mutation-check` | Run the mutation-testing gate |
+| `make mutation-lint` | Validate the mutation table and anchors, without running tests |
 | `make start` / `stop` / `restart` | Control the systemd service |
 | `make clean` | Remove built binaries |
 
@@ -157,6 +158,10 @@ Tests use loopback/`httptest`, not the production port, and blocking operations 
 
 `make mutation-check` deliberately injects defects and requires the tests to catch them. Mutation results are only trustworthy when the mutation really changed the intended source and was restored afterward.
 
+The list of mutations is `scripts/mutations.json`, one JSON object per mutation, so the text a mutation targets may contain any character — including `|`, which a plain delimited table cannot carry. Run `make mutation-lint` first: it checks every mutation still matches its file exactly once and costs no test time.
+
+A `make mutation-check` run never modifies your checkout. The grid runs in a throwaway Git worktree built from `HEAD` and then overlaid with your current working-tree files (including uncommitted ones), so what gets tested is what you have. Set `MUTATION_WORKTREE=0` to mutate in place instead; the script says so when it does.
+
 ## systemd deployment
 
 ```bash
@@ -218,6 +223,9 @@ srv/                server package
   static/           browser modules
   templates/        HTML shell
 scripts/            mutation-testing tools
+                    mutation-check.sh   the grid runner
+                    mutation-parse.py   table validator and record emitter
+                    mutations.json      the table itself
 srv.service         systemd unit
 AGENT_API.md        wire contract
 AGENTS.md           architecture and development invariants

@@ -1,4 +1,4 @@
-.PHONY: build clean stop start restart test verify mutation-check
+.PHONY: build clean stop start restart test verify mutation-check mutation-lint
 
 # srv/ is a package directory, so -o srv writes the binary to srv/srv.
 # -o bin/agentcli keeps the CLI's binary out of the source directories, where a
@@ -64,8 +64,19 @@ verify:
 
 # mutation-check confirms the test suite is not vacuous: it breaks the
 # implementation on purpose, runs the tests, and requires them to fail. The
-# script reverts every mutation and reports any it did not catch. See
-# scripts/mutation-check.sh and the README.
+# script reverts every mutation and reports any it did not catch. The table
+# lives in scripts/mutations.json and is read by scripts/mutation-parse.py.
+# See scripts/mutation-check.sh and the README.
+#
+# Every mutating run happens in a throwaway git worktree, so this checkout is
+# never modified: an interrupted run cannot leave a mutation applied, and two
+# concurrent runs cannot poison each other's baseline. MUTATION_WORKTREE=0
+# forces in-place mutation instead.
+#
+# `make mutation-lint` validates the table and every anchor without running a
+# test. Run it before the grid: a typo in the table otherwise costs a full
+# baseline run and then reports BROKEN, which reads as "the implementation
+# moved on" when in fact the table is wrong.
 #
 # The outer timeout bounds the whole grid: each mutation costs one full test run
 # (and the deliberate wedge/binary-search mutations cost the go test timeout),
@@ -83,3 +94,6 @@ verify:
 # lower it toward the measured figure.
 mutation-check:
 	timeout 2400 ./scripts/mutation-check.sh
+
+mutation-lint:
+	./scripts/mutation-check.sh --lint

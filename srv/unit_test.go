@@ -101,15 +101,34 @@ func TestUnitExecStartPointsAtTheBuildOutput(t *testing.T) {
 	if !filepath.IsAbs(execStart) {
 		t.Fatalf("ExecStart %q is relative, so it depends on an unstated root", execStart)
 	}
-	want := filepath.Join(root, "srv", "srv")
-	if execStart != want {
-		t.Fatalf("ExecStart = %q, want %q (the path `make build` writes)", execStart, want)
-	}
 
 	// WorkingDirectory must be the checkout root: the server resolves
 	// srv/templates and srv/static relative to it.
-	if got := service["WorkingDirectory"]; got != root {
-		t.Fatalf("WorkingDirectory = %q, want %q", got, root)
+	unitRoot := service["WorkingDirectory"]
+	if !filepath.IsAbs(unitRoot) {
+		t.Fatalf("WorkingDirectory %q is relative, so it depends on an unstated root", unitRoot)
+	}
+
+	// ExecStart must be the build output INSIDE the checkout the unit runs from.
+	//
+	// Deliberately NOT compared against filepath.Join(root, "srv", "srv"). The
+	// unit records where the service is DEPLOYED, which is a fact about the
+	// host; `root` is wherever the tests happen to be running. Comparing the two
+	// makes this test pass at exactly one directory on earth, so it fails in
+	// any other clone, in CI, and in a throwaway worktree -- which is how a
+	// deployment check gets quietly skipped or deleted. (That is not
+	// hypothetical: mutation-check.sh runs the grid in a worktree, and this
+	// assertion failed there until it was written this way.)
+	//
+	// What must hold everywhere is the relationship: one command, absolute, the
+	// binary `make build` writes, under the unit's own WorkingDirectory. That
+	// the named root really is a deployed checkout is host evidence, not
+	// something this file can prove -- see the live `is-active` check in
+	// README.md.
+	want := filepath.Join(unitRoot, "srv", "srv")
+	if execStart != want {
+		t.Fatalf("ExecStart = %q, want %q (the path `make build` writes, under "+
+			"WorkingDirectory)", execStart, want)
 	}
 
 	// The Makefile is where the output path is decided; if that changes, this

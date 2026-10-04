@@ -1,0 +1,949 @@
+[
+  {
+    "name": "01-empty-code-accepted",
+    "file": "srv/api.go",
+    "old": "strings.TrimSpace(req.Code) == \"\"",
+    "new": "false"
+  },
+  {
+    "name": "02-unknown-json-field-allowed",
+    "file": "srv/api.go",
+    "old": "dec.DisallowUnknownFields()",
+    "new": "_ = dec"
+  },
+  {
+    "name": "03-trailing-json-allowed",
+    "file": "srv/api.go",
+    "old": "return errTrailingJSON",
+    "new": "return nil"
+  },
+  {
+    "name": "04-payload-cap-removed",
+    "file": "srv/api.go",
+    "old": "http.MaxBytesReader(w, r.Body, APIMaxBodyBytes)",
+    "new": "http.MaxBytesReader(w, r.Body, int64(1)<<40)"
+  },
+  {
+    "name": "05-cap-reported-as-400",
+    "file": "srv/api.go",
+    "old": "writeError(w, http.StatusRequestEntityTooLarge,",
+    "new": "writeError(w, http.StatusBadRequest,"
+  },
+  {
+    "name": "06-allow-header-dropped",
+    "file": "srv/api.go",
+    "old": "w.Header().Set(\"Allow\", want)",
+    "new": "_ = want"
+  },
+  {
+    "name": "07-api-404-is-500",
+    "file": "srv/api.go",
+    "old": "writeError(w, http.StatusNotFound, fmt.Sprintf(\"no such API endpoint",
+    "new": "writeError(w, http.StatusInternalServerError, fmt.Sprintf(\"no such API endpoint"
+  },
+  {
+    "name": "08-api-catchall-too-broad",
+    "file": "srv/api.go",
+    "old": "mux.HandleFunc(\"/api\", handleAPINotFound)",
+    "new": "mux.HandleFunc(\"/\", handleAPINotFound)"
+  },
+  {
+    "name": "09-static-mount-removed",
+    "file": "srv/api.go",
+    "old": "mux.Handle(\"/static/\", http.StripPrefix(\"/static/\", http.FileServer(http.Dir(s.StaticDir))))",
+    "new": "_ = s.StaticDir"
+  },
+  {
+    "name": "10-eval-ack-lies",
+    "file": "srv/api.go",
+    "old": "apiEvalAck{Accepted: true, Version: req.Version}",
+    "new": "apiEvalAck{Accepted: false, Version: req.Version}"
+  },
+  {
+    "name": "11-message-bumps-version",
+    "file": "srv/api.go",
+    "old": "s.Conductor.SetMessage(req.Message)",
+    "new": "s.Conductor.Publish(req.Message, req.Message)"
+  },
+  {
+    "name": "12-transport-accepts-any-body",
+    "file": "srv/api.go",
+    "old": "func (s *Server) handleAPITransport(w http.ResponseWriter, r *http.Request, playing bool) {\n\tif err := rejectUnexpectedBody(r); err != nil {",
+    "new": "func (s *Server) handleAPITransport(w http.ResponseWriter, r *http.Request, playing bool) {\n\tif err := error(nil); false { // deliberately: /api/hush and /api/play accept a smuggled body"
+  },
+  {
+    "name": "13-hush-plays-instead",
+    "file": "srv/api.go",
+    "old": "s.handleAPITransport(w, r, false)",
+    "new": "s.handleAPITransport(w, r, true)"
+  },
+  {
+    "name": "14-shell-render-silently-truncates",
+    "file": "srv/templates/welcome.html",
+    "old": "System initialized. Awaiting agent input...",
+    "new": "{{.NoSuchField}}"
+  },
+  {
+    "name": "15-eval-accepts-future-version",
+    "file": "srv/conductor.go",
+    "old": "res.Version > c.version {",
+    "new": "res.Version > c.version+1 {"
+  },
+  {
+    "name": "16-eval-result-not-stored",
+    "file": "srv/conductor.go",
+    "old": "c.lastEval = &stored",
+    "new": "_ = stored"
+  },
+  {
+    "name": "17-stale-report-regresses",
+    "file": "srv/conductor.go",
+    "old": "if c.lastEval != nil && res.Version < c.lastEval.Version {",
+    "new": "if false {"
+  },
+  {
+    "name": "18-same-version-report-ignored",
+    "file": "srv/conductor.go",
+    "old": "if c.lastEval != nil && res.Version < c.lastEval.Version {",
+    "new": "if c.lastEval != nil && res.Version <= c.lastEval.Version {"
+  },
+  {
+    "name": "19-version-not-monotonic",
+    "file": "srv/conductor.go",
+    "old": "c.version++",
+    "new": "c.version += 0"
+  },
+  {
+    "name": "20-version-skipped",
+    "file": "srv/conductor.go",
+    "old": "c.version++",
+    "new": "c.version += 2"
+  },
+  {
+    "name": "21-history-window-wrong-start",
+    "file": "srv/conductor.go",
+    "old": "start := c.histNext - c.histLen",
+    "new": "start := 0"
+  },
+  {
+    "name": "22-snapshot-omits-playing",
+    "file": "srv/conductor.go",
+    "old": "Playing:          c.playing,",
+    "new": "Playing:          false,"
+  },
+  {
+    "name": "23-wedged-state-handler",
+    "file": "srv/api.go",
+    "old": "func (s *Server) handleAPIState(w http.ResponseWriter, r *http.Request) {",
+    "new": "func (s *Server) handleAPIState(w http.ResponseWriter, r *http.Request) {\n\tselect {} // deliberately wedged: never responds",
+    "run": "TestIntegrationParallelPushesAreBoundedAndContiguous"
+  },
+  {
+    "name": "24-ws-405-fallback-removed",
+    "file": "srv/api.go",
+    "old": "mux.HandleFunc(\"/ws\", methodNotAllowed(http.MethodGet))",
+    "new": "_ = methodNotAllowed(http.MethodGet)"
+  },
+  {
+    "name": "25-ws-wrong-close-status",
+    "file": "srv/ws.go",
+    "old": "websocket.StatusNormalClosure",
+    "new": "websocket.StatusGoingAway"
+  },
+  {
+    "name": "26-ws-origin-check-disabled",
+    "file": "srv/ws.go",
+    "old": "websocket.Accept(w, r, nil)",
+    "new": "websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})"
+  },
+  {
+    "name": "27-ws-closes-without-handshake",
+    "file": "srv/ws.go",
+    "old": "conn.Close(websocket.StatusNormalClosure, \"\")",
+    "new": "conn.CloseNow()"
+  },
+  {
+    "name": "138-eval-stats-any-json-accepted",
+    "file": "srv/conductor.go",
+    "old": "\tdefault:\n\t\treturn nil, fmt.Errorf(\"%w, got %s\", ErrStatsNotObject, trimmed)",
+    "new": "\tdefault:\n\t\treturn cloneRawMessage(trimmed), nil // deliberately: any JSON value is accepted and stored, so stats is the one documented type nothing enforces",
+    "run": "TestConductorEvalResultStatsMustBeAnObject|TestAPIEvalResultStatsMustBeAnObject|TestAPIEvalResultMalformedStatsStillRejected"
+  },
+  {
+    "name": "139-eval-stats-null-echoed-back",
+    "file": "srv/conductor.go",
+    "old": "\tcase bytes.Equal(trimmed, []byte(\"null\")):\n\t\treturn nil, nil",
+    "new": "\tcase false:\n\t\treturn nil, nil // deliberately: a JSON null is stored verbatim, so a report with no stats comes back as \"stats\":null",
+    "run": "TestConductorEvalResultStatsMustBeAnObject|TestAPIEvalResultStatsAcceptsObjectOrNothing"
+  },
+  {
+    "name": "28-hub-double-close-allowed",
+    "file": "srv/hub.go",
+    "old": "if _, present := subs[sub]; !present {\n\t\treturn false\n\t}",
+    "new": "if false {\n\t\treturn false\n\t}"
+  },
+  {
+    "name": "29-hub-unsubscribe-does-not-close",
+    "file": "srv/hub.go",
+    "old": "close(sub.ch)\n\tdelete(subs, sub)\n\treturn true",
+    "new": "delete(subs, sub)\n\treturn true",
+    "run": "TestHubUnsubscribeStopsDeliveryAndClosesExactlyOnce"
+  },
+  {
+    "name": "30-hub-slow-client-blocks",
+    "file": "srv/hub.go",
+    "old": "select {\n\tcase sub.ch <- msg:\n\t\treturn true\n\tdefault:\n\t\treturn false\n\t}",
+    "new": "sub.ch <- msg\n\treturn true",
+    "run": "TestHubSlowSubscriberCannotBlockOthers|TestHubConcurrentSubscribeUnsubscribeBroadcast"
+  },
+  {
+    "name": "31-hub-broadcast-skips-a-subscriber",
+    "file": "srv/hub.go",
+    "old": "\t\t\tfor sub := range subs {\n\t\t\t\tif sub == skip {",
+    "new": "\t\t\tskipped := false\n\t\t\tfor sub := range subs {\n\t\t\t\tif !skipped {\n\t\t\t\t\tskipped = true\n\t\t\t\t\tcontinue\n\t\t\t\t}\n\t\t\t\tif sub == skip {",
+    "run": "TestHubBroadcastReachesEverySubscriberWithIdenticalBytes"
+  },
+  {
+    "name": "32-hub-count-escapes-the-hub-goroutine",
+    "file": "srv/hub.go",
+    "old": "case reply := <-h.count:\n\t\t\treply <- len(subs)",
+    "new": "case reply := <-h.count:\n\t\t\tgo func() { reply <- len(subs) }()"
+  },
+  {
+    "name": "33-hub-dropped-client-not-removed",
+    "file": "srv/hub.go",
+    "old": "\t\t\t\tif !h.deliver(sub, msg) {\n\t\t\t\t\tremoveSubscriber(subs, sub)",
+    "new": "\t\t\t\tif !h.deliver(sub, msg) {\n\t\t\t\t\t_ = sub // deliberately: the drop is never removed from the set"
+  },
+  {
+    "name": "34-hub-removal-not-recorded",
+    "file": "srv/hub.go",
+    "old": "close(sub.ch)\n\tdelete(subs, sub)\n\treturn true",
+    "new": "close(sub.ch)\n\treturn true"
+  },
+  {
+    "name": "35-ws-listener-never-subscribes",
+    "file": "srv/ws.go",
+    "old": "sub, err := s.Hub.Subscribe()",
+    "new": "sub, err := (*Subscriber)(nil), error(ErrHubClosed)",
+    "run": "TestWSUpgradeSucceedsAndStaysOpen"
+  },
+  {
+    "name": "36-ws-subscriber-leaked-on-exit",
+    "file": "srv/ws.go",
+    "old": "\tdefer s.Hub.Unsubscribe(sub)",
+    "new": "\t_ = sub // deliberately leaked: the subscriber is never removed",
+    "run": "TestWSDisconnectUnsubscribesTheListener"
+  },
+  {
+    "name": "37-ws-broadcast-trimmed",
+    "file": "srv/ws.go",
+    "old": "return conn.Write(ctx, websocket.MessageText, msg)",
+    "new": "return conn.Write(ctx, websocket.MessageText, msg[:max(0, len(msg)-1)])",
+    "run": "TestWSBroadcastReachesTheListenerAsExactBytes"
+  },
+  {
+    "name": "38-ws-write-deadline-removed",
+    "file": "srv/ws.go",
+    "old": "ctx, cancel := context.WithTimeout(context.Background(), s.wsWriteTimeout)",
+    "new": "ctx, cancel := context.WithCancel(context.Background())"
+  },
+  {
+    "name": "39-ws-going-away-not-reported",
+    "file": "srv/ws.go",
+    "old": "websocket.StatusGoingAway, \"server shutting down\"",
+    "new": "websocket.StatusNormalClosure, \"server shutting down\""
+  },
+  {
+    "name": "40-ws-client-close-not-noticed",
+    "file": "srv/ws.go",
+    "old": "clientGone := conn.CloseRead(context.Background())",
+    "new": "clientGone := context.Background()",
+    "run": "TestWSDisconnectUnsubscribesTheListener"
+  },
+  {
+    "name": "41-ws-binary-frames",
+    "file": "srv/ws.go",
+    "old": "return conn.Write(ctx, websocket.MessageText, msg)",
+    "new": "return conn.Write(ctx, websocket.MessageBinary, msg)"
+  },
+  {
+    "name": "42-no-snapshot-on-connect",
+    "file": "srv/ws.go",
+    "old": "if err := s.sendSnapshot(conn); err != nil {\n\t\tslog.Debug(\"websocket snapshot\", \"path\", r.URL.Path, \"error\", err)\n\t}",
+    "new": "_ = 0 // deliberately no catch-up snapshot on connect",
+    "run": "TestWSUpgradeSucceedsAndStaysOpen"
+  },
+  {
+    "name": "43-connect-frame-not-a-snapshot",
+    "file": "srv/ws.go",
+    "old": "s.encodeEvent(EventSnapshot, s.Conductor.Snapshot())",
+    "new": "s.encodeEvent(EventCode, s.Conductor.Snapshot())",
+    "run": "TestWSUpgradeSucceedsAndStaysOpen"
+  },
+  {
+    "name": "44-code-write-not-broadcast",
+    "file": "srv/api.go",
+    "old": "s.broadcast(EventCode, snap)",
+    "new": "_ = snap // deliberately not broadcast",
+    "run": "TestIntegrationEveryAcceptedWriteFansOutOnceToEveryListener"
+  },
+  {
+    "name": "45-message-write-not-broadcast",
+    "file": "srv/api.go",
+    "old": "s.broadcast(EventMessage, snap)",
+    "new": "_ = snap // deliberately not broadcast",
+    "run": "TestIntegrationEveryAcceptedWriteFansOutOnceToEveryListener"
+  },
+  {
+    "name": "46-transport-write-not-broadcast",
+    "file": "srv/api.go",
+    "old": "s.broadcast(EventTransport, snap)",
+    "new": "_ = snap // deliberately not broadcast",
+    "run": "TestIntegrationEveryAcceptedWriteFansOutOnceToEveryListener"
+  },
+  {
+    "name": "47-eval-result-not-broadcast",
+    "file": "srv/api.go",
+    "old": "s.broadcast(EventEvalResult, s.Conductor.Snapshot())",
+    "new": "_ = 0 // deliberately not broadcast",
+    "run": "TestIntegrationEveryAcceptedWriteFansOutOnceToEveryListener"
+  },
+  {
+    "name": "48-stale-eval-result-broadcasts",
+    "file": "srv/conductor.go",
+    "old": "return false, nil",
+    "new": "return true, nil // deliberately claims a stale report was stored",
+    "run": "TestIntegrationRejectedAndStaleWritesBroadcastNothing"
+  },
+  {
+    "name": "49-code-broadcast-twice",
+    "file": "srv/api.go",
+    "old": "s.broadcast(EventCode, snap)",
+    "new": "s.broadcast(EventCode, snap)\n\ts.broadcast(EventCode, snap)",
+    "run": "TestIntegrationEveryAcceptedWriteFansOutOnceToEveryListener"
+  },
+  {
+    "name": "50-rejected-code-still-broadcasts",
+    "file": "srv/api.go",
+    "old": "\t\twriteError(w, http.StatusBadRequest, \"code must not be empty: send the strudel pattern to play\")\n\t\treturn\n\t}",
+    "new": "\t\ts.broadcast(EventCode, s.Conductor.Snapshot())\n\t\twriteError(w, http.StatusBadRequest, \"code must not be empty: send the strudel pattern to play\")\n\t\treturn\n\t}",
+    "run": "TestIntegrationRejectedAndStaleWritesBroadcastNothing"
+  },
+  {
+    "name": "51-connect-snapshot-not-the-live-state",
+    "file": "srv/ws.go",
+    "old": "s.encodeEvent(EventSnapshot, s.Conductor.Snapshot())",
+    "new": "s.encodeEvent(EventSnapshot, Snapshot{})",
+    "run": "TestIntegrationConnectReceivesTheLiveSnapshot"
+  },
+  {
+    "name": "52-count-hook-never-installed",
+    "file": "srv/server.go",
+    "old": "NewHubWithCountHook(HubDefaultSendBuffer, s.listenerCountFrame)",
+    "new": "NewHub(HubDefaultSendBuffer)",
+    "run": "TestWSListenerCountIsPublishedOnConnectAndDisconnect"
+  },
+  {
+    "name": "53-count-not-published-on-subscribe",
+    "file": "srv/hub.go",
+    "old": "\t\t\tsubs[sub] = struct{}{}\n\t\t\tpublishCount(sub)\n\t\t\treq.reply <- sub",
+    "new": "\t\t\tsubs[sub] = struct{}{}\n\t\t\treq.reply <- sub",
+    "run": "TestHubCountHookReportsEveryTransition"
+  },
+  {
+    "name": "54-count-not-published-on-unsubscribe",
+    "file": "srv/hub.go",
+    "old": "\t\t\tif removed {\n\t\t\t\tpublishCount(req.sub)\n\t\t\t}\n\t\t\treq.reply <- removed",
+    "new": "\t\t\tif false {\n\t\t\t\tpublishCount(req.sub)\n\t\t\t}\n\t\t\treq.reply <- removed",
+    "run": "TestWSListenerCountIsPublishedOnConnectAndDisconnect"
+  },
+  {
+    "name": "55-count-not-published-on-drop",
+    "file": "srv/hub.go",
+    "old": "\t\t\tif h.onCount == nil {\n\t\t\t\treturn\n\t\t\t}",
+    "new": "\t\t\tif true {\n\t\t\t\treturn // deliberately: a dropped subscriber never publishes the new count\n\t\t\t}",
+    "run": "TestHubCountHookReportsTheDropOfASlowSubscriber|TestHubCountHookFrameReachesTheSurvivorsOfADrop"
+  },
+  {
+    "name": "56-count-published-after-the-subscribe-reply",
+    "file": "srv/hub.go",
+    "old": "\t\t\tpublishCount(sub)\n\t\t\treq.reply <- sub",
+    "new": "\t\t\treq.reply <- sub\n\t\t\tpublishCount(sub)",
+    "run": "TestHubCountHookIsPublishedBeforeTheCommandIsAnswered|TestWSConnectSnapshotCountsTheConnectingListener"
+  },
+  {
+    "name": "57-count-not-published-on-close",
+    "file": "srv/hub.go",
+    "old": "\t\t\tpublishCount(nil)\n\t\t\tclose(reply)",
+    "new": "\t\t\tclose(reply)",
+    "run": "TestHubCountHookPublishesZeroOnClose"
+  },
+  {
+    "name": "58-count-published-when-nothing-changed",
+    "file": "srv/hub.go",
+    "old": "\t\t\tif len(subs) == before {\n\t\t\t\treturn\n\t\t\t}\n",
+    "new": "\t\t\tif len(subs) == before {\n\t\t\t\t_ = h.onCount(len(subs)) // deliberately: publishes a count nobody changed\n\t\t\t\treturn\n\t\t\t}\n",
+    "run": "TestHubCountHookReportsEveryTransition"
+  },
+  {
+    "name": "59-negative-listener-count-not-clamped",
+    "file": "srv/conductor.go",
+    "old": "\tif n < 0 {\n\t\tn = 0\n\t}\n\tc.mu.Lock()\n\tdefer c.mu.Unlock()\n\tc.listeners = n",
+    "new": "\tc.mu.Lock()\n\tdefer c.mu.Unlock()\n\tc.listeners = n",
+    "run": "TestConductorSetListenerCountClampsAndLeavesTheVersionAlone"
+  },
+  {
+    "name": "60-listener-count-bumps-the-version",
+    "file": "srv/conductor.go",
+    "old": "\tc.mu.Lock()\n\tdefer c.mu.Unlock()\n\tc.listeners = n",
+    "new": "\tc.mu.Lock()\n\tdefer c.mu.Unlock()\n\tc.listeners = n\n\tc.version++",
+    "run": "TestConductorListenerCountDoesNotBumpVersion"
+  },
+  {
+    "name": "61-no-keepalive-at-all",
+    "file": "srv/ws.go",
+    "old": "\t\tcase <-ping.C:",
+    "new": "\t\tcase <-time.After(time.Duration(1<<62)):",
+    "run": "TestWSDeadListenerIsReaped"
+  },
+  {
+    "name": "62-keepalive-failure-ignored",
+    "file": "srv/ws.go",
+    "old": "\t\t\tif err := s.wsPingListener(conn); err != nil {",
+    "new": "\t\t\tif err := s.wsPingListener(conn); false {",
+    "run": "TestWSDeadListenerIsReaped"
+  },
+  {
+    "name": "63-pong-deadline-removed",
+    "file": "srv/ws.go",
+    "old": "ctx, cancel := context.WithTimeout(context.Background(), s.wsPongTimeout)",
+    "new": "ctx, cancel := context.WithCancel(context.Background())",
+    "run": "TestWSDeadListenerIsReaped"
+  },
+  {
+    "name": "64-keepalive-reaps-the-living",
+    "file": "srv/ws.go",
+    "old": "\t\t\tif err := s.wsPingListener(conn); err != nil {",
+    "new": "\t\t\tif err := s.wsPingListener(conn); err == nil {",
+    "run": "TestWSListenerSurvivesPingCycles"
+  },
+  {
+    "name": "65-listener-count-frame-never-built",
+    "file": "srv/server.go",
+    "old": "\treturn s.encodeEvent(EventListenerCount, s.Conductor.Snapshot())",
+    "new": "\treturn nil // deliberately: the count is published but nobody is told",
+    "run": "TestWSListenerCountIsBroadcastAsAnEvent"
+  },
+  {
+    "name": "66-listener-count-wrong-kind",
+    "file": "srv/server.go",
+    "old": "s.encodeEvent(EventListenerCount, s.Conductor.Snapshot())",
+    "new": "s.encodeEvent(EventTransport, s.Conductor.Snapshot())",
+    "run": "TestWSListenerCountIsBroadcastAsAnEvent"
+  },
+  {
+    "name": "67-count-frame-sent-to-its-cause",
+    "file": "srv/hub.go",
+    "old": "\t\t\t\tif sub == skip {\n\t\t\t\t\tcontinue\n\t\t\t\t}",
+    "new": "\t\t\t\t_ = skip // deliberately: the listener that caused the change is told too",
+    "run": "TestWSListenerCountFrameIsNotSentToTheListenerThatCausedIt|TestHubCountHookFrameReachesEveryoneExceptTheCause"
+  },
+  {
+    "name": "68-count-frame-built-and-thrown-away",
+    "file": "srv/hub.go",
+    "old": "\t\tif frame := h.onCount(len(subs)); frame != nil {\n\t\t\tfanOut(frame, cause)\n\t\t}",
+    "new": "\t\t_ = h.onCount(len(subs)) // deliberately: the frame is built and never delivered",
+    "run": "TestWSListenerCountIsBroadcastAsAnEvent|TestHubCountHookFrameReachesEveryoneExceptTheCause"
+  },
+  {
+    "name": "69-drop-not-broadcast-to-survivors",
+    "file": "srv/hub.go",
+    "old": "\t\t\tmsg = h.onCount(len(subs))\n\t\t\tif msg == nil {\n\t\t\t\treturn\n\t\t\t}",
+    "new": "\t\t\t_ = h.onCount(len(subs)) // deliberately: a drop publishes the count but sends no frame",
+    "run": "TestHubCountHookFrameReachesTheSurvivorsOfADrop"
+  },
+  {
+    "name": "70-cli-rejection-exits-zero",
+    "file": "cmd/agentcli/main.go",
+    "old": "\treturn exitError",
+    "new": "\treturn exitOK // deliberately: the failure is printed but reported as success",
+    "run": "TestRejectionIsReportedVerbatimAndFails|TestUsageErrorsExitTwoWithoutSending|TestUnreachableServerIsNotARejection|TestAnchorRefusalIsReportedVerbatimAndFails"
+  },
+  {
+    "name": "71-cli-swalows-the-servers-reason",
+    "file": "cmd/agentcli/client.go",
+    "old": "\treturn probe.Error",
+    "new": "\treturn \"request failed\" // deliberately: the server's exact reason is replaced by a generic one",
+    "run": "TestRejectionIsReportedVerbatimAndFails|TestOversizedDocumentIsRejectedByTheServer|TestAnchorRefusalIsReportedVerbatimAndFails"
+  },
+  {
+    "name": "72-cli-reports-a-stale-verdict-as-stored",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\tstale := before.LastEvalResult != nil && verdictIsStale(*ver, before.LastEvalResult.Version)",
+    "new": "\tstale := false // deliberately: \"accepted\" is reported as \"stored\"",
+    "run": "TestEvalResultDistinguishesStoredFromIgnored"
+  },
+  {
+    "name": "73-cli-hush-noop-reported-as-a-change",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\tif before.Playing == playing {",
+    "new": "\tif before.Playing != playing && false { // deliberately: an idempotent no-op is reported as a change",
+    "run": "TestTransportReportsANoopAsANoop"
+  },
+  {
+    "name": "74-livecode-editor-adapter-not-loaded",
+    "file": "srv/templates/welcome.html",
+    "old": "    <script src=\"/static/editor.js\" defer></script>",
+    "new": "    <!-- deliberately: the editor adapter is never loaded -->",
+    "run": "TestLiveCodeEditorView"
+  },
+  {
+    "name": "75-livecode-view-writable",
+    "file": "srv/templates/welcome.html",
+    "old": "spellcheck=\"false\" readonly aria-readonly=\"true\"",
+    "new": "spellcheck=\"false\" aria-readonly=\"false\"",
+    "run": "TestLiveCodeEditorView"
+  },
+  {
+    "name": "76-livecode-error-region-not-highlighted",
+    "file": "srv/static/editor.js",
+    "old": "cm.addLineClass(line, 'background', 'editor-error-line');",
+    "new": "void line; // deliberately: the failing region is not highlighted",
+    "run": "TestLiveCodeEditorView"
+  },
+  {
+    "name": "77-livecode-flash-cue-dropped",
+    "file": "srv/static/editor.js",
+    "old": "root.classList.add('editor-flash');",
+    "new": "void root; // deliberately: no landed-version flash",
+    "run": "TestLiveCodeEditorView"
+  },
+  {
+    "name": "78-livecode-code-never-shown",
+    "file": "srv/static/session.js",
+    "old": "      ed.setCode(snapshot.code);",
+    "new": "      // deliberately: the arriving version is not shown",
+    "run": "TestLiveCodeEditorView"
+  },
+  {
+    "name": "79-anchor-route-not-mounted",
+    "file": "srv/api.go",
+    "old": "\tmux.HandleFunc(\"POST /api/anchor\", s.handleAPIAnchor)",
+    "new": "\t// deliberately: no agent can re-anchor the shared timeline",
+    "run": "TestAnchorRoute"
+  },
+  {
+    "name": "80-anchor-zero-rate-guard-removed",
+    "file": "srv/conductor.go",
+    "old": "\tif !(cps > 0) {",
+    "new": "\tif false { // deliberately: a zero or NaN rate is accepted as a shared timeline",
+    "run": "TestAnchorRouteRejectsNonsenseAnchor|TestConductorSetAnchorRejectsNonsense"
+  },
+  {
+    "name": "81-anchor-rate-ceiling-removed",
+    "file": "srv/conductor.go",
+    "old": "\tif cps > AnchorMaxCPS {",
+    "new": "\tif false { // deliberately: a runaway rate is accepted as a shared timeline",
+    "run": "TestAnchorRouteRejectsNonsenseAnchor|TestConductorSetAnchorRejectsNonsense"
+  },
+  {
+    "name": "81b-anchor-epoch-skew-guard-removed",
+    "file": "srv/conductor.go",
+    "old": "\tif skew > AnchorMaxSkewMS {",
+    "new": "\tif false { // deliberately: an epoch from a badly-skewed clock is accepted",
+    "run": "TestAnchorRouteRejectsNonsenseAnchor|TestConductorSetAnchorRejectsNonsense"
+  },
+  {
+    "name": "82-refused-anchor-still-stored",
+    "file": "srv/conductor.go",
+    "old": "\tif err := validateAnchor(epochMS, cps); err != nil {\n\t\treturn err\n\t}",
+    "new": "\tif err := validateAnchor(epochMS, cps); err != nil {\n\t\t_ = err // deliberately: the refusal is noticed and then ignored, so a rejected anchor is stored anyway\n\t}",
+    "run": "TestConductorSetAnchorRejectsNonsense|TestAnchorRouteRejectsNonsenseAnchor"
+  },
+  {
+    "name": "83-anchor-frame-never-built",
+    "file": "srv/api.go",
+    "old": "\ts.broadcast(EventAnchor, snap)",
+    "new": "\t_ = snap // deliberately: the anchor is stored but nobody is told",
+    "run": "TestAnchorRouteAcceptedBroadcastsOneAnchorFrame|TestAnchorRouteRejectedBroadcastsNothing"
+  },
+  {
+    "name": "84-anchor-frame-wrong-kind",
+    "file": "srv/api.go",
+    "old": "\ts.broadcast(EventAnchor, snap)\n\twriteJSON(w, http.StatusOK, snap)\n}",
+    "new": "\ts.broadcast(EventTransport, snap)\n\twriteJSON(w, http.StatusOK, snap)\n}",
+    "run": "TestAnchorRouteAcceptedBroadcastsOneAnchorFrame"
+  },
+  {
+    "name": "85-refused-anchor-still-broadcast",
+    "file": "srv/api.go",
+    "old": "\tif err := s.Conductor.SetAnchor(req.EpochMS, req.CPS); err != nil {\n\t\twriteError(w, http.StatusBadRequest, err.Error())\n\t\treturn\n\t}",
+    "new": "\tif err := s.Conductor.SetAnchor(req.EpochMS, req.CPS); err != nil {\n\t\tdefer s.broadcast(EventAnchor, s.Conductor.Snapshot())\n\t\twriteError(w, http.StatusBadRequest, err.Error())\n\t\treturn\n\t} // deliberately: a rejected re-anchor is announced to every listener",
+    "run": "TestAnchorRouteRejectedBroadcastsNothing"
+  },
+  {
+    "name": "86-sync-js-never-loaded",
+    "file": "srv/templates/welcome.html",
+    "old": "    <script src=\"/static/sync.js\" defer></script>",
+    "new": "    <!-- deliberately: the cycle-alignment module is never loaded -->",
+    "run": "TestSyncModuleIsServedAndCarriesTheContract"
+  },
+  {
+    "name": "87-commit-not-boundary-deferred",
+    "file": "srv/static/session.js",
+    "old": "    var handle = sync().scheduleAtBoundary(function (at) {",
+    "new": "    var handle = commitNow(commit, version, stats, pattern), sync().scheduleAtBoundary(function (at) { // deliberately: the commit is ALSO applied on arrival, which is the drift being fixed",
+    "run": "TestSessionDefersTheCommitToTheBoundary"
+  },
+  {
+    "name": "88-sync-lead-removed",
+    "file": "srv/static/sync.js",
+    "old": "    return anchor.epochMs + nextIndex * cycleMs + lead;",
+    "new": "    return anchor.epochMs + nextIndex * cycleMs; // deliberately: commits at the raw boundary, so a late frame rounds to a different bar",
+    "run": "TestTheLeadIsWhatAlignsTheLateClient|TestTwoClientsOnTheSameAnchorCommitOnTheSameBar"
+  },
+  {
+    "name": "89-pending-commit-not-cancelled",
+    "file": "srv/static/session.js",
+    "old": "      pendingCommit.cancel();",
+    "new": "      // deliberately: a superseded pattern still lands after the version that replaced it",
+    "run": "TestSyncModuleIsServedAndCarriesTheContract|TestANewerVersionSupersedesAPendingCommit"
+  },
+  {
+    "name": "90-cli-anchor-noop-reported-as-a-change",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\tif req.EpochMS == before.Anchor.EpochMS && req.CPS == before.Anchor.CPS {",
+    "new": "\tif false { // deliberately: re-sending the anchor the server already holds is reported as a fresh re-anchor",
+    "run": "TestAnchorReportsANoopAsANoop"
+  },
+  {
+    "name": "91-cli-anchor-half-not-carried-over",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\treq := anchorRequest{EpochMS: before.Anchor.EpochMS, CPS: before.Anchor.CPS}",
+    "new": "\treq := anchorRequest{} // deliberately: the half the caller did not name is sent as zero, so a tempo change loses the epoch",
+    "run": "TestAnchorCarriesOverTheHalfItWasNotGiven"
+  },
+  {
+    "name": "92-cli-anchor-no-pre-read",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\tbefore, err := c.get(ctx, \"/api/state\")\n\tif err != nil {\n\t\treturn err\n\t}\n\n\t// The half the caller did not name is carried over from the state just",
+    "new": "\tvar before snapshot\n\t// deliberately: the comparison is gone, so every accepted re-anchor reads as a change",
+    "run": "TestAnchorReportsANoopAsANoop|TestAnchorCarriesOverTheHalfItWasNotGiven"
+  },
+  {
+    "name": "93-sync-status-region-dropped",
+    "file": "srv/templates/welcome.html",
+    "old": "<div class=\"sync-status\" id=\"sync-status\" aria-live=\"polite\"></div>",
+    "new": "<!-- deliberately: sync-status region dropped -->",
+    "run": "TestSyncModuleIsServedAndCarriesTheContract"
+  },
+  {
+    "name": "94-sync-drift-value-not-written",
+    "file": "srv/static/session.js",
+    "old": "var driftText = typeof driftVal === \"number\"\n          ? (driftVal >= 0 ? \"+\" : \"\") + Math.round(driftVal) + \"ms\"\n          : String(driftVal);",
+    "new": "var driftText = \"0ms\"; // deliberately: drift value is never written",
+    "run": "TestSyncStatusUIRendersDriftAndStateInGoja"
+  },
+  {
+    "name": "95-sync-css-cue-removed",
+    "file": "srv/static/style.css",
+    "old": ".sync-drift {",
+    "new": ".sync-drift-removed {",
+    "run": "TestSyncModuleIsServedAndCarriesTheContract"
+  },
+  {
+    "name": "96-sync-status-writes-on-every-tick",
+    "file": "srv/static/session.js",
+    "old": "if (el.innerHTML === next) {\n      return;\n    }\n    el.innerHTML = next;",
+    "new": "el.innerHTML = next; // deliberately: an identical write still mutates the aria-live region, so the countdown is announced on every tick",
+    "run": "TestSyncStatusUIOnlyWritesOnChangeAndStopsOnPageHide"
+  },
+  {
+    "name": "97-sync-status-timer-never-stopped",
+    "file": "srv/static/session.js",
+    "old": "  window.addEventListener(\"pagehide\", stopStatusTimer);",
+    "new": "  // deliberately: the status interval outlives the page",
+    "run": "TestSyncStatusUIOnlyWritesOnChangeAndStopsOnPageHide"
+  },
+  {
+    "name": "98-cli-subcommand-help-is-a-usage-error",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\t\tif errors.Is(err, flag.ErrHelp) {\n\t\t\treturn errHelpRequested\n\t\t}",
+    "new": "\t\t_ = errHelpRequested // deliberately: ErrHelp is no longer special-cased, so -h is a usage error again and no flags are printed",
+    "run": "TestSubcommandHelpPrintsItsOwnFlags|TestFlaglessSubcommandHelpExitsZero"
+  },
+  {
+    "name": "99-cli-subcommand-help-exits-two",
+    "file": "cmd/agentcli/main.go",
+    "old": "\tif errors.Is(err, errHelpRequested) {\n\t\treturn exitOK\n\t}",
+    "new": "\tif errors.Is(err, errHelpRequested) {\n\t\terr = errHelpRequested\n\t} // deliberately: the sentinel is NOT mapped to exit 0, so help exits 1",
+    "run": "TestSubcommandHelpPrintsItsOwnFlags|TestFlaglessSubcommandHelpExitsZero"
+  },
+  {
+    "name": "100-cli-every-parse-error-is-help",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\t\tif errors.Is(err, flag.ErrHelp) {\n\t\t\treturn errHelpRequested\n\t\t}\n\t\treturn &usageError{msg: err.Error()}",
+    "new": "\t\treturn errHelpRequested // deliberately: every parse error is called help, so a bad flag exits 0",
+    "run": "TestSubcommandParseErrorsAreNotHelpRequests|TestSubcommandHelpDoesNotWeakenTheExitCodeContract"
+  },
+  {
+    "name": "101-cli-flagless-help-hides-real-mistakes",
+    "file": "cmd/agentcli/commands.go",
+    "old": "func wantsFlaglessHelp(args []string) bool {\n\tif len(args) != 1 {",
+    "new": "func wantsFlaglessHelp(args []string) bool {\n\tif len(args) >= 0 { // deliberately: the guard is always taken, so NO flagless subcommand ever answers help; `message -h` falls through and is sent to the server as narration instead",
+    "run": "TestFlaglessSubcommandHelpExitsZero|TestUsageErrorsExitTwoWithoutSending"
+  },
+  {
+    "name": "102-heartbeat-route-not-mounted",
+    "file": "srv/api.go",
+    "old": "\tmux.HandleFunc(\"POST /api/heartbeat\", s.handleAPIHeartbeat)",
+    "new": "\t// deliberately: no agent can ever prove it is alive",
+    "run": "TestHeartbeatEndpointIsRegistered|TestHeartbeatIsArgumentFree"
+  },
+  {
+    "name": "103-heartbeat-accepts-any-body",
+    "file": "srv/api.go",
+    "old": "\tif err := rejectUnexpectedBody(r); err != nil {\n\t\twriteDecodeError(w, err)\n\t\treturn\n\t}\n\t// The snapshot is returned",
+    "new": "\t// deliberately: the body is never inspected, so a client can smuggle a \"code\" field through\n\t// The snapshot is returned",
+    "run": "TestHeartbeatIsArgumentFree"
+  },
+  {
+    "name": "104-presence-bumps-the-version",
+    "file": "srv/conductor.go",
+    "old": "\tc.agentLastSeenMS = c.nowMS()\n\treturn c.snapshotLocked()",
+    "new": "\tc.agentLastSeenMS = c.nowMS()\n\tc.version++ // deliberately: a heartbeat is recorded as a new revision of the performance\n\treturn c.snapshotLocked()",
+    "run": "TestAgentPresenceNeverBumpsVersion|TestHeartbeatNeverBumpsVersion"
+  },
+  {
+    "name": "106-presence-never-decays",
+    "file": "srv/conductor.go",
+    "old": "\tp.Active = age <= AgentTTLMS",
+    "new": "\tp.Active = true // deliberately: a heartbeat is permanent, so a crashed agent stays \"live\" forever",
+    "run": "TestAgentPresenceDecaysExactlyAtTTL"
+  },
+  {
+    "name": "107-presence-ttl-off-by-one",
+    "file": "srv/conductor.go",
+    "old": "\tp.Active = age <= AgentTTLMS",
+    "new": "\tp.Active = age < AgentTTLMS // deliberately: the last millisecond of the lease is dropped",
+    "run": "TestAgentPresenceDecaysExactlyAtTTL"
+  },
+  {
+    "name": "108-presence-window-ignored",
+    "file": "srv/conductor.go",
+    "old": "\tp.Active = age <= AgentTTLMS",
+    "new": "\tp.Active = true // deliberately: the TTL is not consulted at all",
+    "run": "TestAgentPresenceDecaysExactlyAtTTL|TestAgentFrameFiresWhenTheLeaseDecaysWithTheTimestampUnchanged"
+  },
+  {
+    "name": "110-expiry-never-announced",
+    "file": "srv/presence.go",
+    "old": "\t\t\tannouncedMS = presence.LastSeenMS\n\t\t\ts.broadcast(EventAgent, s.Conductor.Snapshot())",
+    "new": "\t\t\tannouncedMS = presence.LastSeenMS\n\t\t\t_ = presence // deliberately: the lapse is noticed and never published, so every listener keeps a stale green badge",
+    "run": "TestAgentFrameFiresOnLeaseExpiry|TestAgentFrameFiresWhenTheLeaseDecaysWithTheTimestampUnchanged|TestAgentFrameFiresForALeaseThatNeverSpansATick|TestAgentIndicatorFollowsARealExpiryEndToEnd"
+  },
+  {
+    "name": "112-expiry-never-seen-is-sentinel",
+    "file": "srv/presence.go",
+    "old": "\tannouncedMS := int64(0)",
+    "new": "\tannouncedMS := int64(-1) // deliberately: a server that never saw an agent announces one going away",
+    "run": "TestAgentFrameDoesNotFireWithoutAnAgent"
+  },
+  {
+    "name": "113-expiry-frame-wrong-kind",
+    "file": "srv/presence.go",
+    "old": "\t\t\ts.broadcast(EventAgent, s.Conductor.Snapshot())",
+    "new": "\t\t\ts.broadcast(EventTransport, s.Conductor.Snapshot()) // deliberately: the lapse is reported as a transport change",
+    "run": "TestAgentFrameFiresOnLeaseExpiry|TestAgentIndicatorFollowsARealExpiryEndToEnd"
+  },
+  {
+    "name": "114-heartbeat-broadcasts",
+    "file": "srv/api.go",
+    "old": "\twriteJSON(w, http.StatusOK, s.Conductor.RecordAgentPresence())",
+    "new": "\tsnap := s.Conductor.RecordAgentPresence()\n\ts.broadcast(EventAgent, snap) // deliberately: every renewal is announced, so a heartbeat loop can evict a listener through the bounded queue\n\twriteJSON(w, http.StatusOK, snap)",
+    "run": "TestHeartbeatDoesNotBroadcast"
+  },
+  {
+    "name": "115-heartbeat-response-not-a-snapshot",
+    "file": "srv/api.go",
+    "old": "\twriteJSON(w, http.StatusOK, s.Conductor.RecordAgentPresence())",
+    "new": "\ts.Conductor.RecordAgentPresence()\n\twriteJSON(w, http.StatusOK, apiEvalAck{Accepted: true}) // deliberately: the ack is not the state it just wrote",
+    "run": "TestHeartbeatEndpointIsRegistered"
+  },
+  {
+    "name": "116-sweeper-starts-in-new",
+    "file": "srv/server.go",
+    "old": "\ts.Hub = NewHubWithCountHook(HubDefaultSendBuffer, s.listenerCountFrame)\n\treturn s",
+    "new": "\ts.Hub = NewHubWithCountHook(HubDefaultSendBuffer, s.listenerCountFrame)\n\ts.startAgentSweeper() // deliberately: constructing now runs the goroutine, so any later config change races it\n\treturn s",
+    "run": "TestAgentSweeperStartsInServeNotNew"
+  },
+  {
+    "name": "124-badge-ships-hardcoded-live",
+    "file": "srv/templates/welcome.html",
+    "old": "<span class=\"status-text\" id=\"agent-status-text\" aria-live=\"polite\">AGENT NEVER</span>",
+    "new": "<span class=\"status-text\" id=\"agent-status-text\" aria-live=\"polite\">LIVE</span>",
+    "run": "TestAgentIndicatorTemplateAndStyleAreWired"
+  },
+  {
+    "name": "125-badge-ids-removed",
+    "file": "srv/templates/welcome.html",
+    "old": "<div class=\"status-indicator agent-never\" id=\"status-indicator\" role=\"status\">",
+    "new": "<div class=\"status-indicator agent-never\" role=\"status\">",
+    "run": "TestAgentIndicatorTemplateAndStyleAreWired"
+  },
+  {
+    "name": "105-presence-enters-the-history",
+    "file": "srv/conductor.go",
+    "old": "\tc.agentLastSeenMS = c.nowMS()\n\treturn c.snapshotLocked()",
+    "new": "\tc.agentLastSeenMS = c.nowMS()\n\tc.history[c.histNext] = Version{Version: c.version, Code: \"heartbeat\"}\n\tc.histNext = (c.histNext + 1) % len(c.history)\n\tif c.histLen < len(c.history) {\n\t\tc.histLen++\n\t}\n\treturn c.snapshotLocked()",
+    "run": "TestAgentPresenceDoesNotEnterHistory"
+  },
+  {
+    "name": "109-never-seen-counts-as-active",
+    "file": "srv/conductor.go",
+    "old": "\tif lastSeenMS == 0 {\n\t\t// Never seen. This branch is only reachable for a clock within AgentTTL\n\t\t// of the epoch — real time is ~1.7e12 ms, so without it the arithmetic\n\t\t// below would still yield inactive, and a mutation deleting this line\n\t\t// survives every other test. It is kept because the marker is RESERVED\n\t\t// (see AgentPresence) and a server whose clock is wrong must not report\n\t\t// an agent that has never existed as present.\n\t\treturn p\n\t}",
+    "new": "\t// deliberately: the never-seen marker is treated as an ordinary old heartbeat",
+    "run": "TestAgentPresenceNeverSeenIsInactiveEvenOnAClockNearTheEpoch|TestAgentFrameDoesNotFireWithoutAnAgent"
+  },
+  {
+    "name": "111-expiry-announced-every-tick",
+    "file": "srv/presence.go",
+    "old": "\t\t\tif presence.LastSeenMS == announcedMS {\n\t\t\t\tcontinue\n\t\t\t}\n\n\t\t\tannouncedMS = presence.LastSeenMS",
+    "new": "\t\t\t_ = announcedMS // deliberately: the already-announced guard is gone\n\t\t\tannouncedMS = presence.LastSeenMS",
+    "run": "TestAgentFrameFiresOnLeaseExpiry"
+  },
+  {
+    "name": "117-sweeper-stop-does-not-join",
+    "file": "srv/presence.go",
+    "old": "\t\tclose(s.agentSweepDone)\n\t\tselect {\n\t\tcase <-s.agentSweepStopped:",
+    "new": "\t\tclose(s.agentSweepDone)\n\t\tselect {\n\t\tcase <-time.After(0): // deliberately: signals but never joins, leaking a goroutine per Server\n\t\tcase <-s.agentSweepStopped:",
+    "run": "TestStopAgentSweeperWaitsForTheGoroutine|TestAgentSweeperStopsPromptly"
+  },
+  {
+    "name": "118-indicator-renders-nothing",
+    "file": "srv/static/session.js",
+    "old": "    if (text && text.innerHTML !== state.label) {\n      text.innerHTML = state.label;\n    }",
+    "new": "    // deliberately: the badge state is computed and never written",
+    "run": "TestAgentIndicatorDistinguishesPresentFromAbsent|TestAgentIndicatorFollowsARealExpiryEndToEnd"
+  },
+  {
+    "name": "119-indicator-connected-looks-absent",
+    "file": "srv/static/session.js",
+    "old": "connected: { cls: \"agent-connected\", label: \"AGENT LIVE\" },",
+    "new": "connected: { cls: \"agent-absent\", label: \"AGENT LOST\" }, // deliberately: a live agent renders as a lost one",
+    "run": "TestAgentIndicatorDistinguishesPresentFromAbsent"
+  },
+  {
+    "name": "120-indicator-never-and-absent-collapsed",
+    "file": "srv/static/session.js",
+    "old": "return agent.lastSeenMs ? \"absent\" : \"never\";",
+    "new": "return \"absent\"; // deliberately: never-connected and the-agent-died become the same words",
+    "run": "TestAgentIndicatorDistinguishesNeverSeenFromDecayed"
+  },
+  {
+    "name": "121-indicator-writes-on-every-frame",
+    "file": "srv/static/session.js",
+    "old": "if (text && text.innerHTML !== state.label) {\n      text.innerHTML = state.label;\n    }",
+    "new": "text.innerHTML = state.label; // deliberately: an identical write still mutates the aria-live region",
+    "run": "TestAgentIndicatorSuppressesIdenticalWrites"
+  },
+  {
+    "name": "122-indicator-never-hooked-to-frames",
+    "file": "srv/static/session.js",
+    "old": "    renderAgentStatus(snapshot);\n    applyFrame(frame, snapshot, sandbox, live);",
+    "new": "    // deliberately: the badge is never refreshed from an incoming frame",
+    "run": "TestAgentIndicatorFollowsARealExpiryEndToEnd"
+  },
+  {
+    "name": "123-indicator-pulse-is-unconditional",
+    "file": "srv/static/style.css",
+    "old": ".status-indicator.agent-connected .status-dot {",
+    "new": ".status-indicator .status-dot { // deliberately: the pulse runs again whether an agent is alive or dead",
+    "run": "TestAgentIndicatorTemplateAndStyleAreWired"
+  },
+  {
+    "name": "126-viz-pattern-never-queried",
+    "file": "srv/static/viz.js",
+    "old": "    if (currentPattern && typeof currentPattern.queryArc === 'function') {",
+    "new": "    if (false) { // deliberately: the pattern is never consulted, so no lane is ever drawn",
+    "run": "TestVisualizationRendersHapLanesFromTheServedJS"
+  },
+  {
+    "name": "127-viz-lane-blocks-not-drawn",
+    "file": "srv/static/viz.js",
+    "old": "        ctx.fillRect(x1, blockY, blockW, blockH);",
+    "new": "        // deliberately: lane blocks are never drawn",
+    "run": "TestVisualizationRendersHapLanesFromTheServedJS"
+  },
+  {
+    "name": "128-viz-lane-key-prefers-s-over-note",
+    "file": "srv/static/viz.js",
+    "old": "    var pitch = value.note !== undefined && value.note !== null && value.note !== '' ? value.note : value.n;",
+    "new": "    var pitch = value.s; // deliberately: the sound wins the first match, collapsing every pitch in a {note, s} pattern onto one lane",
+    "run": "TestVisualizationLanesNotesByPitchNotBySound|TestVisualizationLaneColourMatchesLaneIdentity"
+  },
+  {
+    "name": "129-viz-n-keyed-haps-lose-their-pitch",
+    "file": "srv/static/viz.js",
+    "old": "    var pitch = value.note !== undefined && value.note !== null && value.note !== '' ? value.note : value.n;",
+    "new": "    var pitch = value.note; // deliberately: only the `note` spelling is read, so `n` haps fall through to the sample/other branch",
+    "run": "TestVisualizationLanesNKeyedHaps"
+  },
+  {
+    "name": "130-viz-lane-colour-decoupled-from-lane",
+    "file": "srv/static/viz.js",
+    "old": "        ctx.fillStyle = colourFor(laneKinds[lKey]);",
+    "new": "        ctx.fillStyle = colourFor(laneKinds[lKey] === 'note' ? 'other' : laneKinds[lKey]); // deliberately: the colour ignores the resolved kind, so the note branch paints the ungrouped colour",
+    "run": "TestVisualizationLaneColourMatchesLaneIdentity"
+  },
+  {
+    "name": "131-cli-stale-verdict-called-current",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\t\treturn verdictStale",
+    "new": "\t\treturn verdictCurrent // deliberately: a verdict for an older version is classified as current, so the exact confusion this bead was filed for returns",
+    "run": "TestStateSaysTheVerdictIsStaleAndNamesBothVersions|TestVerdictLineClassifiesEverySnapshotShape"
+  },
+  {
+    "name": "132-cli-stale-line-names-only-the-current-version",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\t\treturn fmt.Sprintf(\"STALE -- the verdict is for v%d, the current version is v%d (no browser has evaluated v%d yet)\",\n\t\t\tv.Version, snap.Version, snap.Version)",
+    "new": "\t\treturn fmt.Sprintf(\"STALE -- the current version is v%d\", snap.Version) // deliberately: the reader is left to work out which code the verdict is about, which is the comparison being removed",
+    "run": "TestStateSaysTheVerdictIsStaleAndNamesBothVersions|TestVerdictLineClassifiesEverySnapshotShape"
+  },
+  {
+    "name": "133-cli-no-verdict-reported-as-current",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\t\treturn fmt.Sprintf(\"NONE YET -- no browser has reported an evaluation, so nothing is known about v%d\",\n\t\t\tsnap.Version)",
+    "new": "\t\treturn fmt.Sprintf(\"CURRENT (v%d, ok=true)\", snap.Version) // deliberately: no verdict at all is reported as a passing one, so \"nothing is known\" reads as \"it worked\"",
+    "run": "TestStateSaysNoVerdictYetWithoutImplyingSuccess|TestVerdictLineClassifiesEverySnapshotShape"
+  },
+  {
+    "name": "134-cli-require-current-always-passes",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\tif classifyVerdict(snap) == verdictCurrent {\n\t\treturn nil\n\t}",
+    "new": "\t_ = classifyVerdict // deliberately: -require-current never refuses, so the machine-checkable form is a no-op that always reports success",
+    "run": "TestStateExitCodeOnAStaleRead|TestStateJSONModeIsUnaffectedByTheVerdictRow"
+  },
+  {
+    "name": "135-cli-impossible-verdict-folded-into-current",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\tdefault:\n\t\treturn verdictImpossible",
+    "new": "\tdefault:\n\t\treturn verdictCurrent // deliberately: a verdict naming a version the snapshot lacks is assumed to be current",
+    "run": "TestVerdictLineClassifiesEverySnapshotShape"
+  },
+  {
+    "name": "136-cli-verdict-row-dropped-from-state",
+    "file": "cmd/agentcli/commands.go",
+    "old": "verdictLine(*snap))",
+    "new": "\"\") // deliberately: the currency row renders empty, so the reader compares the version and last-eval rows by eye again",
+    "run": "TestStateSaysTheVerdictIsCurrentWhenVersionsMatch|TestStateSaysTheVerdictIsStaleAndNamesBothVersions|TestStateSaysNoVerdictYetWithoutImplyingSuccess"
+  },
+  {
+    "name": "137-cli-last-eval-row-reworded",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\t\tfmt.Fprintf(out, \"last eval:      version=%d ok=%t\", v.Version, v.OK)",
+    "new": "\t\tfmt.Fprintf(out, \"verdict detail: version=%d ok=%t\", v.Version, v.OK) // deliberately: the pre-existing row is reworded, breaking every caller that scrapes it",
+    "run": "TestEvalResultDistinguishesStoredFromIgnored|TestStatePrintsTheWholeSnapshot"
+  }
+]

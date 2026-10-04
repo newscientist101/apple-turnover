@@ -25,7 +25,9 @@ srv/ws.go           WebSocket listener endpoint
 srv/event.go        listener frame encoding and broadcast
 srv/static/         browser modules
 srv/templates/      HTML shell
-scripts/            mutation-testing tools
+scripts/mutations.json      the mutation table (JSON: anchors may hold any byte)
+scripts/mutation-parse.py    table validator, NUL record emitter, --lint/--selftest
+scripts/mutation-check.sh    the grid runner
 srv.service         systemd unit
 ```
 
@@ -365,6 +367,7 @@ Mutation testing deliberately introduces defects and requires the test suite to 
 
 ```bash
 make mutation-check
+make mutation-lint
 ./scripts/mutation-check.sh --list
 ./scripts/mutation-check.sh <mutation-id>
 ```
@@ -381,6 +384,75 @@ Rules:
 - Routed mutations must match at least one test; a regex matching nothing is `SURVIVED`.
 - Run only genuinely expensive mutations through narrow `-run` routing.
 - Do not run mutation checks concurrently when measuring performance.
+
+The table lives in `scripts/mutations.json` and is read by
+`scripts/mutation-parse.py`. It was a pipe-delimited heredoc inside
+`mutation-check.sh` until the bars-in-anchors defect below forced it out.
+
+**An anchor text is JSON, so it may contain anything.** A row is
+`{name, file, old, new}` plus an optional `run`: omit `run` entirely to mean
+the whole suite, because an empty `run` is rejected and "no `-run`" must stay
+distinguishable from `""`. No row may be added back into the shell script.
+
+The old format could not express an anchor containing a `|`. The delimiter
+split the row, `old` was truncated at the bar, and the rest was read as the
+`-run` regex. **Every one of those outcomes was non-diagnostic**: a truncated
+anchor matched nothing (`BROKEN`, blaming the implementation for a table
+typo), failed to compile as a regexp (`WEAK`, which reads like a routing
+mistake), or — worst — happened to match exactly once, so the grid mutated the
+**wrong text** and reported the row healthy. Commit `12f3a3d` worked around it by
+re-anchoring a row onto a pipe-free line rather than by fixing the format.
+
+Two consequences are load-bearing:
+
+- **A `WEAK` row caused by a malformed `-run` regexp is a table defect, not
+  evidence.** The parser compiles every `run` value up front and refuses the
+  grid, so that failure mode cannot masquerade as a result.
+- **A malformed row must stop the run, never be skipped or coerced.** Records
+  cross into bash NUL-separated through a **file**, never through `$(...)`:
+  bash silently strips NUL bytes from command substitution, which would delete
+  every field terminator and run the grid off garbage.
+
+`make mutation-lint` validates the table and every anchor with no test run.
+`./scripts/mutation-parse.py --selftest` proves a bar, a `||`, a tab, a newline
+and a quote in an anchor round-trip, apply, and revert byte-identically. Run
+both after touching the format: they are the only checks that fail if it
+regresses toward a delimiter.
+
+The grid **isolates itself in a throwaway git worktree** and never mutates the
+caller's checkout. This is the harness owning the invariant, not a caller
+remembering a convention: an interrupted run once left a mutation applied, and
+two concurrent runs once poisoned each other's baseline into a false red. The
+worktree is created from `HEAD` and then **overlaid with the caller's current
+working-tree content**, including untracked files, so uncommitted work is what
+gets graded — testing `HEAD` instead would quietly grade something nobody asked
+about. `--list` and `--lint` are read-only and stay in place;
+`MUTATION_WORKTREE=0` forces in-place mutation and announces itself, as does any
+fallback when no worktree can be created.
+
+Two consequences for other work:
+
+- **Do not edit `mutation-check.sh` while it is running.** Bash reads a script
+  incrementally by byte offset, so an edit mid-run makes it resume at a stale
+  offset: this happened, and the grid silently ran all 140 rows twice and
+  reported `280 caught`.
+- **Tests must not assume the checkout's absolute path.** The grid runs in a
+  worktree under `$TMPDIR`, which exposed `TestUnitExecStartPointsAtTheBuildOutput`
+  asserting `ExecStart == filepath.Join(repoRoot, "srv", "srv")`. That can only
+  hold at one directory on earth — the unit records where the service is
+  *deployed*, which is host configuration, not a property of wherever the tests
+  run. The test now asserts the portable relationship (one absolute command,
+  under the unit's own `WorkingDirectory`, naming the file `make build` writes);
+  all seven ways of breaking the unit still fail it.
+
+A `BROKEN` row is **not** cosmetic. It is a row the grid cannot run, so the
+behaviour it exists to prove is unproven, and the grid exits non-zero on it
+for that reason. Two rows (`12-transport-accepts-any-body` and
+`101-cli-flagless-help-hides-real-mistakes`) had been reporting BROKEN against
+the current implementation for some time — an anchor matching twice, and an
+anchor naming text a refactor deleted. Re-anchoring a row changes what it
+proves, so the replacement must be confirmed **caught**, not merely applied;
+`--lint` alone only proves the anchor is unique and present.
 
 A timeout can expose a hang, but the test still needs to fail because the intended invariant was violated.
 
@@ -403,7 +475,8 @@ Drive a decode seam (`handleFrame`), not only the renderer. Calling a paint func
 
 ## Measurement discipline
 
-- Use a real Git worktree when mutation or binary-build experiments could disturb the main tree.
+- Use a real Git worktree when mutation or binary-build experiments could disturb the main tree. `scripts/mutation-check.sh` now does this itself for every mutating run; the rule stands for anything else that mutates the tree.
+- Never edit a running bash script. It is read incrementally by byte offset, so a mid-run edit resumes at a stale offset — this corrupted a grid run and silently doubled its row count.
 - Preserve and report command exit codes.
 - Do not casually regenerate historical mutation benchmarks.
 - When documenting a defect/fix, record concrete evidence: failure mode, relevant stack frames or output, and duration where timing is material.

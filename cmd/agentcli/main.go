@@ -25,8 +25,9 @@ package main
 //     "ok" printed over an unchanged performance is how an agent concludes its
 //     push landed when it did not.
 //
-// Exit codes: 0 success, 1 the server refused or could not be reached, 2 the
-// command line was wrong (nothing was sent).
+// Exit codes: 0 success, 1 the server refused, could not be reached, or did not
+// give the caller what it asked for (see `state -require-current`), 2 the command
+// line was wrong (nothing was sent).
 
 import (
 	"context"
@@ -67,7 +68,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: agentcli [flags] <command> [args]\n\n")
 		fmt.Fprintf(stderr, "commands:\n")
-		fmt.Fprintf(stderr, "  state                     print the current snapshot\n")
+		fmt.Fprintf(stderr, "  state [-require-current]   print the current snapshot, and whether its verdict is current\n")
 		fmt.Fprintf(stderr, "  push [-f file] [-m text]  publish a new document (default: stdin)\n")
 		fmt.Fprintf(stderr, "  message <text>            set the agent narration\n")
 		fmt.Fprintf(stderr, "  hush                      stop the performance\n")

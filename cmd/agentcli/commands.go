@@ -87,23 +87,148 @@ func printFlaglessUsage(stderr io.Writer, name, summary string) {
 	fmt.Fprintf(stderr, "usage: agentcli %s\n  %s\n  (this command takes no flags)\n", name, summary)
 }
 
+// verdictState classifies the stored evaluation result against the current
+// version — that is, it answers one question: is the verdict the agent is about
+// to read about the code the agent currently has?
+//
+// This exists because the answer was previously left to the reader. `state`
+// printed `version: 8` and `last eval: version=7 ok=true` as two unrelated rows
+// with the whole snapshot printed between them, so a mismatch was as easy to
+// miss as a match was easy to assume. During live testing a verdict was twice
+// read as current when it was not (strudel-agent-uvj.14), and the verdict is the
+// ONLY feedback an agent gets about whether its code worked.
+//
+// verdictImpossible is the case the server cannot produce: RecordEvalResult
+// rejects a report for an unpublished version with ErrUnknownVersion, so
+// lastEvalResult.version > version cannot come off the wire. It is classified
+// rather than folded into CURRENT because a client that assumed the ordering
+// would print a confident "current" over a state it does not understand.
+type verdictState int
+
+const (
+	// verdictNoneYet means nothing has ever been evaluated: no listener has
+	// reported, so nothing at all is known about the current code.
+	verdictNoneYet verdictState = iota
+	// verdictCurrent means the stored verdict is about the live version.
+	verdictCurrent
+	// verdictStale means a verdict exists but is about an older version.
+	verdictStale
+	// verdictImpossible means the verdict names a version the snapshot does not
+	// have. Unreachable through the documented API; reported, never assumed away.
+	verdictImpossible
+)
+
+// verdictIsStale reports whether a verdict for verdictVersion is behind
+// currentVersion. It is the ONE definition of "this verdict is about older code",
+// shared by classifyVerdict below and by cmdEvalResult's accepted-but-ignored
+// report, so the two commands cannot drift into disagreeing about the same
+// snapshot. Only the ordering is defined here; what to DO about it is each
+// caller's business.
+func verdictIsStale(verdictVersion, currentVersion int64) bool {
+	return verdictVersion < currentVersion
+}
+
+// classifyVerdict reduces a snapshot to the one fact `state` must not leave
+// implied.
+//
+// Both fields are already on the snapshot the CLI fetched, so this costs no
+// request and changes nothing on the wire.
+func classifyVerdict(snap snapshot) verdictState {
+	v := snap.LastEvalResult
+	switch {
+	case v == nil:
+		return verdictNoneYet
+	case verdictIsStale(v.Version, snap.Version):
+		return verdictStale
+	case v.Version == snap.Version:
+		return verdictCurrent
+	default:
+		return verdictImpossible
+	}
+}
+
+// verdictLine renders the currency of the stored verdict as one row.
+//
+// Both versions are named in the stale case on purpose. Naming only the current
+// one would leave the reader to work out which code the verdict is about, which is
+// exactly the manual comparison this row removes.
+func verdictLine(snap snapshot) string {
+	v := snap.LastEvalResult
+	switch classifyVerdict(snap) {
+	case verdictCurrent:
+		return fmt.Sprintf("CURRENT (v%d, ok=%t)", v.Version, v.OK)
+	case verdictStale:
+		return fmt.Sprintf("STALE -- the verdict is for v%d, the current version is v%d (no browser has evaluated v%d yet)",
+			v.Version, snap.Version, snap.Version)
+	case verdictImpossible:
+		return fmt.Sprintf("UNEXPECTED -- the verdict names v%d but the current version is v%d, which the server should never report",
+			v.Version, snap.Version)
+	default:
+		// Deliberately says nothing about ok: there is no verdict, so there is no
+		// result, and a line that read as a result would be the original defect.
+		return fmt.Sprintf("NONE YET -- no browser has reported an evaluation, so nothing is known about v%d",
+			snap.Version)
+	}
+}
+
+// verdictFailure turns -require-current into the exit code, and is a no-op
+// without it.
+//
+// It is returned as a plain error rather than printed here so that run() owns
+// every message and every code, which is the discipline the rest of the CLI
+// follows. The error is NOT a usageError: the command line was perfectly valid
+// and the request was answered, so 2 would be a lie. It maps to 1, which now
+// means "the server did not give you what you asked for" — a refusal, a transport
+// failure, or a verdict that is not about the live code.
+func verdictFailure(requireCurrent bool, snap snapshot) error {
+	if !requireCurrent {
+		return nil
+	}
+	if classifyVerdict(snap) == verdictCurrent {
+		return nil
+	}
+	if v := snap.LastEvalResult; v != nil {
+		return fmt.Errorf("the stored verdict is for v%d, not the current version v%d",
+			v.Version, snap.Version)
+	}
+	return fmt.Errorf("no browser has reported an evaluation, so there is no verdict for v%d to trust",
+		snap.Version)
+}
+
 // cmdState prints the snapshot: the document, the version, the playing flag, the
 // last agent message and the listener count, which is the whole read path an
 // agent needs before deciding what to push next.
+//
+// It also prints the currency of the stored verdict, because that verdict is the
+// only feedback an agent gets about whether its code actually worked, and a
+// verdict about code the agent has replaced is worse than no verdict at all.
+//
+// -require-current turns that into an exit code, for a caller about to ACT on the
+// verdict rather than merely look at it. The default stays 0 on purpose: the
+// server answered correctly and the CLI reported it truthfully, so the read
+// succeeded, and a stale verdict is the NORMAL state of the snapshot while an
+// agent waits for a browser to evaluate its latest push. A plain poll that failed
+// during exactly that window would be unusable.
 func cmdState(ctx context.Context, c *client, args []string, out, stderr io.Writer) error {
-	if wantsFlaglessHelp(args) {
-		printFlaglessUsage(stderr, "state", "print the current snapshot")
-		return errHelpRequested
+	fs := flag.NewFlagSet("state", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	requireCurrent := fs.Bool("require-current", false,
+		"exit non-zero unless the stored verdict is for the current version")
+	if err := parseFlags(fs, args, stderr); err != nil {
+		return err
 	}
-	if len(args) > 0 {
-		return usagef("state takes no arguments, got %q", strings.Join(args, " "))
+	if fs.NArg() > 0 {
+		return usagef("state takes no arguments, got %q", strings.Join(fs.Args(), " "))
 	}
 	snap, err := c.get(ctx, "/api/state")
 	if err != nil {
 		return err
 	}
 	if c.jsonOutput {
-		return writeJSONLine(out, snap)
+		if err := writeJSONLine(out, snap); err != nil {
+			return err
+		}
+		return verdictFailure(*requireCurrent, *snap)
 	}
 	fmt.Fprintf(out, "version:        %d\n", snap.Version)
 	fmt.Fprintf(out, "playing:        %t\n", snap.Playing)
@@ -111,6 +236,11 @@ func cmdState(ctx context.Context, c *client, args []string, out, stderr io.Writ
 	fmt.Fprintf(out, "last message:   %s\n", orNone(snap.LastAgentMessage))
 	fmt.Fprintf(out, "anchor:         epochMs=%d cps=%g\n", snap.Anchor.EpochMS, snap.Anchor.CPS)
 	fmt.Fprintf(out, "code:\n%s\n", orNone(snap.Code))
+	// The verdict row goes ABOVE the raw last-eval row, and the raw row itself is
+	// unchanged: the bead forbids losing or rewording information that is printed
+	// today, and a caller scraping `last eval:` must keep working. The new row only
+	// adds the comparison the reader was having to make by eye.
+	fmt.Fprintf(out, "verdict:        %s\n", verdictLine(*snap))
 	if v := snap.LastEvalResult; v != nil {
 		fmt.Fprintf(out, "last eval:      version=%d ok=%t", v.Version, v.OK)
 		if v.Error != "" {
@@ -120,7 +250,7 @@ func cmdState(ctx context.Context, c *client, args []string, out, stderr io.Writ
 	} else {
 		fmt.Fprintf(out, "last eval:      none yet\n")
 	}
-	return nil
+	return verdictFailure(*requireCurrent, *snap)
 }
 
 // codeRequest is the documented POST /api/code body. Message is omitempty so an
@@ -317,7 +447,9 @@ func cmdEvalResult(ctx context.Context, c *client, args []string, out, stderr io
 		return writeJSONLine(out, ack)
 	}
 
-	stale := before.LastEvalResult != nil && *ver < before.LastEvalResult.Version
+	// The staleness test is the shared one, so this report and `state` can never
+	// call the same version current in one command and stale in the other.
+	stale := before.LastEvalResult != nil && verdictIsStale(*ver, before.LastEvalResult.Version)
 	if stale {
 		fmt.Fprintf(out, "eval-result: accepted but IGNORED for version %d (stale: version %d is already the stored verdict)\n",
 			*ver, before.LastEvalResult.Version)

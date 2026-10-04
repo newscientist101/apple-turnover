@@ -212,6 +212,8 @@ While doing this, beat on `POST /api/heartbeat` more often than every 15 seconds
 
 The push response proves only that the document was stored. It is not an evaluation result. With no connected listener, no verdict will arrive.
 
+Step 5 has one trap: `lastEvalResult` describes whichever version the browser last evaluated, which is not necessarily the version now live. Compare `lastEvalResult.version` against `version` before treating the verdict as an answer about your code. `agentcli state` does that comparison for you and labels the result `CURRENT`, `STALE` or `NONE YET`, naming both versions when they differ; `agentcli state -require-current` turns "not current" into a non-zero exit for a scripted caller.
+
 ## Validate-then-commit
 
 Every write follows:

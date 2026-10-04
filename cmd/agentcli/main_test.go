@@ -152,6 +152,337 @@ func TestStateJSONModeEmitsTheSnapshotVerbatim(t *testing.T) {
 	}
 }
 
+// publishVerdictForCurrent pushes a document and then reports a verdict for
+// exactly the version that push produced, so the server really holds a CURRENT
+// verdict. It goes through the CLI rather than the raw endpoint so the state it
+// produces is the state an agent would produce.
+//
+// The version is read back with `-json state` rather than assumed, because a
+// helper that reported a verdict for a version it had merely counted would set up
+// a STALE state and every test using it would be testing the wrong thing.
+func publishVerdictForCurrent(t *testing.T, base, code string, ok bool) {
+	t.Helper()
+	if got := runCLI(t, base, code, "push"); got.code != exitOK {
+		t.Fatalf("setup push: exit %d, stderr %q", got.code, got.stderr)
+	}
+	version := currentVersion(t, base)
+	args := []string{"eval-result", "-version", strconv.FormatInt(version, 10)}
+	if !ok {
+		args = append(args, "-ok=false")
+	}
+	if got := runCLI(t, base, "", args...); got.code != exitOK {
+		t.Fatalf("setup eval-result: exit %d, stderr %q", got.code, got.stderr)
+	}
+}
+
+// currentVersion reads the live version back through the CLI's own JSON output,
+// which is also a check that -json is still machine-readable.
+func currentVersion(t *testing.T, base string) int64 {
+	t.Helper()
+	got := runCLI(t, base, "", "-json", "state")
+	if got.code != exitOK {
+		t.Fatalf("read the current version: exit %d, stderr %q", got.code, got.stderr)
+	}
+	var snap snapshot
+	if err := json.Unmarshal([]byte(got.stdout), &snap); err != nil {
+		t.Fatalf("decode -json state: %v\ngot: %q", err, got.stdout)
+	}
+	return snap.Version
+}
+
+// pushSecondVersion publishes a second document, so the verdict stored by
+// publishVerdictForCurrent is left behind exactly as it was during the live
+// session that prompted strudel-agent-uvj.14: a real v1 verdict, a real v2, and
+// nothing in the output connecting the two.
+func pushSecondVersion(t *testing.T, base string) {
+	t.Helper()
+	if got := runCLI(t, base, `s("hh cp")`, "push"); got.code != exitOK {
+		t.Fatalf("setup second push: exit %d, stderr %q", got.code, got.stderr)
+	}
+}
+
+// TestStateSaysTheVerdictIsCurrentWhenVersionsMatch covers the case that used to
+// be indistinguishable from the stale one: the stored verdict IS about the code
+// that is live. The output has to say so in words, because a reader (or an agent)
+// must never have to infer currency by comparing two rows by eye.
+func TestStateSaysTheVerdictIsCurrentWhenVersionsMatch(t *testing.T) {
+	base := newTestServer(t)
+	publishVerdictForCurrent(t, base, `s("bd*2")`, true)
+
+	got := runCLI(t, base, "", "state")
+	if got.code != exitOK {
+		t.Fatalf("state: exit %d, want 0 (stderr %q)", got.code, got.stderr)
+	}
+	if !strings.Contains(got.stdout, "CURRENT") {
+		t.Errorf("state output does not say the verdict is current\ngot:\n%s", got.stdout)
+	}
+	// It must name the version it is current FOR, and carry the ok flag through,
+	// so the row is useful without cross-reading the last-eval row.
+	if !strings.Contains(got.stdout, "v1") || !strings.Contains(got.stdout, "ok=true") {
+		t.Errorf("state output does not name the current version and verdict\ngot:\n%s", got.stdout)
+	}
+	// The whole point is that the stale wording does not appear here: a verdict
+	// for v1 while v1 is live is not stale, and saying STALE would be its own bug.
+	if strings.Contains(got.stdout, "STALE") {
+		t.Errorf("state reports a matching verdict as STALE\ngot:\n%s", got.stdout)
+	}
+}
+
+// TestStateSaysTheVerdictIsStaleAndNamesBothVersions is the defect this issue was
+// filed for, reproduced against the real server: a verdict is read for code the
+// agent has already replaced, and nothing in the output flags it.
+func TestStateSaysTheVerdictIsStaleAndNamesBothVersions(t *testing.T) {
+	base := newTestServer(t)
+	publishVerdictForCurrent(t, base, `s("bd*2")`, true)
+	pushSecondVersion(t, base)
+
+	got := runCLI(t, base, "", "state")
+	if got.code != exitOK {
+		t.Fatalf("state: exit %d, want 0 (stderr %q)", got.code, got.stderr)
+	}
+	if !strings.Contains(got.stdout, "STALE") {
+		t.Errorf("state output does not flag the verdict as stale\ngot:\n%s", got.stdout)
+	}
+	// BOTH versions, named. Naming only the current one leaves the reader to work
+	// out which code the verdict is about, which is the comparison being removed.
+	for _, want := range []string{"v1", "v2"} {
+		if !strings.Contains(got.stdout, want) {
+			t.Errorf("stale verdict line does not name %s\ngot:\n%s", want, got.stdout)
+		}
+	}
+	// And it must not claim currency, or the warning is no warning at all.
+	if strings.Contains(got.stdout, "CURRENT") {
+		t.Errorf("state claims a lagging verdict is CURRENT\ngot:\n%s", got.stdout)
+	}
+}
+
+// TestStateSaysNoVerdictYetWithoutImplyingSuccess covers the third state. There is
+// nothing to be current or stale about, so the line must say that plainly — and it
+// must not read as success. "No verdict" and "verdict ok=true" are very different
+// answers to "did my code work?", and only one of them is true here.
+func TestStateSaysNoVerdictYetWithoutImplyingSuccess(t *testing.T) {
+	base := newTestServer(t)
+	if got := runCLI(t, base, `s("bd*2")`, "push"); got.code != exitOK {
+		t.Fatalf("setup push: exit %d, stderr %q", got.code, got.stderr)
+	}
+
+	got := runCLI(t, base, "", "state")
+	if got.code != exitOK {
+		t.Fatalf("state: exit %d, want 0 (stderr %q)", got.code, got.stderr)
+	}
+	if !strings.Contains(got.stdout, "NONE YET") {
+		t.Errorf("state output does not say there is no verdict yet\ngot:\n%s", got.stdout)
+	}
+	// Not current, not stale: neither word may appear, because both would be a
+	// claim about a verdict that does not exist.
+	if strings.Contains(got.stdout, "CURRENT") || strings.Contains(got.stdout, "STALE") {
+		t.Errorf("state classifies an absent verdict as current or stale\ngot:\n%s", got.stdout)
+	}
+	// The pre-existing "none yet" row must survive: the bead forbids losing
+	// information that is printed today.
+	if !strings.Contains(got.stdout, "last eval:      none yet") {
+		t.Errorf("state lost the existing 'last eval: none yet' row\ngot:\n%s", got.stdout)
+	}
+}
+
+// TestStateExitCodeOnAStaleRead pins the deliberate exit-code decision.
+//
+// `state` exits 0 on a stale read by DEFAULT: the server answered correctly and
+// the CLI reported it truthfully, so the read succeeded. Making the plain poll
+// fail would break every caller that reads state while waiting for a verdict —
+// which is exactly the window a stale verdict is normal in, and the loop the same
+// epic is about to build.
+//
+// -require-current is the machine-checkable form, for an agent about to ACT on the
+// verdict: it exits 1 unless the stored verdict is for the current version. That
+// widens exit 1 to cover "the server did not give you what you asked for", which
+// is a deliberate, documented change rather than a redefinition of "refused".
+func TestStateExitCodeOnAStaleRead(t *testing.T) {
+	base := newTestServer(t)
+	publishVerdictForCurrent(t, base, `s("bd*2")`, true)
+	pushSecondVersion(t, base)
+
+	// The default read succeeds even though the verdict is behind.
+	plain := runCLI(t, base, "", "state")
+	if plain.code != exitOK {
+		t.Errorf("plain state on a stale verdict: exit %d, want 0 — the read succeeded\nstderr: %q",
+			plain.code, plain.stderr)
+	}
+	// ... and it still prints the snapshot, because a read that refuses to print
+	// is useless to a caller that wanted to see the state.
+	if !strings.Contains(plain.stdout, "version:        2") {
+		t.Errorf("plain state did not print the snapshot\ngot:\n%s", plain.stdout)
+	}
+
+	// The strict form refuses, and says why on stderr.
+	strict := runCLI(t, base, "", "state", "-require-current")
+	if strict.code != exitError {
+		t.Errorf("state -require-current on a stale verdict: exit %d, want %d\nstdout: %q\nstderr: %q",
+			strict.code, exitError, strict.stdout, strict.stderr)
+	}
+	if !strings.Contains(strict.stderr, "v1") || !strings.Contains(strict.stderr, "v2") {
+		t.Errorf("state -require-current stderr does not name both versions: %q", strict.stderr)
+	}
+
+	// A CURRENT verdict satisfies it, and stays a plain 0.
+	publishVerdictForCurrent(t, base, `s("cp*4")`, true)
+	current := runCLI(t, base, "", "state", "-require-current")
+	if current.code != exitOK {
+		t.Errorf("state -require-current on a current verdict: exit %d, want 0\nstderr: %q",
+			current.code, current.stderr)
+	}
+
+	// And with no verdict at all it refuses too: "nothing is known" must not pass
+	// a check for "the verdict I am about to trust is about my code".
+	empty := newTestServer(t)
+	if got := runCLI(t, empty, `s("bd")`, "push"); got.code != exitOK {
+		t.Fatalf("setup push on the empty server: exit %d, stderr %q", got.code, got.stderr)
+	}
+	none := runCLI(t, empty, "", "state", "-require-current")
+	if none.code != exitError {
+		t.Errorf("state -require-current with no verdict: exit %d, want %d\nstderr: %q",
+			none.code, exitError, none.stderr)
+	}
+}
+
+// TestStateRequireCurrentDoesNotWeakenTheExitCodeContract re-proves the mappings
+// the new flag sits next to. Adding a way to exit 1 on a successful read must not
+// make genuine refusals exit 0, nor turn a bad flag into something else: 1 stays
+// "the server did not give you what you asked for", 2 stays the caller's mistake.
+func TestStateRequireCurrentDoesNotWeakenTheExitCodeContract(t *testing.T) {
+	// An unreachable server is still exit 1, with or without the flag.
+	dead := "http://" + reserveClosedPort(t)
+	for _, args := range [][]string{{"state"}, {"state", "-require-current"}} {
+		got := runCLI(t, dead, "", args...)
+		if got.code != exitError {
+			t.Errorf("%v against an unreachable server: exit %d, want %d (stderr %q)",
+				args, got.code, exitError, got.stderr)
+		}
+	}
+
+	base := newTestServer(t)
+	// A bad flag is still exit 2, and is NOT a help request.
+	bad := runCLI(t, base, "", "state", "-require-currenting")
+	if bad.code != exitUsage {
+		t.Errorf("unknown flag on state: exit %d, want %d\nstderr: %q", bad.code, exitUsage, bad.stderr)
+	}
+	if !strings.Contains(bad.stderr, "agentcli: ") {
+		t.Errorf("unknown flag was not reported as a mistake:\n%s", bad.stderr)
+	}
+
+	// A positional argument is still the usage error it always was, with the same
+	// wording the exit-code contract documents.
+	extra := runCLI(t, base, "", "state", "now")
+	if extra.code != exitUsage || !strings.Contains(extra.stderr, "takes no arguments") {
+		t.Errorf("`state now`: exit %d, stderr %q; want exit %d and 'takes no arguments'",
+			extra.code, extra.stderr, exitUsage)
+	}
+}
+
+// TestStateJSONModeIsUnaffectedByTheVerdictRow guards the machine-readable path.
+// -json must stay the snapshot and nothing else: the verdict wording is prose for
+// a human reader, and leaking it into JSON would break every script that pipes the
+// output into jq.
+func TestStateJSONModeIsUnaffectedByTheVerdictRow(t *testing.T) {
+	base := newTestServer(t)
+	publishVerdictForCurrent(t, base, `s("bd*2")`, true)
+	pushSecondVersion(t, base)
+
+	got := runCLI(t, base, "", "-json", "state", "-require-current")
+	var snap snapshot
+	if err := json.Unmarshal([]byte(got.stdout), &snap); err != nil {
+		t.Fatalf("-json output is not decodable: %v\ngot: %q", err, got.stdout)
+	}
+	if snap.Version != 2 || snap.LastEvalResult == nil || snap.LastEvalResult.Version != 1 {
+		t.Errorf("-json snapshot = %+v, want version 2 with a v1 verdict still attached", snap)
+	}
+	// No prose whatsoever leaked into the JSON line.
+	for _, leak := range []string{"STALE", "CURRENT", "NONE YET", "verdict:"} {
+		if strings.Contains(got.stdout, leak) {
+			t.Errorf("-json output leaked the prose %q:\n%s", leak, got.stdout)
+		}
+	}
+	// The strict check still applies in JSON mode, because a script asking for it
+	// is exactly the caller that must not act on a lagging verdict.
+	if got.code != exitError {
+		t.Errorf("-json state -require-current on a stale verdict: exit %d, want %d",
+			got.code, exitError)
+	}
+}
+
+// TestVerdictLineClassifiesEverySnapshotShape unit-tests the classifier directly,
+// including the one combination the server cannot produce. A verdict for an
+// unpublished version is rejected with a 400 (ErrUnknownVersion), so
+// lastEvalResult.version > version is contract-impossible — but a client that
+// assumed the ordering would print a confident "CURRENT" over an impossible state
+// rather than admitting it does not understand what it was told.
+func TestVerdictLineClassifiesEverySnapshotShape(t *testing.T) {
+	tests := []struct {
+		name string
+		snap snapshot
+		want verdictState
+		// wantCurrent is asserted separately from want, because it is the property
+		// callers act on: only one verdictState may ever satisfy -require-current.
+		wantCurrent bool
+		wantText    string
+	}{
+		{
+			name:     "no verdict at all",
+			snap:     snapshot{Version: 3},
+			want:     verdictNoneYet,
+			wantText: "NONE YET",
+		},
+		{
+			name:        "verdict for the live version",
+			snap:        snapshot{Version: 3, LastEvalResult: &evalResult{Version: 3, OK: true}},
+			want:        verdictCurrent,
+			wantCurrent: true,
+			wantText:    "CURRENT",
+		},
+		{
+			name:     "verdict for an older version",
+			snap:     snapshot{Version: 3, LastEvalResult: &evalResult{Version: 2, OK: true}},
+			want:     verdictStale,
+			wantText: "STALE",
+		},
+		{
+			name:     "verdict for an unpublished version",
+			snap:     snapshot{Version: 3, LastEvalResult: &evalResult{Version: 9, OK: true}},
+			want:     verdictImpossible,
+			wantText: "UNEXPECTED",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyVerdict(tc.snap)
+			if got != tc.want {
+				t.Fatalf("classifyVerdict = %v, want %v", got, tc.want)
+			}
+			if (got == verdictCurrent) != tc.wantCurrent {
+				t.Errorf("currentness of %v disagrees with wantCurrent %v", got, tc.wantCurrent)
+			}
+			line := verdictLine(tc.snap)
+			if !strings.Contains(line, tc.wantText) {
+				t.Errorf("verdictLine = %q, want it to contain %q", line, tc.wantText)
+			}
+			// A STALE line that failed to name both versions would reintroduce the
+			// manual comparison this row exists to remove, so it is asserted on the
+			// text rather than trusted.
+			if got == verdictStale {
+				for _, want := range []string{"v2", "v3"} {
+					if !strings.Contains(line, want) {
+						t.Errorf("stale line %q does not name %s", line, want)
+					}
+				}
+			}
+			if got == verdictNoneYet && strings.Contains(line, "ok=") {
+				t.Errorf("no-verdict line %q reports an ok flag it does not have", line)
+			}
+		})
+	}
+}
+
 // TestPushReadsStdinAndFile covers both documented sources of the document, and
 // asserts the NEW VERSION is reported — the value a caller must read back to
 // close the loop, since it is what a later eval-result has to name.
@@ -838,6 +1169,11 @@ func TestSubcommandHelpPrintsItsOwnFlags(t *testing.T) {
 			wantText:  []string{"read the document from this file", "narration shown to listeners"},
 		},
 		{
+			command:   "state",
+			wantFlags: []string{"-require-current"},
+			wantText:  []string{"exit non-zero unless the stored verdict is for the current version"},
+		},
+		{
 			command:   "eval-result",
 			wantFlags: []string{"-version", "-ok", "-error", "-stats"},
 			wantText:  []string{"the published version this verdict is about", "opaque stats JSON"},
@@ -886,18 +1222,23 @@ func TestSubcommandHelpPrintsItsOwnFlags(t *testing.T) {
 }
 
 // TestFlaglessSubcommandHelpExitsZero covers the subcommands that have no flags
-// of their own (strudel-agent-uvj.12). They reject extra arguments, so `state -h`
+// of their own (strudel-agent-uvj.12). They reject extra arguments, so `message -h`
 // used to be reported as "takes no arguments, got \"-h\"" with exit 2 — a valid
 // request for help answered as a mistake, the same defect as on the flag-taking
 // commands.
 //
-// The check is deliberately narrow: an args slice that is EXACTLY the help flag.
-// `state extra` remains the usage error the exit-code contract promises, so this
-// cannot be satisfied by simply ignoring a subcommand's arguments.
+// `state` is NOT in this list any more: it grew -require-current (strudel-agent-uvj.14)
+// and is covered by TestSubcommandHelpPrintsItsOwnFlags instead. It still rejects
+// a positional argument, which TestStateRequireCurrentDoesNotWeakenTheExitCodeContract
+// pins, so the check below is not weakened by the move.
+//
+// The check itself is deliberately narrow: an args slice that is EXACTLY the help
+// flag. `message extra` remains the usage error the exit-code contract promises, so
+// this cannot be satisfied by simply ignoring a subcommand's arguments.
 func TestFlaglessSubcommandHelpExitsZero(t *testing.T) {
 	dead := "http://" + reserveClosedPort(t)
 
-	for _, command := range []string{"state", "message", "hush", "play"} {
+	for _, command := range []string{"message", "hush", "play"} {
 		for _, helpFlag := range []string{"-h", "--help"} {
 			t.Run(command+" "+helpFlag, func(t *testing.T) {
 				got := runCLI(t, dead, "", command, helpFlag)

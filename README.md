@@ -108,6 +108,9 @@ bin/agentcli anchor -cps 0.75
 bin/agentcli hush
 bin/agentcli play
 bin/agentcli eval-result -version 1 -ok=false -error "x is not a function"
+
+# Before acting on a verdict, insist that it is about the code that is live.
+bin/agentcli state -require-current || echo "the verdict is not about the current version"
 ```
 
 Base URL:
@@ -118,11 +121,26 @@ $STRUDEL_AGENT_URL environment override
 http://localhost:8000 default
 ```
 
-`-timeout` defaults to 10s per request; `-json` emits raw JSON. Exit codes are `0` for success, `1` for server/connection failure, and `2` for invalid CLI usage. Server error text is passed through unchanged on stderr.
+`-timeout` defaults to 10s per request; `-json` emits raw JSON. Exit codes are `0` for success, `1` when the server refused, could not be reached, or did not return what was asked for, and `2` for invalid CLI usage. Server error text is passed through unchanged on stderr.
+
+### Verdict currency
+
+`state` prints one `verdict:` row stating, in words, whether the stored evaluation result is about the code that is live right now:
+
+| verdict row | meaning |
+|---|---|
+| `CURRENT (v8, ok=true)` | the stored verdict is about the current version |
+| `STALE -- the verdict is for v7, the current version is v8 (no browser has evaluated v8 yet)` | a verdict exists but is about code that has since been replaced |
+| `NONE YET -- no browser has reported an evaluation, so nothing is known about v8` | no verdict exists; nothing is known about whether the code works |
+| `UNEXPECTED -- ...` | the verdict names a version the snapshot does not have, which the documented API cannot produce |
+
+This matters because the verdict is the only feedback an agent gets about whether its code actually worked, and during live testing a verdict for a superseded version was twice read as current. The raw `last eval:` row is unchanged and still printed underneath, so nothing that was visible before is lost, and `-json` is still just the snapshot.
+
+A plain `state` **exits `0` on a stale verdict**: the read succeeded and the CLI reported it truthfully, and a lagging verdict is the normal state of the snapshot while an agent waits for a browser to evaluate its latest push — failing there would make the ordinary poll unusable. `state -require-current` is the strict form for a caller about to *act* on the verdict: it exits `1` unless the stored verdict is for the current version. That is the one documented widening of exit `1`, which now also means "the server did not give you what you asked for".
 
 `anchor` can update either half of the anchor; the omitted half is taken from the current state.
 
-Every subcommand documents itself: `bin/agentcli <command> -h` (or `--help`) prints that command's own flags and defaults and exits `0`, without contacting the server. `state`, `message`, `hush` and `play` take no flags and say so. A genuine mistake — an unknown flag or an unparseable value — still exits `2`, so help (`0`) and a bad flag (`2`) remain distinguishable by exit code alone.
+Every subcommand documents itself: `bin/agentcli <command> -h` (or `--help`) prints that command's own flags and defaults and exits `0`, without contacting the server. `message`, `hush` and `play` take no flags and say so; `state` takes only `-require-current`. A genuine mistake — an unknown flag, an unparseable value, or a positional argument — still exits `2`, so help (`0`) and a bad flag (`2`) remain distinguishable by exit code alone.
 
 ## Verification
 

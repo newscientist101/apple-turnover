@@ -264,7 +264,8 @@ The CLI is a documented agent interface, so its exit codes are a contract:
 
 - `0` success, including a **help request** at both the top level and per
   subcommand.
-- `1` the server refused or could not be reached.
+- `1` the server refused, could not be reached, or did not return what the caller
+  asked for.
 - `2` the command line was wrong; nothing was sent.
 
 Help is a successful request, not a usage mistake. Each subcommand parses its own
@@ -275,9 +276,34 @@ usage function and maps `flag.ErrHelp` to a sentinel that `report()` turns into
 become undiscoverable and a valid request is mislabelled as a mistake. Every other
 parse error must remain a `usageError`.
 
-The flagless subcommands (`state`, `message`, `hush`, `play`) answer help only when
+The flagless subcommands (`message`, `hush`, `play`) answer help only when
 their args are **exactly** the help flag; their arguments are otherwise meaningful
 (`message "-h"` is narration), so a wider check would swallow real usage errors.
+`state` is not on that list any more: it grew `-require-current`, so it owns a
+`FlagSet` and its flags must stay documented by `state -h`.
+
+### Verdict currency in the CLI
+
+The stored verdict is the only feedback an agent gets about whether its code
+worked, so `state` must never let a lagging verdict read as a current one.
+
+- `verdictIsStale` is the **single** comparison defining staleness, shared by
+  `classifyVerdict` and by `eval-result`'s accepted-but-ignored report. Neither
+  command may grow its own, or the two can call the same version current in one
+  and stale in the other.
+- The currency is stated in words, naming **both** versions when stale. A row that
+  names only the current version leaves the reader doing the comparison by eye,
+  which is the defect (strudel-agent-uvj.14).
+- `NONE YET` is not success and must not print an `ok` flag. There is no verdict,
+  so there is no result.
+- The comparison is never assumed to hold: a verdict naming a version the
+  snapshot lacks is reported, not folded into "current".
+- Existing prose output is **added to**, never reworded or removed. `last eval:`
+  must survive verbatim, and `-json` must remain the untouched snapshot.
+- A plain read exits `0` on a stale verdict — the read succeeded, and a lagging
+  verdict is the normal state while an agent waits for a browser. Only
+  `-require-current` turns it into a non-zero, and that error must not be a
+  `usageError`: the command line was valid and the request was answered.
 
 ## Boundedness in tests
 

@@ -353,7 +353,7 @@ These are design properties, not bugs:
 - **No server audio.** The Go process never evaluates JavaScript or produces sound.
 - **Browser-only evaluation.** A server-accepted pattern can still fail in Strudel.
 - **Bar-aligned synchronization only.** There is no cross-machine sample clock.
-- **Drift is observable, not eliminated.** The client reports measured drift and `unscheduled` when the anchor cannot be used.
+- **Drift is observable, not eliminated.** The client reports measured drift and `unscheduled` when the anchor cannot be used, to `POST /api/sync-result`; an agent reads it from `snapshot.lastSync`, where `null` means nothing has been observed yet rather than zero. One reading describes one reporting browser, not the whole audience — see [Drift reporting](#drift-reporting).
 - **No persistence.** Restart returns to version 0.
 - **Network required at browser load.** Pinned CDN dependencies are not vendored.
 

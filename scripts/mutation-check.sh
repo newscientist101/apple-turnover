@@ -184,29 +184,24 @@ trap 'restore_all; rm -rf "$BACKUP_DIR"' EXIT
 # ---------------------------------------------------------------- mutations --
 #
 # The table is scripts/mutations.json, parsed by scripts/mutation-parse.py.
-# It USED to be a pipe-delimited heredoc in this file, one row per line:
+# A row is {name, file, old, new} plus an OPTIONAL run key, and an anchor is
+# JSON, so it may contain ANY character -- including `|`, `||`, tabs and
+# newlines. Omit `run` entirely to mean "whole suite"; an empty run is
+# rejected, so "no -run" stays distinguishable from "".
 #
-#     <name>|<file>|<old>|<new>|<optional -run regex>
-#
-# That format could not express an anchor text containing a `|`. The
-# delimiter split the row, `old` was silently truncated at the bar, and the
-# remainder was read as the `-run` regex. None of the outcomes was
-# diagnostic: a truncated anchor either matched nothing (BROKEN, which blames
-# the implementation for a typo in the table), failed to compile as a regexp
-# (WEAK, which looks like a routing mistake), or -- worst -- happened to
+# It USED to be a pipe-delimited heredoc in this file, and that format could
+# not carry a `|`: the delimiter split the row, `old` was silently truncated at
+# the bar, and the remainder was read as the `-run` regex. None of the outcomes
+# was diagnostic -- a truncated anchor either matched nothing (BROKEN, which
+# blames the implementation for a typo in the table), failed to compile as a
+# regexp (WEAK, which looks like a routing mistake), or -- worst -- happened to
 # match exactly once, so the grid mutated the WRONG text and reported the row
 # healthy. Commit 12f3a3d worked around that by re-anchoring a row onto a
-# line with no pipe rather than by fixing the format.
-#
-# JSON removes the class of bug instead of relocating it. A literal `|` is
-# just a character; a newline or tab is an ordinary escape. Nothing in an
-# anchor can terminate a field, so there is no delimiter left to collide with,
-# and no truncation to detect after the fact. `--lint` and the parser's own
-# selftest cover the regression directly.
-#
-# Each row is {name, file, old, new} with an OPTIONAL run key: omit `run`
-# entirely to mean "whole suite". An empty run is rejected, so "no -run" stays
-# distinguishable from "".
+# line with no pipe rather than by fixing the format; 231764d fixed the format.
+# AGENTS.md carries that account and is the authority -- any surviving text
+# describing a "pipe-delimited row", a "5th field", or "`|` is safe in a run
+# regex" is HISTORY and must not be copied into a row. `--lint` and the parser's
+# own selftest cover the regression directly.
 #
 # The old text must appear exactly once. Keep each mutation SMALL and tied to
 # one behavioural claim, so a reviewer can see the intent.

@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """mutation-parse.py — validate scripts/mutations.json and emit grid records.
 
-The mutation table used to live in a heredoc inside mutation-check.sh, one
-pipe-delimited row per line. That format could not express an anchor text
-containing a `|`: the delimiter split the row, the `old` text was silently
-truncated, and the remainder was read as the `-run` regex. The failure was
-never diagnostic -- it surfaced as a bogus BROKEN anchor, a WEAK regexp parse
-error, or worst of all a truncated anchor that happened to match once and so
-mutated the WRONG text while the row still reported itself healthy. Commit
-12f3a3d worked around it by re-anchoring a row onto a pipe-free line.
+The mutation table is scripts/mutations.json. A row is {name, file, old,
+new} plus an optional `run`, and an anchor is JSON, so it may contain ANY
+character -- including a `|`, a `||`, a tab, a newline or a quote. There is no
+delimiter left for an anchor to collide with, so nothing can truncate a row.
 
-JSON removes the class of bug rather than relocating it: a literal `|` is just
-a character, and newlines and tabs are ordinary escapes. Nothing in an anchor
-text can terminate a field, so there is no delimiter left to collide with.
+That is the whole point of the format. It USED to be a pipe-delimited heredoc
+inside mutation-check.sh, which could not carry a `|`: the delimiter split the
+row, `old` was silently truncated, and the remainder was read as the `-run`
+regex. That failure was never diagnostic -- it surfaced as a bogus BROKEN
+anchor, a WEAK regexp parse error, or worst of all a truncated anchor that
+happened to match once and so mutated the WRONG text while the row still
+reported itself healthy. Commit 12f3a3d worked around it by re-anchoring a row
+onto a pipe-free line; 231764d fixed the format instead. AGENTS.md carries that
+account and is the authority; --selftest below is what pins it.
 
 Usage:
     mutation-parse.py                 # NUL-separated records on stdout

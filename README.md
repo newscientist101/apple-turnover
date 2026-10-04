@@ -142,6 +142,7 @@ Tests use loopback/`httptest`, not the production port, and blocking operations 
 ## systemd deployment
 
 ```bash
+make build
 sudo cp srv.service /etc/systemd/system/srv.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now srv
@@ -150,7 +151,39 @@ systemctl status srv
 journalctl -u srv -f
 ```
 
-The service unit contains checkout-specific `WorkingDirectory` and `ExecStart` paths. Update both when deploying from a different checkout or under a different user.
+`systemctl start` can exit `0` while the unit is still failing to exec, so confirm the start with `systemctl is-active srv` (or a `curl` against `/api/state`) rather than trusting the exit code.
+
+`make start`, `make stop` and `make restart` wrap the same commands with `sudo`; they need no `systemctl` argument juggling and fail loudly rather than reporting a server that did not start.
+
+The unit carries checkout-specific `WorkingDirectory`, `ExecStart`, `User` and `Environment` paths. Update all four when deploying from a different checkout or under a different user; `srv/unit_test.go` fails if `ExecStart` stops pointing at the file `make build` writes.
+
+### Verified on the host
+
+The unit was installed and run on a real systemd host (WSL2, `systemd 255`) at commit `38bcf32`. Every row below is copied from that run, not read off the unit file:
+
+| Check | Observed |
+|---|---|
+| `systemctl is-enabled srv` | `enabled` |
+| `systemctl is-active srv` | `active` |
+| `systemctl status srv` | `active (running)`, MainPID `/home/exedev/strudel-agent/srv/srv`, no restart loop |
+| `journalctl -u srv` | one line per start, `INFO starting server addr=:8000`, no errors |
+| `curl -sf localhost:8000/api/state` | real snapshot, `"version":0` |
+| `bin/agentcli push` / `state` | `pushed version 1`, round-trip against the unit |
+| `curl -sf localhost:8000/` and `/static/*.js` | `200` for the page and all five browser modules |
+| `sudo make restart` | new MainPID, `active` again in under a second |
+| `sudo kill -9 <MainPID>` | `NRestarts=1`, new MainPID, `active` again after `RestartSec=5` |
+
+Two operational facts that run established, both of which cost a reader time otherwise:
+
+- **`systemctl start` exiting `0` does not mean the server started.** With `srv/srv` deleted, `systemctl start srv` still exited `0` while the unit sat in `activating (auto-restart)` with `status=203/EXEC`. Always confirm with `systemctl is-active srv` or a `curl` against `/api/state`. The 203 failure produced **no** `journalctl -u srv` line, because the process never ran and never wrote to the journal.
+- **`make clean` does not stop the service.** It deletes `srv/srv`; the running unit stayed `active` and kept answering `200` from the deleted inode. The next start is what fails, with `203/EXEC`. Run `make stop` first.
+
+Two deployment properties that follow from the design, not from the unit:
+
+- **Restarting resets the performance.** After the restart above, `GET /api/state` returned `"version":0` with an empty history. There is no persistence.
+- **`Restart=always` means a clean `make stop` is the only way to leave the server down**; anything else that kills the process, including a `kill -9`, is restarted within `RestartSec=5`.
+
+What this run does **not** prove: no browser was attached, so no WebSocket listener, no audio and no `lastEvalResult` were exercised through the unit. Those are browser-side and were verified separately.
 
 ## Repository map
 

@@ -164,6 +164,18 @@ Every listener event has exactly this shape:
 - With no usable anchor, the client commits immediately and marks the state `unscheduled`.
 - Synchronization behavior is proved by executing the served browser JavaScript, not by duplicating its arithmetic in Go tests.
 
+### Deployment unit
+
+`srv.service` is the only artifact no Go test executes, so a typo in it produces a service that never starts while the suite stays green. `srv/unit_test.go` closes that gap statically, without needing systemd, root, or the production port.
+
+- `ExecStart` must be the single absolute path `make build` writes (`srv/srv`, because `srv/` is a package directory). A change to the build output path must update the unit in the same commit.
+- `WorkingDirectory` must be the checkout root, since the server resolves `srv/templates` and `srv/static` relative to it.
+- The unit must name a non-root `User`, send stdout/stderr to `journal`, and set `HOME`/`USER` explicitly, because a systemd service inherits neither from a login session.
+- `Restart`/`RestartSec` must be present and `RestartSec` positive; `WantedBy=multi-user.target`.
+- `make start`/`stop`/`restart` must call `sudo systemctl <verb> srv` and must not contain `-`, `|| true` or `@`, which would turn a failed `systemctl` into a make success.
+- Live host behaviour is evidence, not inference: `systemctl start` can exit `0` while the unit is failing with `203/EXEC`, so a deployment is only proven by `is-active`, the journal, and a request against `/api/state`. The verified run is recorded in README.md.
+- `systemd-analyze verify` is opportunistic: the static assertions above are the portable guarantee, and the check skips when systemd is absent.
+
 ### Page and browser assets
 
 - `GET /` must render the complete shell, not merely a status-200 prefix.
@@ -225,6 +237,7 @@ Use `httptest` and loopback instead.
 | Browser timing | `srv/coherence_test.go` |
 | API documentation | `srv/agent_api_doc_test.go` |
 | Browser wiring | `srv/session_client_test.go`, `srv/editor_view_test.go`, `srv/viz_test.go`, `srv/agent_indicator_test.go` |
+| Deployment unit | `srv/unit_test.go` |
 | CLI | `cmd/agentcli/main_test.go` |
 
 Assert response **bodies**, not just status codes.

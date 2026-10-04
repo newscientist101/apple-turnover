@@ -1,6 +1,7 @@
 package srv
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,11 +31,26 @@ type Anchor struct {
 // document, and any version from the future).
 var ErrUnknownVersion = errors.New("unknown version")
 
+// ErrStatsNotObject is returned by RecordEvalResult when a report carries a
+// stats value that is valid JSON but not a JSON object.
+//
+// Stats is the one field of the report that arrives as raw bytes rather than a
+// typed Go value, so it is also the one field whose type nothing else checks:
+// version and ok are decoded into int64 and bool, and a wrong type fails the
+// decoder itself. Left permissive, stats becomes the single documented type the
+// server does not enforce — and it is worse than a no-op, because the value is
+// stored and echoed back verbatim, so a consumer that reasonably does
+// stats.haps gets undefined/false/null instead of an error. Rejecting it once,
+// at the boundary, is cheaper than defending against it in every future reader.
+var ErrStatsNotObject = errors.New("stats must be a JSON object")
+
 // EvalResult is a browser's report on whether one published version actually
 // evaluated in its sandbox repl. The Go server never evaluates JavaScript; it
 // only stores and forwards these reports so the external agent can close its
-// feedback loop. Stats are opaque client-supplied JSON (e.g. hap counts) and
-// are echoed back to /api/state verbatim.
+// feedback loop. Stats is opaque client-supplied JSON — the browser decides
+// which keys it reports and the server never interprets them — but it must be a
+// JSON OBJECT; see ErrStatsNotObject. A nil Stats means "none reported" and is
+// omitted from the wire rather than serialised as null.
 type EvalResult struct {
 	Version int64           `json:"version"`
 	OK      bool            `json:"ok"`
@@ -419,6 +435,11 @@ func (c *Conductor) SetListenerCount(n int) {
 // name an older version than the stored one are accepted but ignored, so a
 // straggling client cannot regress the agent's view of the newest version.
 //
+// It also returns ErrStatsNotObject when the report's stats is not a JSON
+// object, and it is where that check LIVES rather than in the HTTP handler:
+// this is the invariant's owner, and an invariant enforced only at one entry
+// point is enforced once. See normalizeStats.
+//
 // The bool reports whether the verdict was actually STORED, and it is the whole
 // point of the second return value. A nil error alone cannot express the
 // difference between "this changed the performance" and "this was understood
@@ -432,6 +453,14 @@ func (c *Conductor) RecordEvalResult(res EvalResult) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Body validation before version validation. Both are 400s to the caller,
+	// so the order is only visible in the message — but a body wrong in two
+	// ways should be diagnosed by the check the sender can actually act on.
+	stats, err := normalizeStats(res.Stats)
+	if err != nil {
+		return false, err
+	}
+
 	if res.Version <= 0 || res.Version > c.version {
 		return false, fmt.Errorf("%w: %d (latest is %d)", ErrUnknownVersion, res.Version, c.version)
 	}
@@ -443,11 +472,39 @@ func (c *Conductor) RecordEvalResult(res EvalResult) (bool, error) {
 		Version: res.Version,
 		OK:      res.OK,
 		Error:   res.Error,
-		Stats:   cloneRawMessage(res.Stats),
+		Stats:   stats,
 		EpochMS: time.Now().UnixMilli(),
 	}
 	c.lastEval = &stored
 	return true, nil
+}
+
+// normalizeStats validates that opaque report stats really is a JSON object and
+// returns the bytes to store.
+//
+// "Absent" and "present but empty" both mean the same thing — no stats — and
+// both collapse to nil so `omitempty` drops the key, which is what the API
+// documents. The JSON null deserves the same treatment and is the case easy to
+// get wrong: json.RawMessage implements json.Unmarshaler, so a null does NOT
+// leave the field nil, it becomes the four bytes "null". Storing that verbatim
+// emits "stats":null from a verdict that reported no stats at all.
+//
+// Everything else — scalar, string, array — is refused with the offending value
+// in the message, because the documented contract is that an error names what
+// the caller must change. Malformed JSON never reaches here: the HTTP decoder
+// rejects it first, and this deliberately does not try to recover from bytes it
+// cannot parse.
+func normalizeStats(raw json.RawMessage) (json.RawMessage, error) {
+	switch trimmed := bytes.TrimSpace(raw); {
+	case len(trimmed) == 0:
+		return nil, nil
+	case bytes.Equal(trimmed, []byte("null")):
+		return nil, nil
+	case trimmed[0] == '{':
+		return cloneRawMessage(trimmed), nil
+	default:
+		return nil, fmt.Errorf("%w, got %s", ErrStatsNotObject, trimmed)
+	}
 }
 
 // Snapshot returns a copy of the current state.

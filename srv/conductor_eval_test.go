@@ -3,6 +3,7 @@ package srv
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -153,6 +154,112 @@ func TestConductorRecordEvalResultSameVersionReplaces(t *testing.T) {
 	}
 	if got.Error != "SyntaxError: unexpected token" {
 		t.Errorf("LastEvalResult.Error = %q, want the re-reported text: a same-version report replaces the stored verdict wholesale", got.Error)
+	}
+}
+
+// TestConductorEvalResultStatsMustBeAnObject pins the ONE field on the eval
+// report that is not a plain scalar, and the only place its type can be
+// checked: stats arrives as opaque JSON bytes, so nothing but an explicit check
+// stops a scalar from being stored and echoed back to every future consumer.
+//
+// Every neighbouring field (version, ok, error) is decoded into a typed Go
+// field, so a wrong type is rejected by the decoder itself. stats alone would
+// otherwise be the one hole in "validate first, commit second" — and it is the
+// more dangerous of the two, because the value is echoed verbatim: a consumer
+// that reads stats.haps gets undefined/false/null instead of an error.
+func TestConductorEvalResultStatsMustBeAnObject(t *testing.T) {
+	tests := []struct {
+		name    string
+		stats   json.RawMessage
+		wantErr error // nil means the report must be accepted
+		want    string
+	}{
+		{name: "absent", stats: nil, want: ""},
+		{name: "empty", stats: json.RawMessage(``), want: ""},
+		{name: "null", stats: json.RawMessage(`null`), want: ""},
+		{name: "empty object", stats: json.RawMessage(`{}`), want: `{}`},
+		{name: "object", stats: json.RawMessage(`{"haps":12}`), want: `{"haps":12}`},
+		// Opaque means the KEYS are opaque, not the type: an object the server
+		// has never heard of must survive byte for byte, or the browser cannot
+		// report anything new without a server change.
+		{name: "unknown keys pass through", stats: json.RawMessage(`{"haps":1,"future":{"deep":[1,2]}}`), want: `{"haps":1,"future":{"deep":[1,2]}}`},
+		{name: "bool", stats: json.RawMessage(`true`), wantErr: ErrStatsNotObject},
+		{name: "number", stats: json.RawMessage(`123`), wantErr: ErrStatsNotObject},
+		{name: "string", stats: json.RawMessage(`"a string"`), wantErr: ErrStatsNotObject},
+		{name: "empty string", stats: json.RawMessage(`""`), wantErr: ErrStatsNotObject},
+		{name: "array", stats: json.RawMessage(`[1,2]`), wantErr: ErrStatsNotObject},
+		{name: "empty array", stats: json.RawMessage(`[]`), wantErr: ErrStatsNotObject},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewConductor(2)
+			c.Publish("code", "msg")
+
+			stored, err := c.RecordEvalResult(EvalResult{Version: 1, OK: true, Stats: tt.stats})
+
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("RecordEvalResult(stats=%s) error = %v, want %v", tt.stats, err, tt.wantErr)
+				}
+				if stored {
+					t.Error("RecordEvalResult reported a rejected stats value as STORED")
+				}
+				// Validate first, commit second: a refused report must leave the
+				// conductor exactly as it found it, or a bad body becomes state.
+				if snap := c.Snapshot(); snap.LastEvalResult != nil {
+					t.Errorf("a rejected report stored a verdict anyway: %+v", snap.LastEvalResult)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("RecordEvalResult(stats=%s) failed: %v", tt.stats, err)
+			}
+			if !stored {
+				t.Fatal("RecordEvalResult did not store a valid report")
+			}
+			got := c.Snapshot().LastEvalResult
+			if got == nil {
+				t.Fatal("LastEvalResult = nil after a stored report")
+			}
+			if string(got.Stats) != tt.want {
+				t.Errorf("stored stats = %q, want %q", got.Stats, tt.want)
+			}
+		})
+	}
+}
+
+// TestConductorEvalResultRejectedStatsNamesTheValue pins that the refusal is
+// actionable. An agent that gets a bare 400 cannot tell WHICH field was wrong,
+// and the documented promise is that error messages "name the offending field".
+func TestConductorEvalResultRejectedStatsNamesTheValue(t *testing.T) {
+	c := NewConductor(2)
+	c.Publish("code", "msg")
+
+	_, err := c.RecordEvalResult(EvalResult{Version: 1, OK: true, Stats: json.RawMessage(`[1,2]`)})
+	if err == nil {
+		t.Fatal("RecordEvalResult accepted an array stats")
+	}
+	msg := err.Error()
+	for _, want := range []string{"stats", "[1,2]"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q does not mention %q, so the caller cannot tell which value was refused", msg, want)
+		}
+	}
+}
+
+// TestConductorEvalResultStatsCheckedBeforeVersion pins the ORDER of the two
+// rejections. Both are 400s to the caller, so this is only observable in the
+// message — but a report that is wrong in two ways should not be diagnosed by
+// whichever check happens to run first, and the stats check is the one that
+// describes the field the sender can actually fix.
+func TestConductorEvalResultStatsCheckedBeforeVersion(t *testing.T) {
+	c := NewConductor(2)
+
+	_, err := c.RecordEvalResult(EvalResult{Version: 9999, OK: true, Stats: json.RawMessage(`true`)})
+	if !errors.Is(err, ErrStatsNotObject) {
+		t.Errorf("error = %v, want ErrStatsNotObject: a malformed body should be diagnosed before an unknown version", err)
 	}
 }
 

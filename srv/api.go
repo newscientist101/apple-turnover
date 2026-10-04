@@ -184,8 +184,12 @@ func (s *Server) handleAPIMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, snap)
 }
 
-// evalResultRequest is the POST /api/eval-result body. Stats are opaque
-// client-supplied JSON (hap counts and similar) and are stored verbatim.
+// evalResultRequest is the POST /api/eval-result body. Stats arrive as raw
+// JSON because their KEYS are opaque — the browser decides what to report and
+// the server never interprets them — but they must be a JSON OBJECT, which is
+// not something this struct can enforce: json.RawMessage accepts any JSON
+// value. RecordEvalResult is where that is checked, because the Conductor owns
+// the invariant rather than this one entry point into it.
 type evalResultRequest struct {
 	Version int64           `json:"version"`
 	OK      bool            `json:"ok"`

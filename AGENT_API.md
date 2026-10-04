@@ -116,7 +116,7 @@ A browser reports the result of evaluating a published version in its sandbox RE
 - `version` is required and must name a published version.
 - `ok` is the browser's verdict.
 - `error` is optional.
-- `stats` is optional opaque JSON supplied by the browser and echoed back.
+- `stats` is optional and must be a **JSON object**; its keys are opaque and echoed back verbatim. Omit it, or send `null`, to report no stats. A scalar or an array is rejected with `400` — the server stores and echoes this field, so a non-object would leave `stats.haps` silently `undefined` for every reader.
 
 `accepted:true` means the report was understood, not necessarily stored. A valid report older than the stored verdict is accepted but discarded as stale.
 
@@ -179,7 +179,7 @@ A stored verdict adds the server timestamp:
 {"version":7,"ok":false,"error":"x is not a function","stats":{"haps":0},"epochMs":1757000000123}
 ```
 
-Empty `error` and `stats` fields are omitted.
+Empty `error` and `stats` fields are omitted. That includes a report that sent `"stats":null`: a `null` means "no stats", so it is dropped rather than echoed back as `null`.
 
 ## Errors and status codes
 
@@ -194,6 +194,7 @@ Empty `error` and `stats` fields are omitted.
 | Body supplied to `/api/heartbeat` | `400` | `invalid JSON body: this endpoint takes no arguments: unexpected field(s) agentId (use POST /api/code to change the music)` |
 | Body over 64 KiB | `413` | `request body too large: limit is 65536 bytes` |
 | Verdict for an unpublished version | `400` | `unknown version: 9999 (latest is 0)` |
+| `stats` that is not a JSON object | `400` | `stats must be a JSON object, got [1,2]` |
 | Wrong method on an API endpoint | `405` + `Allow` | `method GET not allowed on /api/code, use POST` |
 | Unknown `/api` endpoint | `404` | `no such API endpoint: GET /api/nope` |
 

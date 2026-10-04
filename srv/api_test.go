@@ -560,6 +560,171 @@ func TestAPIEvalResultSuccess(t *testing.T) {
 	}
 }
 
+// TestAPIEvalResultStatsMustBeAnObject is the wire-level view of the same
+// invariant the Conductor test pins: on the real route tree, a stats value that
+// is valid JSON but not an object is refused with 400 and names the field.
+//
+// This is the case the decoder CANNOT catch for us. version, ok and error are
+// typed Go fields, so a wrong type fails json.Unmarshal; stats is
+// json.RawMessage, which accepts any JSON value at all. Left alone it becomes
+// the one field in the request whose documented type is not enforced — and the
+// value is stored and echoed back, so the next consumer to read stats.haps gets
+// a silent undefined rather than an error.
+func TestAPIEvalResultStatsMustBeAnObject(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "bool", body: `{"version":1,"ok":true,"stats":true}`},
+		{name: "number", body: `{"version":1,"ok":true,"stats":123}`},
+		{name: "string", body: `{"version":1,"ok":true,"stats":"a string"}`},
+		{name: "array", body: `{"version":1,"ok":true,"stats":[1,2]}`},
+		{name: "empty array", body: `{"version":1,"ok":true,"stats":[]}`},
+		{name: "empty string", body: `{"version":1,"ok":true,"stats":""}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := New()
+			s.Conductor.Publish(`s("bd*4")`, "")
+
+			w := apiRequest(t, s, http.MethodPost, "/api/eval-result", tt.body)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("POST /api/eval-result %s: status = %d, want 400 (body=%q)", tt.name, w.Code, w.Body.String())
+			}
+			wantJSONContentType(t, w)
+			errObj := decodeJSON(t, w)
+			if len(errObj) != 1 {
+				t.Errorf("error body = %v, want the single-field error object", errObj)
+			}
+			msg, _ := errObj["error"].(string)
+			if !strings.Contains(msg, "stats") {
+				t.Errorf("error %q does not name the offending field stats, so an agent cannot act on it", msg)
+			}
+
+			// Validate first, commit second: the refusal must leave no trace,
+			// or a bad body becomes state the agent later reads as a verdict.
+			state := decodeJSON(t, apiRequest(t, s, http.MethodGet, "/api/state", ""))
+			if lr := state["lastEvalResult"]; lr != nil {
+				t.Errorf("a refused report stored a verdict: %v", lr)
+			}
+			if v := state["version"].(json.Number); v.String() != "1" {
+				t.Errorf("version = %s, want 1: a refused report must not change published state", v)
+			}
+		})
+	}
+}
+
+// TestAPIEvalResultMalformedStatsStillRejected guards the behaviour that was
+// already correct, next to the check being added. A stats object check is easy
+// to implement with something that quietly swallows what it cannot parse — a
+// bare json.Valid, or recovering from the error — and that would turn a 400
+// into a silently dropped field. These bodies are unparseable, so the refusal
+// has to come from the decoder, and it must still be the documented one.
+func TestAPIEvalResultMalformedStatsStillRejected(t *testing.T) {
+	for _, tt := range []struct{ name, body string }{
+		{"truncated object", `{"version":1,"ok":true,"stats":{"haps":}`},
+		{"not json at all", `{"version":1,"ok":true,"stats":not json}`},
+		{"unterminated array", `{"version":1,"ok":true,"stats":[1,2`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := New()
+			s.Conductor.Publish(`s("bd*4")`, "")
+
+			w := apiRequest(t, s, http.MethodPost, "/api/eval-result", tt.body)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body=%q)", w.Code, w.Body.String())
+			}
+			msg, _ := decodeJSON(t, w)["error"].(string)
+			if !strings.HasPrefix(msg, "invalid JSON body: ") {
+				t.Errorf("error = %q, want the documented decode failure prefix", msg)
+			}
+			if lr := decodeJSON(t, apiRequest(t, s, http.MethodGet, "/api/state", ""))["lastEvalResult"]; lr != nil {
+				t.Errorf("a malformed report stored a verdict: %v", lr)
+			}
+		})
+	}
+}
+
+// TestAPIEvalResultStatsAcceptsObjectOrNothing pins the ACCEPTED side on the
+// wire, because the object check is only safe if the shapes the browser really
+// sends keep working — including the ones carrying no stats at all.
+//
+// The null case is the subtle one. json.RawMessage implements json.Unmarshaler,
+// so a JSON null does NOT leave the field nil: it becomes the four bytes "null",
+// which a zero-length omitempty does not drop. That emits "stats":null and
+// contradicts AGENT_API.md, which says empty stats are omitted.
+func TestAPIEvalResultStatsAcceptsObjectOrNothing(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		wantHas  bool   // must the stored verdict carry a stats key at all?
+		wantJSON string // required when wantHas
+	}{
+		{name: "no stats field", body: `{"version":1,"ok":true}`, wantHas: false},
+		{name: "explicit null", body: `{"version":1,"ok":true,"stats":null}`, wantHas: false},
+		{name: "empty object", body: `{"version":1,"ok":true,"stats":{}}`, wantHas: true, wantJSON: `{}`},
+		{
+			name: "browser shape", body: `{"version":1,"ok":true,"stats":{"haps":64,"sample":"bd"}}`,
+			wantHas: true, wantJSON: `{"haps":64,"sample":"bd"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := New()
+			s.Conductor.Publish(`s("bd*4")`, "")
+
+			w := apiRequest(t, s, http.MethodPost, "/api/eval-result", tt.body)
+			if w.Code != http.StatusOK {
+				t.Fatalf("POST /api/eval-result %s: status = %d, want 200 (body=%q)", tt.name, w.Code, w.Body.String())
+			}
+
+			// Read the served bytes rather than a re-decoded map: the question
+			// is whether the key is PRESENT in the JSON an agent receives, and
+			// re-decoding would flatten a null into indistinguishable nothing.
+			state := apiRequest(t, s, http.MethodGet, "/api/state", "").Body.String()
+			lr := lastEvalResultRaw(t, state)
+
+			if has := strings.Contains(lr, `"stats"`); has != tt.wantHas {
+				t.Fatalf("stored verdict carries a stats key = %t, want %t: %s", has, tt.wantHas, lr)
+			}
+			if tt.wantHas && !strings.Contains(lr, `"stats":`+tt.wantJSON) {
+				t.Errorf("stored stats = %s, want %s", lr, tt.wantJSON)
+			}
+		})
+	}
+}
+
+// lastEvalResultRaw returns the raw bytes of the snapshot's lastEvalResult
+// object, so a test can assert on which keys are PRESENT. Re-decoding into a
+// map would lose exactly the distinction these tests exist to make.
+func lastEvalResultRaw(t *testing.T, stateBody string) string {
+	t.Helper()
+	const key = `"lastEvalResult":`
+	i := strings.Index(stateBody, key)
+	if i < 0 {
+		t.Fatalf("snapshot has no lastEvalResult: %s", stateBody)
+	}
+	rest := stateBody[i+len(key):]
+	if strings.HasPrefix(rest, "null") {
+		t.Fatalf("lastEvalResult is null, want a stored verdict: %s", stateBody)
+	}
+	depth := 0
+	for n, c := range rest {
+		switch c {
+		case '{':
+			depth++
+		case '}':
+			if depth--; depth == 0 {
+				return rest[:n+1]
+			}
+		}
+	}
+	t.Fatalf("unterminated lastEvalResult object: %s", stateBody)
+	return ""
+}
+
 // TestAPIEvalResultUnknownVersion pins the error path that matters most: if the
 // agent is told a version evaluated when that version does not exist, its
 // feedback loop is lying to it. The report is refused with 400 and nothing is

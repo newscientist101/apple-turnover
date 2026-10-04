@@ -137,6 +137,8 @@ MUTATIONS=$(cat <<'EOF'
 25-ws-wrong-close-status|srv/ws.go|websocket.StatusNormalClosure|websocket.StatusGoingAway
 26-ws-origin-check-disabled|srv/ws.go|websocket.Accept(w, r, nil)|websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 27-ws-closes-without-handshake|srv/ws.go|conn.Close(websocket.StatusNormalClosure, "")|conn.CloseNow()
+138-eval-stats-any-json-accepted|srv/conductor.go|\tdefault:\n\t\treturn nil, fmt.Errorf("%w, got %s", ErrStatsNotObject, trimmed)|\tdefault:\n\t\treturn cloneRawMessage(trimmed), nil // deliberately: any JSON value is accepted and stored, so stats is the one documented type nothing enforces|TestConductorEvalResultStatsMustBeAnObject|TestAPIEvalResultStatsMustBeAnObject|TestAPIEvalResultMalformedStatsStillRejected
+139-eval-stats-null-echoed-back|srv/conductor.go|\tcase bytes.Equal(trimmed, []byte("null")):\n\t\treturn nil, nil|\tcase false:\n\t\treturn nil, nil // deliberately: a JSON null is stored verbatim, so a report with no stats comes back as "stats":null|TestConductorEvalResultStatsMustBeAnObject|TestAPIEvalResultStatsAcceptsObjectOrNothing
 28-hub-double-close-allowed|srv/hub.go|if _, present := subs[sub]; !present {\n\t\treturn false\n\t}|if false {\n\t\treturn false\n\t}
 29-hub-unsubscribe-does-not-close|srv/hub.go|close(sub.ch)\n\tdelete(subs, sub)\n\treturn true|delete(subs, sub)\n\treturn true|TestHubUnsubscribeStopsDeliveryAndClosesExactlyOnce
 30-hub-slow-client-blocks|srv/hub.go|select {\n\tcase sub.ch <- msg:\n\t\treturn true\n\tdefault:\n\t\treturn false\n\t}|sub.ch <- msg\n\treturn true|TestHubSlowSubscriberCannotBlockOthers|TestHubConcurrentSubscribeUnsubscribeBroadcast

@@ -133,6 +133,9 @@ The listener endpoint must never block on a client.
 - Empty `code` and `message` are errors, not no-ops.
 - Validate first, commit second, broadcast last.
 - An argument-free endpoint rejects any supplied field, including `/api/heartbeat`.
+- **A field that arrives as `json.RawMessage` is type-checked by hand, in the `Conductor`.** `stats` on `/api/eval-result` is the only such field: its KEYS are opaque (the browser decides what to report and the server never interprets them), but the value must be a JSON **object**, and nothing but an explicit check enforces that — `json.RawMessage` accepts any JSON value, so `stats:123` would otherwise be stored and echoed back, leaving every future reader of `stats.haps` with a silent `undefined`. Opacity is about the contents, not the shape. Rejecting once at the boundary beats defending in every reader (strudel-agent-uvj.19).
+- **"No stats" has three spellings — absent, empty, and JSON `null` — and all three must store `nil`.** The `null` case is the trap: `json.RawMessage` implements `json.Unmarshaler`, so a `null` does *not* leave the field nil, it becomes the four bytes `"null"`, which a zero-length `omitempty` does not drop. Storing that verbatim emits `"stats":null` from a verdict that reported no stats, contradicting the API's "empty fields are omitted".
+- Validation order within one body is body-then-identity: a report wrong in two ways is diagnosed by the check the sender can act on, so `stats` is validated before the version.
 - Broadcast the same snapshot that the HTTP response returns.
 - Keep `/api` errors uniformly JSON.
 - Keep route handling centralized in `routes()`; tests should exercise that real tree.

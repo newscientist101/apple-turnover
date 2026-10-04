@@ -410,6 +410,14 @@ type evalResultRequest struct {
 // a browser-shaped report relayed by an operator, and the pre-read is what makes
 // its output trustworthy; the alternative was printing a success the response
 // does not support.
+//
+// That same pre-read is also what makes the ONE destructive case detectable for
+// free: reporting a version that already has a stored verdict REPLACES it, so the
+// browser's real verdict — the only feedback an agent gets about whether its code
+// worked — is destroyed by an invented one, silently. That is now refused unless
+// -force is given (strudel-agent-uvj.17). It is a CLI-surface guard only: the
+// server is unchanged, the endpoint still accepts the report, and the one
+// command-to-one-endpoint mapping this file's header asserts still holds.
 func cmdEvalResult(ctx context.Context, c *client, args []string, out, stderr io.Writer) error {
 	fs := flag.NewFlagSet("eval-result", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -417,6 +425,8 @@ func cmdEvalResult(ctx context.Context, c *client, args []string, out, stderr io
 	ok := fs.Bool("ok", true, "report whether the version evaluated")
 	errText := fs.String("error", "", "the error text, when the evaluation threw")
 	stats := fs.String("stats", "", "opaque stats JSON, e.g. '{\"haps\":64}'")
+	force := fs.Bool("force", false,
+		"overwrite a verdict already stored for this version (refused without it)")
 	if err := parseFlags(fs, args, stderr); err != nil {
 		return err
 	}
@@ -439,6 +449,31 @@ func cmdEvalResult(ctx context.Context, c *client, args []string, out, stderr io
 		return err
 	}
 
+	// Overwriting a verdict is the one thing this command can do that destroys
+	// information rather than adding it. The server keeps exactly ONE verdict, so
+	// the destructive case is precisely "a verdict is already stored for the very
+	// version being reported" — which the pre-read above already answered, at no
+	// extra request.
+	//
+	// Without -force this is REFUSED rather than merely warned about: the report
+	// reaching the server at all would destroy the only real feedback signal in the
+	// system (the browser's own evaluate-then-commit verdict) and replace it with
+	// an invented one, silently — strudel-agent-uvj.17 was reported from live
+	// testing where exactly that happened while "testing the endpoint".
+	//
+	// The error is deliberately NOT a usageError. The command line was valid and
+	// nothing was sent, so 2 ("the command line was wrong") would misreport it;
+	// exit 1 already means the caller did not get what it asked for, which is
+	// exactly what happened (same reasoning as verdictFailure).
+	//
+	// A FIRST verdict is untouched: there is nothing to overwrite, and demanding an
+	// acknowledgement for the ordinary case would blunt the guard into a flag
+	// everybody pastes everywhere.
+	if v := before.LastEvalResult; v != nil && v.Version == *ver && !*force {
+		return fmt.Errorf("refusing to overwrite the verdict already stored for version %d (ok=%t); "+
+			"pass -force to replace it deliberately", v.Version, v.OK)
+	}
+
 	var ack evalAck
 	if err := c.post(ctx, "/api/eval-result", req, &ack); err != nil {
 		return err
@@ -453,6 +488,15 @@ func cmdEvalResult(ctx context.Context, c *client, args []string, out, stderr io
 	if stale {
 		fmt.Fprintf(out, "eval-result: accepted but IGNORED for version %d (stale: version %d is already the stored verdict)\n",
 			*ver, before.LastEvalResult.Version)
+		return nil
+	}
+	if replacing := before.LastEvalResult != nil && before.LastEvalResult.Version == *ver; replacing {
+		// Only reachable with -force, because the guard above refuses otherwise.
+		// Naming the replacement is the point: a permitted overwrite that printed
+		// the same line as a first verdict would leave the caller unable to tell
+		// that the browser's verdict is no longer the one stored.
+		fmt.Fprintf(out, "eval-result: stored for version %d (ok=%t), replacing the verdict already stored for version %d\n",
+			ack.Version, *ok, before.LastEvalResult.Version)
 		return nil
 	}
 	fmt.Fprintf(out, "eval-result: stored for version %d (ok=%t)\n", ack.Version, *ok)

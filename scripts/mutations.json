@@ -952,5 +952,40 @@
     "old": "\tstats, err := normalizeStats(res.Stats)\n\tif err != nil {\n\t\treturn false, err\n\t}\n\n\tif res.Version <= 0 || res.Version > c.version {\n\t\treturn false, fmt.Errorf(\"%w: %d (latest is %d)\", ErrUnknownVersion, res.Version, c.version)\n\t}",
     "new": "\tif res.Version <= 0 || res.Version > c.version {\n\t\treturn false, fmt.Errorf(\"%w: %d (latest is %d)\", ErrUnknownVersion, res.Version, c.version)\n\t}\n\tstats, err := normalizeStats(res.Stats) // deliberately: the version is diagnosed first, so a body wrong in two ways never names the field the sender can fix\n\tif err != nil {\n\t\treturn false, err\n\t}",
     "run": "TestConductorEvalResultStatsCheckedBeforeVersion"
+  },
+  {
+    "name": "141-cli-eval-result-overwrites-a-verdict-unguarded",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\tif v := before.LastEvalResult; v != nil && v.Version == *ver && !*force {",
+    "new": "\tif v := before.LastEvalResult; false && v != nil && v.Version == *ver && !*force { // deliberately: the destructive overwrite is unguarded again",
+    "run": "TestEvalResultRefusesToOverwriteAStoredVerdictWithoutForce"
+  },
+  {
+    "name": "142-cli-eval-result-force-demanded-when-nothing-to-overwrite",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\tif v := before.LastEvalResult; v != nil && v.Version == *ver && !*force {",
+    "new": "\tif v := before.LastEvalResult; v != nil && v.Version > 0 && !*force { // deliberately: a FIRST verdict also demands -force, blunting the guard",
+    "run": "TestEvalResultFirstVerdictNeedsNoForce"
+  },
+  {
+    "name": "143-cli-eval-result-force-defeats-staleness",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\tif stale {",
+    "new": "\tif stale && !*force { // deliberately: -force is treated as permission to regress an older version, so the ignored report is announced as stored",
+    "run": "TestEvalResultForceDoesNotDefeatStaleness"
+  },
+  {
+    "name": "144-cli-eval-result-refusal-reported-as-a-usage-error",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\t\treturn fmt.Errorf(\"refusing to overwrite the verdict already stored for version %d (ok=%t); \"+",
+    "new": "\t\treturn usagef(\"refusing to overwrite the verdict already stored for version %d (ok=%t); \"+ // deliberately: exit 2, mislabelling a valid command line as a mistake",
+    "run": "TestEvalResultRefusesToOverwriteAStoredVerdictWithoutForce"
+  },
+  {
+    "name": "145-cli-eval-result-replacement-not-announced",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\tif replacing := before.LastEvalResult != nil && before.LastEvalResult.Version == *ver; replacing {",
+    "new": "\tif replacing := false; replacing { // deliberately: a permitted overwrite is reported exactly like a first verdict",
+    "run": "TestEvalResultForceOverwritesTheStoredVerdict"
   }
 ]

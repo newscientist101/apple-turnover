@@ -708,6 +708,161 @@ func TestEvalResultDistinguishesStoredFromIgnored(t *testing.T) {
 	}
 }
 
+// storeVerdictFor publishes one document and then stores a verdict for exactly
+// that version, so the server really holds a CURRENT verdict the overwrite tests
+// can try to destroy.
+//
+// The verdict is deliberately ok=true with no error, because the tests below
+// assert on the stored verdict's CONTENT afterwards: a replacement that
+// half-happened would still leave a parseable verdict behind, and only the
+// ok/error pair distinguishes "replaced" from "untouched".
+func storeVerdictFor(t *testing.T, base string, version int64) {
+	t.Helper()
+	if got := runCLI(t, base, `s("bd")`, "push"); got.code != exitOK {
+		t.Fatalf("setup push: exit %d, stderr %q", got.code, got.stderr)
+	}
+	v := strconv.FormatInt(version, 10)
+	if got := runCLI(t, base, "", "eval-result", "-version", v); got.code != exitOK {
+		t.Fatalf("setup eval-result: exit %d, stderr %q", got.code, got.stderr)
+	}
+}
+
+// TestEvalResultFirstVerdictNeedsNoForce is the half of the contract that must
+// stay frictionless: a verdict for a version that has NONE stored yet is the
+// normal case (it is what relaying a browser's first report looks like), and
+// demanding an acknowledgement flag for it would blunt the guard — a flag
+// everybody pastes everywhere is a flag nobody reads.
+//
+// So the flag must appear in the HELP and nowhere in the output of a first
+// verdict.
+func TestEvalResultFirstVerdictNeedsNoForce(t *testing.T) {
+	base := newTestServer(t)
+	storeVerdictFor(t, base, 1)
+
+	// Nothing is stored for v2 yet, so this is a FIRST verdict.
+	if got := runCLI(t, base, `s("hh")`, "push"); got.code != exitOK {
+		t.Fatalf("setup second push: exit %d, stderr %q", got.code, got.stderr)
+	}
+	got := runCLI(t, base, "", "eval-result", "-version", "2", "-ok=false", "-error", "boom")
+	if got.code != exitOK {
+		t.Fatalf("first verdict for v2: exit %d, stderr %q — a first verdict must not need ceremony",
+			got.code, got.stderr)
+	}
+	if !strings.Contains(got.stdout, "stored for version 2") {
+		t.Errorf("first verdict for v2 = %q, want it reported as stored", got.stdout)
+	}
+	if strings.Contains(got.stdout, "-force") || strings.Contains(got.stderr, "-force") {
+		t.Errorf("a FIRST verdict mentioned -force (stdout %q, stderr %q); there was nothing to overwrite",
+			got.stdout, got.stderr)
+	}
+}
+
+// TestEvalResultRefusesToOverwriteAStoredVerdictWithoutForce is the defect
+// strudel-agent-uvj.17 reports: `eval-result` used to overwrite the real browser
+// verdict for a version with an invented one and say nothing, so an agent testing
+// the endpoint destroyed the only real feedback signal in the system.
+//
+// The pre-read this command already performs is what makes the destructive case
+// detectable with no extra request: the server keeps exactly ONE verdict, so a
+// stored verdict for the SAME version is precisely the verdict this report would
+// replace.
+//
+// Three things are asserted, and the last is the one that matters most: not merely
+// that the CLI complained, but that the genuine verdict survived. A guard that
+// printed a warning and sent the POST anyway would pass an output-only assertion.
+func TestEvalResultRefusesToOverwriteAStoredVerdictWithoutForce(t *testing.T) {
+	base := newTestServer(t)
+	storeVerdictFor(t, base, 1)
+
+	got := runCLI(t, base, "", "eval-result", "-version", "1", "-ok=false", "-error", "invented")
+	if got.code == exitOK {
+		t.Fatalf("overwriting a stored verdict without -force: exit 0\nstdout: %q\nstderr: %q",
+			got.stdout, got.stderr)
+	}
+	if !strings.Contains(got.stderr, "-force") {
+		t.Errorf("stderr %q, want it to name the flag that permits the overwrite", got.stderr)
+	}
+	if !strings.Contains(got.stderr, "version 1") {
+		t.Errorf("stderr %q, want it to name the version whose verdict is at risk", got.stderr)
+	}
+	// The command line was VALID and the server was never asked to perform the
+	// destructive thing, so exit 2 ("the command line was wrong") would be a lie;
+	// exit 1 is the documented home for "you did not get what you asked for".
+	if got.code != exitError {
+		t.Errorf("exit %d, want %d — a refused overwrite is the request not being honoured, not a bad command line",
+			got.code, exitError)
+	}
+
+	// The load-bearing assertion: the genuine verdict survived intact.
+	state := runCLI(t, base, "", "state")
+	if !strings.Contains(state.stdout, "last eval:      version=1 ok=true") {
+		t.Errorf("the stored verdict was damaged by the refused overwrite\nstate:\n%s", state.stdout)
+	}
+	if strings.Contains(state.stdout, "invented") {
+		t.Errorf("the refused report was stored anyway\nstate:\n%s", state.stdout)
+	}
+}
+
+// TestEvalResultForceOverwritesTheStoredVerdict is the other half: the escape
+// hatch must actually work, and the output must SAY that a verdict was replaced.
+// A silent-but-permitted overwrite would be the original defect with a flag
+// attached.
+func TestEvalResultForceOverwritesTheStoredVerdict(t *testing.T) {
+	base := newTestServer(t)
+	storeVerdictFor(t, base, 1)
+
+	got := runCLI(t, base, "", "eval-result", "-version", "1", "-ok=false",
+		"-error", "deliberate", "-force")
+	if got.code != exitOK {
+		t.Fatalf("forced overwrite: exit %d, stderr %q", got.code, got.stderr)
+	}
+	if !strings.Contains(got.stdout, "stored for version 1") {
+		t.Errorf("forced overwrite = %q, want it reported as stored", got.stdout)
+	}
+	if !strings.Contains(got.stdout, "replac") {
+		t.Errorf("forced overwrite = %q, want it to say it REPLACED the verdict already stored", got.stdout)
+	}
+
+	state := runCLI(t, base, "", "state")
+	if !strings.Contains(state.stdout, "last eval:      version=1 ok=false") {
+		t.Errorf("-force did not overwrite the stored verdict\nstate:\n%s", state.stdout)
+	}
+	if !strings.Contains(state.stdout, `error="deliberate"`) {
+		t.Errorf("-force stored a different verdict than the one asked for\nstate:\n%s", state.stdout)
+	}
+}
+
+// TestEvalResultForceDoesNotDefeatStaleness pins the boundary of the new flag.
+//
+// -force is permission to REPLACE, not permission to REGRESS. A report naming an
+// OLDER version than the stored verdict is accepted-and-discarded by the server,
+// and a guard that let -force skip that reporting would tell an agent its stale
+// report became the verdict when the server dropped it — the exact "accepted is
+// not applied" confusion the pre-read exists to prevent.
+func TestEvalResultForceDoesNotDefeatStaleness(t *testing.T) {
+	base := newTestServer(t)
+	storeVerdictFor(t, base, 1)
+	if got := runCLI(t, base, `s("hh")`, "push"); got.code != exitOK {
+		t.Fatalf("setup second push: exit %d, stderr %q", got.code, got.stderr)
+	}
+	storeVerdictFor(t, base, 2)
+
+	// v1 is now older than the stored v2 verdict, and -force cannot make it current.
+	got := runCLI(t, base, "", "eval-result", "-version", "1", "-force")
+	if got.code != exitOK {
+		t.Errorf("stale report with -force: exit %d, want 0 — the server accepted it", got.code)
+	}
+	if !strings.Contains(got.stdout, "IGNORED") {
+		t.Errorf("stale report with -force = %q, want it still reported as accepted but IGNORED; "+
+			"-force permits replacing a verdict, not regressing one", got.stdout)
+	}
+
+	state := runCLI(t, base, "", "state")
+	if !strings.Contains(state.stdout, "last eval:      version=2 ok=true") {
+		t.Errorf("-force regressed the stored verdict\nstate:\n%s", state.stdout)
+	}
+}
+
 // TestUsageErrorsExitTwoWithoutSending covers the caller-mistake half of the
 // exit-code contract. These must be distinguishable from a server refusal, and
 // must be caught locally rather than by sending a doomed request.
@@ -1175,8 +1330,9 @@ func TestSubcommandHelpPrintsItsOwnFlags(t *testing.T) {
 		},
 		{
 			command:   "eval-result",
-			wantFlags: []string{"-version", "-ok", "-error", "-stats"},
-			wantText:  []string{"the published version this verdict is about", "opaque stats JSON"},
+			wantFlags: []string{"-version", "-ok", "-error", "-stats", "-force"},
+			wantText: []string{"the published version this verdict is about", "opaque stats JSON",
+				"overwrite a verdict already stored for this version"},
 		},
 		{
 			command:   "anchor",

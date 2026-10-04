@@ -11,6 +11,19 @@ package main
 // documented endpoints is a wrapper whose one gap gets hand-rolled curl back.
 // Every value it prints comes from a server response.
 //
+// The one-to-one claim is about ENDPOINTS, not about behaviour: the mapping is
+// unchanged by strudel-agent-uvj.17, which added an `eval-result -force` guard.
+// That guard is CLIENT-side only — the server is untouched and still accepts the
+// same reports — and it exists because some commands need to read state before
+// writing. Two already did before it: `eval-result` reads to tell a stored
+// verdict from an accepted-but-discarded one, and `anchor`/`hush`/`play` read to
+// report a no-op as a no-op. `-force` is that same discipline applied to the one
+// operation here that DESTROYS rather than adds: reporting a version that
+// already has a verdict replaces the browser's real one, which is the only
+// feedback signal in the system. Nothing was undocumented before and nothing is
+// now; the CLI simply declines to send a request whose consequence the caller
+// did not ask for.
+//
 // Two properties are worth stating up front, because both are easy to get
 // quietly wrong in a convenience wrapper:
 //

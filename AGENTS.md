@@ -310,6 +310,36 @@ worked, so `state` must never let a lagging verdict read as a current one.
   `-require-current` turns it into a non-zero, and that error must not be a
   `usageError`: the command line was valid and the request was answered.
 
+### Overwriting a verdict in the CLI
+
+`eval-result` is the one command that **destroys** rather than adds: reporting a
+version that already has a stored verdict replaces the browser's real one, and
+that verdict is the only feedback signal the agent loop has. During live testing
+an invented report silently replaced a genuine one while "testing the endpoint"
+(strudel-agent-uvj.17).
+
+- Overwriting an **existing** stored verdict for the same version requires
+  `-force`. Without it the CLI refuses and **sends nothing**.
+- A **first** verdict for a version with none stored needs no ceremony. A guard
+  that flagged the ordinary case would be a flag everybody pastes everywhere,
+  which is a flag nobody reads.
+- `-force` is permission to **replace**, never to **regress**. It must not
+  suppress the accepted-but-ignored report for an *older* version; that path is
+  the shared `verdictIsStale` comparison and is unchanged.
+- A permitted overwrite **says so** in its output. A forced overwrite printing
+  the same line as a first verdict leaves the caller unable to tell that the
+  browser's verdict is no longer the stored one.
+- The refusal is **not** a `usageError` and must not exit `2`. The command line
+  was valid and nothing was sent; it exits `1`, alongside `-require-current`.
+- The guard is **CLI-surface only**. The server is unchanged, the endpoint still
+  accepts the same report, and the one-command-to-one-endpoint mapping asserted
+  in `cmd/agentcli/main.go` still holds. No `AGENT_API.md` change follows from
+  it — the wire contract did not move.
+- Detection rides on the pre-read this command already performs, so it costs no
+  extra request. It is an **observation**, not a guarantee: another reporter
+  could store a verdict between the read and the write, which is the same
+  wording discipline `anchor`'s comparison follows.
+
 ## Boundedness in tests
 
 A hang is a test failure, not a waiting strategy.

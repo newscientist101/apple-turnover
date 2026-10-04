@@ -237,6 +237,20 @@ trap 'restore_all; rm -rf "$BACKUP_DIR"' EXIT
 #       wantsFlaglessHelp's `len(args) != 1` guard; widening that guard is the
 #       same defect. Caught by TestFlaglessSubcommandHelpExitsZero.
 #
+#   126 is the reverse case, and it is why "an anchor cannot hold a pipe" is
+#      HISTORY above rather than a live constraint. Row 126 was re-anchored by
+#      12f3a3d onto the queryArc feature guard, because its real target held "||"
+#      and the old delimiter could not carry it. Now that the table is JSON it is
+#      anchored on the line it was always meant to prove:
+#
+#          haps = currentPattern.queryArc(begin, end) || [];
+#
+#      Re-anchoring changes what a row proves, so this one was re-RUN rather than
+#      merely linted: still caught by
+#      TestVisualizationRendersHapLanesFromTheServedJS. A row left on its
+#      substitute because a limitation was since lifted is exactly the row that
+#      would otherwise go on proving the workaround instead of the behaviour.
+#
 # A BROKEN row is not a cosmetic defect: it is a row the grid cannot run, so
 # the behaviour it exists to prove is currently unproven. `make mutation-lint`
 # is the cheap way to notice, and it is why it checks anchors and not just

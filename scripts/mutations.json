@@ -865,8 +865,8 @@
   {
     "name": "126-viz-pattern-never-queried",
     "file": "srv/static/viz.js",
-    "old": "    if (currentPattern && typeof currentPattern.queryArc === 'function') {",
-    "new": "    if (false) { // deliberately: the pattern is never consulted, so no lane is ever drawn",
+    "old": "        haps = currentPattern.queryArc(begin, end) || [];",
+    "new": "        haps = []; // deliberately: the pattern is never queried, so no lanes are drawn",
     "run": "TestVisualizationRendersHapLanesFromTheServedJS"
   },
   {

@@ -236,7 +236,7 @@ MUTATIONS=$(cat <<'EOF'
 121-indicator-writes-on-every-frame|srv/static/session.js|if (text && text.innerHTML !== state.label) {\n      text.innerHTML = state.label;\n    }|text.innerHTML = state.label; // deliberately: an identical write still mutates the aria-live region|TestAgentIndicatorSuppressesIdenticalWrites
 122-indicator-never-hooked-to-frames|srv/static/session.js|    renderAgentStatus(snapshot);\n    applyFrame(frame, snapshot, sandbox, live);|    // deliberately: the badge is never refreshed from an incoming frame|TestAgentIndicatorFollowsARealExpiryEndToEnd
 123-indicator-pulse-is-unconditional|srv/static/style.css|.status-indicator.agent-connected .status-dot {|.status-indicator .status-dot { // deliberately: the pulse runs again whether an agent is alive or dead|TestAgentIndicatorTemplateAndStyleAreWired
-126-viz-pattern-never-queried|srv/static/viz.js|        haps = currentPattern.queryArc(begin, end) || [];|        haps = []; // deliberately: the pattern is never queried, so no lanes are drawn|TestVisualizationRendersHapLanesFromTheServedJS
+126-viz-pattern-never-queried|srv/static/viz.js|    if (currentPattern && typeof currentPattern.queryArc === 'function') {|    if (false) { // deliberately: the pattern is never consulted, so no lane is ever drawn|TestVisualizationRendersHapLanesFromTheServedJS
 127-viz-lane-blocks-not-drawn|srv/static/viz.js|        ctx.fillRect(x1, blockY, blockW, blockH);|        // deliberately: lane blocks are never drawn|TestVisualizationRendersHapLanesFromTheServedJS
 EOF
 )

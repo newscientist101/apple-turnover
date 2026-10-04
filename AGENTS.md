@@ -182,6 +182,11 @@ Every listener event has exactly this shape:
 - Serve the actual browser modules that the page references.
 - The browser is the only evaluator and audio producer.
 - `editor.js` may fall back to the plain textarea if CodeMirror is unavailable; that does not imply audio can work offline.
+- The visualizer is pattern-driven only: it paints hap lanes and a playhead
+  from `currentPattern.queryArc()`, with no audio-context dependency. A
+  waveform branch was removed because the pinned bundle exposes no reachable,
+  connected analyser path for it (strudel-agent-uvj.2), and an unwired scope
+  would have reported sound that was never observed.
 
 ## Standing limitations
 

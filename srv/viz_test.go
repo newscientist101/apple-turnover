@@ -44,7 +44,6 @@ func TestVisualizationWiring(t *testing.T) {
 		"value.note",
 		"epochMs",
 		"anchor.cps",
-		"drawTimeScope",
 		"requestAnimationFrame",
 		"playhead",
 	}

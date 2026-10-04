@@ -75,20 +75,13 @@
 
     var currentCycle = ((Date.now() - anchor.epochMs) / 1000) * anchor.cps;
 
-    // Feature-detect drawTimeScope and draw waveform if live audio context is running
-    var drawTimeScopeFn = (typeof drawTimeScope === "function" ? drawTimeScope : ((window.strudel && window.strudel.drawTimeScope) || window.drawTimeScope));
-    var repl = window.repl;
-    var audioCtx = repl && (repl.audioContext || repl.ctx || (repl.webaudio && repl.webaudio.ctx));
-    if (!audioCtx && typeof window.getAudioContext === 'function') {
-      try { audioCtx = window.getAudioContext(); } catch (e) {}
-    }
-    if (drawTimeScopeFn && typeof drawTimeScopeFn === 'function' && audioCtx && audioCtx.state === 'running') {
-      try {
-        drawTimeScopeFn(ctx, w, h);
-      } catch (e) {
-        // Graceful degradation when audio is suspended or waveform fails
-      }
-    }
+    // The renderer is driven entirely by the pattern (queryArc) and the shared
+    // anchor, so it needs no audio context. A waveform branch used to live here,
+    // guarded by a window.getAudioContext / repl.audioContext lookup that the
+    // pinned @strudel/web@1.3.0 bundle never exposes — so it could never run. It
+    // was removed rather than wired to a context that would draw a flat,
+    // silent line: getAnalyserById only creates an analyser, it never connects
+    // one to the output graph. See srv/viz_browser_test.go.
 
     var playheadX = 40;
     var playhead = playheadX;

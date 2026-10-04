@@ -29,6 +29,7 @@
 
   var WS_PATH = "/ws";
   var EVAL_RESULT_PATH = "/api/eval-result";
+  var DRY_RUN_RESULT_PATH = "/api/dry-run-result";
   var RECONNECT_BASE_MS = 1000;
   var RECONNECT_MAX_MS = 15000;
 
@@ -288,6 +289,49 @@
     });
   }
 
+  // dryRunCandidate evaluates a candidate that was NEVER published and reports the
+  // verdict to POST /api/dry-run-result (strudel-agent-uvj.16).
+  //
+  // The single most important property here is what it does NOT do: it never
+  // calls live.setPattern, never touches showCode, and never advances
+  // lastVersion. A dry-run exists so an unproven candidate cannot become the
+  // playing document, and a handler that committed it would defeat the entire
+  // feature while still reporting success. Only the SANDBOX sees this code.
+  //
+  // It evaluates in the sandbox for the same reason applyVersion does: the live
+  // repl's own evaluate hushes before parsing, so bad code would silence every
+  // listener even though it never became the new pattern.
+  //
+  // Every listener evaluates and reports, and the server keeps the FIRST answer,
+  // so a report that fails here has usually lost a race rather than misfiring.
+  async function dryRunCandidate(request, sandbox) {
+    var body = { dryRunId: request.id, ok: false, stats: { haps: 0 } };
+    try {
+      var pattern = await sandbox.evaluate(request.code, false, false);
+      var evalError = sandbox.state && sandbox.state.evalError;
+      if (!pattern || evalError) {
+        body.error = evalError
+          ? String((evalError && evalError.message) || evalError)
+          : "evaluation produced no pattern";
+      } else {
+        body.ok = true;
+        body.stats = collectStats(pattern);
+      }
+    } catch (err) {
+      body.ok = false;
+      body.error = String((err && err.message) || err);
+    }
+    return fetch(DRY_RUN_RESULT_PATH, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).catch(function (err) {
+      // Losing the race, or the agent giving up, are ordinary outcomes when
+      // every listener answers the same request — so this is informational.
+      console.info("[session] dry-run " + request.id + " report: " + err);
+    });
+  }
+
   function showMessage(snapshot) {
     var el = document.getElementById("agent-message");
     if (el && snapshot && snapshot.lastAgentMessage) {
@@ -501,6 +545,19 @@
     // reported by another listener is visible here too.
     showMessage(snapshot);
     if (window.strudelViz && typeof window.strudelViz.onSnapshot === "function") { window.strudelViz.onSnapshot(snapshot); }
+    // A dry-run is a REQUEST to evaluate something that is not the document, so
+    // it returns before any of the version handling below. Two things matter
+    // about the ordering: lastVersion must NOT be advanced (the frame is not a
+    // new document, and advancing it would make the next real code frame look
+    // stale and be skipped), and the candidate must not reach applyVersion.
+    if (frame.kind === "dry-run") {
+      if (frame.dryRun && typeof frame.dryRun.id === "number" && typeof frame.dryRun.code === "string") {
+        dryRunCandidate(frame.dryRun, sandbox);
+      } else {
+        console.warn("[session] dry-run frame carried no usable candidate", frame);
+      }
+      return;
+    }
     if (frame.kind !== "code" && frame.kind !== "snapshot") {
       if (typeof snapshot.version === "number") {
         lastVersion = Math.max(lastVersion, snapshot.version);
@@ -587,6 +644,10 @@
     isNewCodeVersion: isNewCodeVersion,
     applyVersion: applyVersion,
     postEvalResult: postEvalResult,
+    // dryRunCandidate is exposed so the headless harness can prove a dry-run is
+    // evaluated in the SANDBOX and reported to /api/dry-run-result, and — the
+    // property that matters most — that it never commits to the live repl.
+    dryRunCandidate: dryRunCandidate,
     scheduleCommit: scheduleCommit,
     getLastVersion: function () { return lastVersion; },
     getCurrentPattern: function () { return currentPattern; },

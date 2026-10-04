@@ -144,7 +144,7 @@ The listener endpoint must never block on a client.
 
 ### Event frames
 
-Every listener event has exactly this shape:
+Every listener event has this shape:
 
 ```json
 {"kind":"<what happened>","snapshot":{...}}
@@ -152,9 +152,11 @@ Every listener event has exactly this shape:
 
 - `snapshot` is the actual snapshot value, not a second bespoke representation.
 - All frame construction goes through one encoder.
-- The event vocabulary is `snapshot`, `code`, `message`, `transport`, `eval-result`, `listener-count`, `anchor`, `agent`.
+- The event vocabulary is `snapshot`, `code`, `message`, `transport`, `eval-result`, `listener-count`, `anchor`, `agent`, `dry-run`.
+- **One optional member, on one kind.** `dry-run` frames carry a fourth field, `dryRun` (`{id, code}`), because that frame asks a listener to evaluate a candidate that was **not** published, and the snapshot cannot say so: it is performance state, and the candidate is deliberately not state. Every other kind omits the field entirely — `omitempty` on a nil pointer emits nothing, so the frames a client already knew stay byte-identical. A second bespoke frame *shape* would be worse than this, because it would break the single decode path; a new field on the existing envelope does not.
 - Event names describe listener-visible changes, not endpoint names; therefore play and hush both use `transport`.
 - A frame is sent for a **transition**, not for an accepted write that changed nothing observable. A heartbeat is accepted and silent; a lease lapse is announced once.
+- `dry-run` is the one kind that is a **request** rather than a transition, which is also why its `snapshot` does not describe what the frame is about. It never bumps the version and never enters history.
 
 ### Anchor and coherence
 
@@ -168,6 +170,37 @@ Every listener event has exactly this shape:
 - A newer code version must cancel an older pending commit.
 - With no usable anchor, the client commits immediately and marks the state `unscheduled`.
 - Synchronization behavior is proved by executing the served browser JavaScript, not by duplicating its arithmetic in Go tests.
+
+### Dry-run
+
+`POST /api/dry-run` evaluates a candidate **without publishing it**, so a broken
+pattern never becomes the current document. It is the one endpoint that blocks:
+the server never evaluates JavaScript, so it must ask a connected browser and
+wait for the answer.
+
+- **Dry-run state lives on the `Server`, never in the `Conductor`.** The version,
+  the history and the stored verdict must all survive one untouched, and the
+  cheapest way to keep that promise is for the code path that could break it to
+  have no way to reach them. Nothing in either dry-run handler calls into the
+  `Conductor`; a dry-run verdict is **never** stored, because a verdict about
+  code that is not live is indistinguishable from a real one when read back.
+- **The correlation id is not a version.** Versions identify published
+  documents. Ids are monotonic and never reused, so a late report cannot be
+  mistaken for a live request.
+- **First answer wins, and the losers are refused.** Every listener evaluates and
+  reports, so a second report for the same id is `404` rather than an overwrite.
+- **Every exit path removes the registry entry** — answered, timed out, or client
+  gone. A registry that leaked one key per abandoned dry-run would leak one per
+  agent loop iteration.
+- **No listener is `409` immediately**, not a wait: the server already knows
+  there is no evaluator, so blocking would spend the agent's budget to report
+  "unknown" for a condition it can see at once. An unanswered listener is `504`,
+  bounded by a server-side timeout as well as the caller's context.
+- **The browser evaluates in the sandbox only.** `dryRunCandidate` must never
+  call `live.setPattern`, never touch the editor, and never advance
+  `lastVersion` — a dry-run frame that advanced it would make the next real code
+  frame look stale and be skipped. The audio commit is the one thing that must
+  not happen, and the server cannot catch it because the server never sees it.
 
 ### Deployment unit
 
@@ -248,6 +281,8 @@ Use `httptest` and loopback instead.
 | Area | Primary tests |
 |---|---|
 | API/integration | `srv/integration_test.go` |
+| Dry-run (server) | `srv/dryrun_test.go` |
+| Dry-run (browser) | `srv/dryrun_browser_test.go` |
 | WebSocket | `srv/ws_test.go` |
 | Hub | `srv/hub_test.go` |
 | API handlers | `srv/api_test.go` |

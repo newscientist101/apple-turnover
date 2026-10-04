@@ -89,6 +89,21 @@ curl -s localhost:8000/api/state | jq .lastEvalResult
 
 A successful `POST /api/code` only means the document was stored. It does not mean Strudel evaluated successfully. `lastEvalResult` is browser-supplied; with no listener connected, no verdict arrives.
 
+### Try a pattern before publishing it
+
+```bash
+echo 's("bd*2, ~ cp")' | bin/agentcli push --dry-run
+dry-run: ok, nothing published (dry-run 1, 8 haps)
+```
+
+`--dry-run` evaluates the document in a connected browser and reports the verdict **without publishing it** — the version, the history and the stored verdict are all left alone, so a broken pattern never becomes the current document. It needs a connected browser just as much as a push does; with none, it fails immediately rather than hanging.
+
+A candidate that does not evaluate exits non-zero, so it composes:
+
+```bash
+agentcli push --dry-run -f candidate.js && agentcli push -f candidate.js
+```
+
 ## Operational limits
 
 - **No server-side audio.** The server stores documents and relays state.

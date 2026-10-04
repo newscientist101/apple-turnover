@@ -83,6 +83,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "commands:\n")
 		fmt.Fprintf(stderr, "  state [-require-current]   print the current snapshot, and whether its verdict is current\n")
 		fmt.Fprintf(stderr, "  push [-f file] [-m text]  publish a new document (default: stdin)\n")
+		fmt.Fprintf(stderr, "  push --dry-run              evaluate a document without publishing it\n")
 		fmt.Fprintf(stderr, "  message <text>            set the agent narration\n")
 		fmt.Fprintf(stderr, "  hush                      stop the performance\n")
 		fmt.Fprintf(stderr, "  play                      resume the performance\n")

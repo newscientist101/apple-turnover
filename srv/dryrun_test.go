@@ -237,6 +237,17 @@ func TestDryRunsDoNotCrossVerdicts(t *testing.T) {
 	dryRunPost(t, ts, "/api/dry-run-result",
 		fmt.Sprintf(`{"dryRunId":%d,"ok":true,"stats":{"haps":3}}`, second.ID))
 
+	// A SECOND report for the id just answered must be refused. Every connected
+	// listener answers every dry-run, so the losers are guaranteed in normal
+	// operation; if a late report could still land, it would be reporting on
+	// behalf of a request that has already returned, and a registry that kept the
+	// entry would let it overwrite the answer the agent was already given.
+	lateCode, lateBody := dryRunPost(t, ts, "/api/dry-run-result",
+		fmt.Sprintf(`{"dryRunId":%d,"ok":false,"error":"a later listener disagreed"}`, second.ID))
+	if lateCode != http.StatusNotFound {
+		t.Errorf("a second report for the already-answered dry-run %d returned %d %q, want 404: a late listener can still reach a request that has been answered", second.ID, lateCode, lateBody)
+	}
+
 	var okCount, timeoutCount int
 	for i := 0; i < 2; i++ {
 		switch r := <-results; r.code {

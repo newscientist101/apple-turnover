@@ -271,6 +271,7 @@ func cmdPush(ctx context.Context, c *client, args []string, stdin io.Reader, out
 	fs.SetOutput(io.Discard)
 	file := fs.String("f", "", "read the document from this file (\"-\" or omitted means stdin)")
 	message := fs.String("m", "", "narration shown to listeners beside the code")
+	dryRun := fs.Bool("dry-run", false, "evaluate the document in a connected browser WITHOUT publishing it")
 	if err := parseFlags(fs, args, stderr); err != nil {
 		return err
 	}
@@ -284,6 +285,18 @@ func cmdPush(ctx context.Context, c *client, args []string, stdin io.Reader, out
 		return err
 	}
 
+	// --dry-run maps onto POST /api/dry-run instead of POST /api/code, and onto
+	// nothing else. That keeps the header's one-command-to-one-endpoint claim
+	// true: the flag chooses which of the two documented endpoints the document
+	// goes to, and the CLI still never invents behaviour the server does not
+	// have. Notably it does NOT read /api/state first — the server already knows
+	// whether a listener is connected and says so with a 409, and a pre-read
+	// would only be an observation of a condition that can change before the
+	// request lands.
+	if *dryRun {
+		return pushDryRun(ctx, c, doc, out)
+	}
+
 	var snap snapshot
 	if err := c.post(ctx, "/api/code", codeRequest{Code: doc, Message: *message}, &snap); err != nil {
 		return err
@@ -293,6 +306,79 @@ func cmdPush(ctx context.Context, c *client, args []string, stdin io.Reader, out
 	}
 	fmt.Fprintf(out, "pushed version %d\n", snap.Version)
 	return nil
+}
+
+// dryRunRequest is the documented POST /api/dry-run body. It is `code` alone:
+// narration describes a published change, and a dry-run publishes nothing.
+type dryRunRequest struct {
+	Code string `json:"code"`
+}
+
+// dryRunVerdict mirrors the server's DryRunVerdict.
+type dryRunVerdict struct {
+	ID    int64           `json:"id"`
+	OK    bool            `json:"ok"`
+	Error string          `json:"error,omitempty"`
+	Stats json.RawMessage `json:"stats,omitempty"`
+}
+
+// pushDryRun validates a document without publishing it.
+//
+// The exit code is the part worth stating. A verdict of ok:false is a SUCCESSFUL
+// request that found a broken candidate, and it exits 1 — not 0, and not 2. Zero
+// would let `push --dry-run && push` commit exactly the code the dry-run just
+// rejected; 2 would claim the command line was wrong, which it was not. Exit 1
+// already means "the server did not give you what you asked for", and an agent
+// asking "does this evaluate?" and being told "no" is precisely that.
+func pushDryRun(ctx context.Context, c *client, doc string, out io.Writer) error {
+	var verdict dryRunVerdict
+	if err := c.post(ctx, "/api/dry-run", dryRunRequest{Code: doc}, &verdict); err != nil {
+		return err
+	}
+	if c.jsonOutput {
+		if err := writeJSONLine(out, verdict); err != nil {
+			return err
+		}
+	} else {
+		fmt.Fprintf(out, "%s", dryRunLine(verdict))
+	}
+	if !verdict.OK {
+		return fmt.Errorf("the dry-run candidate did not evaluate: %s", orNone(verdict.Error))
+	}
+	return nil
+}
+
+// dryRunLine renders a verdict as one row of prose.
+//
+// It says DRY-RUN rather than "ok", and names the candidate's verdict rather than
+// the version, because nothing was published: there is no version to report and
+// implying one would be the same "ok over an unchanged performance" confusion the
+// rest of this CLI exists to avoid.
+func dryRunLine(v dryRunVerdict) string {
+	if !v.OK {
+		return fmt.Sprintf("dry-run: FAILED, nothing published (%s)\n", orNone(v.Error))
+	}
+	line := fmt.Sprintf("dry-run: ok, nothing published (dry-run %d", v.ID)
+	if haps, ok := statsHaps(v.Stats); ok {
+		line += fmt.Sprintf(", %d haps", haps)
+	}
+	return line + ")\n"
+}
+
+// statsHaps reads stats.haps out of the opaque stats object, reporting whether
+// it was there. The keys are the browser's choice, so this reads one it is known
+// to send rather than assuming the whole object is meaningful.
+func statsHaps(raw json.RawMessage) (int, bool) {
+	if len(raw) == 0 {
+		return 0, false
+	}
+	var stats struct {
+		Haps *int `json:"haps"`
+	}
+	if err := json.Unmarshal(raw, &stats); err != nil || stats.Haps == nil {
+		return 0, false
+	}
+	return *stats.Haps, true
 }
 
 // messageRequest is the documented POST /api/message body. The CLI does not

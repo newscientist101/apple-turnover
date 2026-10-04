@@ -246,6 +246,18 @@ trap 'restore_all; rm -rf "$BACKUP_DIR"' EXIT
 #      substitute because a limitation was since lifted is exactly the row that
 #      would otherwise go on proving the workaround instead of the behaviour.
 #
+#   Rows 01 and 116 were re-anchored for the OPPOSITE reason: adding dry-run
+#      moved the text they matched. 01 matched `strings.TrimSpace(req.Code) ==
+#      ""`, which the new dry-run handler now also has, so it matched twice and
+#      could never apply; it is anchored on the Publish call the guard protects
+#      instead. 116 matched the tail of New(), which gained the dryRuns
+#      registry; it now includes that line, which is still unique. Both were
+#      re-run rather than merely linted, and both are still CAUGHT.
+#
+#      This is the ordinary cost of adding code near an existing anchor, and it
+#      is why `make mutation-lint` checks anchors rather than JSON syntax: a
+#      table that no longer applies is not a table that is merely out of date.
+#
 # A BROKEN row is not a cosmetic defect: it is a row the grid cannot run, so
 # the behaviour it exists to prove is currently unproven. `make mutation-lint`
 # is the cheap way to notice, and it is why it checks anchors and not just

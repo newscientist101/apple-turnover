@@ -22,6 +22,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net"
@@ -33,6 +34,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 
 	"strudelagent/srv"
 )
@@ -486,6 +489,218 @@ func TestVerdictLineClassifiesEverySnapshotShape(t *testing.T) {
 // TestPushReadsStdinAndFile covers both documented sources of the document, and
 // asserts the NEW VERSION is reported — the value a caller must read back to
 // close the loop, since it is what a later eval-result has to name.
+// dryRunEvaluator connects a listener to base and answers the first dry-run it is
+// asked about, standing in for the browser.
+//
+// The CLI cannot evaluate Strudel, so a dry-run only succeeds if something is
+// actually listening. Without this helper every --dry-run test would be a test
+// of the no-listener refusal, and the interesting half — that the verdict comes
+// back and nothing is published — would go unproved.
+//
+// It returns a stop function; the listener is closed when the test ends.
+func dryRunEvaluator(t *testing.T, base string, ok bool, evalErr string, haps int) func() {
+	t.Helper()
+
+	wsURL := "ws" + strings.TrimPrefix(base, "http") + "/ws"
+	conn, _, err := websocket.Dial(context.Background(), wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial %s: %v", wsURL, err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			typ, data, err := conn.Read(ctx)
+			cancel()
+			if err != nil {
+				return
+			}
+			if typ != websocket.MessageText {
+				continue
+			}
+			var frame struct {
+				Kind   string `json:"kind"`
+				DryRun *struct {
+					ID   int64  `json:"id"`
+					Code string `json:"code"`
+				} `json:"dryRun"`
+			}
+			if err := json.Unmarshal(data, &frame); err != nil || frame.Kind != "dry-run" || frame.DryRun == nil {
+				continue
+			}
+			body := map[string]any{
+				"dryRunId": frame.DryRun.ID,
+				"ok":       ok,
+				"stats":    map[string]int{"haps": haps},
+			}
+			if !ok && evalErr != "" {
+				body["error"] = evalErr
+			}
+			encoded, err := json.Marshal(body)
+			if err != nil {
+				return
+			}
+			resp, err := http.Post(base+"/api/dry-run-result", "application/json", bytes.NewReader(encoded))
+			if err != nil {
+				return
+			}
+			resp.Body.Close()
+			return
+		}
+	}()
+
+	return func() {
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Errorf("the dry-run evaluator goroutine did not stop within 5s")
+		}
+	}
+}
+
+// TestPushDryRunPublishesNothing is the CLI half of the acceptance criteria: the
+// verdict comes back, and the server's state is untouched by it.
+func TestPushDryRunPublishesNothing(t *testing.T) {
+	base := newTestServer(t)
+	stop := dryRunEvaluator(t, base, true, "", 4)
+
+	got := runCLI(t, base, `s("bd*2")`, "push", "--dry-run")
+	stop()
+
+	if got.code != exitOK {
+		t.Fatalf("push --dry-run: exit %d, stdout %q, stderr %q", got.code, got.stdout, got.stderr)
+	}
+	if !strings.Contains(got.stdout, "dry-run") {
+		t.Errorf("push --dry-run printed %q, want a line naming the dry-run", got.stdout)
+	}
+	if !strings.Contains(got.stdout, "4 haps") {
+		t.Errorf("push --dry-run = %q, want it to report the haps the browser counted", got.stdout)
+	}
+
+	// The point of the whole command: nothing was published. Read it back
+	// through the CLI rather than trusting the prose above.
+	state := runCLI(t, base, "", "state")
+	if !strings.Contains(state.stdout, "version:        0") {
+		t.Errorf("state after a dry-run:\n%s\nwant version 0: a dry-run must publish nothing", state.stdout)
+	}
+}
+
+// TestPushDryRunExitsOneOnAFailingCandidate pins the exit code, which is the part
+// that makes the flag usable in a script.
+//
+// Exit 0 would let `push --dry-run && push` commit exactly the candidate the
+// dry-run rejected; exit 2 would claim the command line was wrong, which it was
+// not. It is 1, and the verdict is still printed so the reason is visible.
+func TestPushDryRunExitsOneOnAFailingCandidate(t *testing.T) {
+	base := newTestServer(t)
+	stop := dryRunEvaluator(t, base, false, "Unexpected token '}'", 0)
+
+	got := runCLI(t, base, `s("bd"`, "push", "--dry-run")
+	stop()
+
+	if got.code != exitError {
+		t.Fatalf("a failing candidate: exit %d, want %d (0 would let a script commit the rejected code)", got.code, exitError)
+	}
+	if got.code == exitUsage {
+		t.Error("a failing candidate exited 2; the command line was valid and the request was answered")
+	}
+	if !strings.Contains(got.stdout, "Unexpected token") {
+		t.Errorf("stdout = %q, want the browser's own message", got.stdout)
+	}
+	if !strings.Contains(got.stdout, "nothing published") {
+		t.Errorf("stdout = %q, want it to say that nothing was published", got.stdout)
+	}
+}
+
+// TestPushDryRunWithNoListenerFailsClearly is the no-hang requirement from the
+// agent's side: nobody can evaluate, so the CLI must say so and fail rather than
+// hang or claim success.
+func TestPushDryRunWithNoListenerFailsClearly(t *testing.T) {
+	base := newTestServer(t)
+
+	got := runCLI(t, base, `s("bd")`, "push", "--dry-run")
+	if got.code != exitError {
+		t.Fatalf("push --dry-run with no listener: exit %d, want %d", got.code, exitError)
+	}
+	if got.code == exitUsage {
+		t.Error("a missing listener exited 2; nothing about the command line was wrong")
+	}
+	// The server's own words, verbatim — this is the rejection a caller acts on.
+	if !strings.Contains(got.stderr, "no listeners connected") {
+		t.Errorf("stderr = %q, want the server's no-listeners message", got.stderr)
+	}
+}
+
+// TestPushDryRunJSONModeEmitsTheVerdict checks the -json path stays machine
+// readable, and that it emits the VERDICT rather than a snapshot: nothing was
+// published, so there is no snapshot to report.
+func TestPushDryRunJSONModeEmitsTheVerdict(t *testing.T) {
+	base := newTestServer(t)
+	stop := dryRunEvaluator(t, base, true, "", 7)
+
+	got := runCLI(t, base, `s("cp")`, "-json", "push", "--dry-run")
+	stop()
+
+	if got.code != exitOK {
+		t.Fatalf("push --dry-run -json: exit %d, stderr %q", got.code, got.stderr)
+	}
+	var verdict map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(got.stdout)), &verdict); err != nil {
+		t.Fatalf("stdout is not one JSON object: %v (%q)", err, got.stdout)
+	}
+	if verdict["ok"] != true {
+		t.Errorf("verdict ok = %v, want true", verdict["ok"])
+	}
+	if _, hasVersion := verdict["version"]; hasVersion {
+		t.Errorf("the -json output carries a version: %v; nothing was published, so there is no version to report", verdict)
+	}
+	if verdict["id"] == nil {
+		t.Errorf("the -json output has no dry-run id: %v", verdict)
+	}
+}
+
+// TestPushDryRunNeverTouchesTheCodeEndpoint guards the mapping itself: --dry-run
+// must go to /api/dry-run and nowhere else. A push that quietly also published —
+// or published first and then validated — would defeat the feature.
+func TestPushDryRunNeverTouchesTheCodeEndpoint(t *testing.T) {
+	base := newTestServer(t)
+
+	// A fresh evaluator per call: each answers exactly one dry-run, and the two
+	// runs must not be able to share a verdict.
+	stop := dryRunEvaluator(t, base, true, "", 1)
+	runCLI(t, base, `s("bd")`, "push", "--dry-run")
+	stop()
+
+	stop = dryRunEvaluator(t, base, true, "", 1)
+	runCLI(t, base, `s("cp")`, "push", "--dry-run")
+	stop()
+
+	state := runCLI(t, base, "", "state")
+	if !strings.Contains(state.stdout, "version:        0") {
+		t.Errorf("two dry-runs changed the version:\n%s\nwant version 0", state.stdout)
+	}
+	if strings.Contains(state.stdout, `s("bd")`) || strings.Contains(state.stdout, `s("cp")`) {
+		t.Errorf("a dry-run candidate became the live document:\n%s", state.stdout)
+	}
+}
+
+// TestPushDryRunUsageErrorSendsNothing keeps the exit-code contract intact: a
+// bad flag is still a caller mistake, and nothing may be sent.
+func TestPushDryRunUsageErrorSendsNothing(t *testing.T) {
+	base := newTestServer(t)
+	got := runCLI(t, base, `s("bd")`, "push", "--dry-run", "--not-a-flag")
+	if got.code != exitUsage {
+		t.Fatalf("an unknown flag: exit %d, want %d", got.code, exitUsage)
+	}
+	state := runCLI(t, base, "", "state")
+	if !strings.Contains(state.stdout, "version:        0") {
+		t.Errorf("a usage error still sent something:\n%s", state.stdout)
+	}
+}
+
 func TestPushReadsStdinAndFile(t *testing.T) {
 	base := newTestServer(t)
 

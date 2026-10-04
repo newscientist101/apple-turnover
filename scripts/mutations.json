@@ -2,8 +2,8 @@
   {
     "name": "01-empty-code-accepted",
     "file": "srv/api.go",
-    "old": "strings.TrimSpace(req.Code) == \"\"",
-    "new": "false"
+    "old": "\tsnap := s.Conductor.Publish(req.Code, req.Message)",
+    "new": "\tsnap := s.Conductor.Snapshot() // deliberately: the blank check is gone, so an empty document is published"
   },
   {
     "name": "02-unknown-json-field-allowed",
@@ -774,8 +774,8 @@
   {
     "name": "116-sweeper-starts-in-new",
     "file": "srv/server.go",
-    "old": "\ts.Hub = NewHubWithCountHook(HubDefaultSendBuffer, s.listenerCountFrame)\n\treturn s",
-    "new": "\ts.Hub = NewHubWithCountHook(HubDefaultSendBuffer, s.listenerCountFrame)\n\ts.startAgentSweeper() // deliberately: constructing now runs the goroutine, so any later config change races it\n\treturn s",
+    "old": "\ts.Hub = NewHubWithCountHook(HubDefaultSendBuffer, s.listenerCountFrame)\n\ts.dryRuns = newDryRunRegistry()\n\treturn s",
+    "new": "\ts.Hub = NewHubWithCountHook(HubDefaultSendBuffer, s.listenerCountFrame)\n\ts.dryRuns = newDryRunRegistry()\n\ts.startAgentSweeper() // deliberately: constructing now runs the goroutine, so any later config change races it\n\treturn s",
     "run": "TestAgentSweeperStartsInServeNotNew"
   },
   {
@@ -802,7 +802,7 @@
   {
     "name": "109-never-seen-counts-as-active",
     "file": "srv/conductor.go",
-    "old": "\tif lastSeenMS == 0 {\n\t\t// Never seen. This branch is only reachable for a clock within AgentTTL\n\t\t// of the epoch — real time is ~1.7e12 ms, so without it the arithmetic\n\t\t// below would still yield inactive, and a mutation deleting this line\n\t\t// survives every other test. It is kept because the marker is RESERVED\n\t\t// (see AgentPresence) and a server whose clock is wrong must not report\n\t\t// an agent that has never existed as present.\n\t\treturn p\n\t}",
+    "old": "\tif lastSeenMS == 0 {\n\t\t// Never seen. This branch is only reachable for a clock within AgentTTL\n\t\t// of the epoch \u2014 real time is ~1.7e12 ms, so without it the arithmetic\n\t\t// below would still yield inactive, and a mutation deleting this line\n\t\t// survives every other test. It is kept because the marker is RESERVED\n\t\t// (see AgentPresence) and a server whose clock is wrong must not report\n\t\t// an agent that has never existed as present.\n\t\treturn p\n\t}",
     "new": "\t// deliberately: the never-seen marker is treated as an ordinary old heartbeat",
     "run": "TestAgentPresenceNeverSeenIsInactiveEvenOnAClockNearTheEpoch|TestAgentFrameDoesNotFireWithoutAnAgent"
   },
@@ -987,5 +987,47 @@
     "old": "\tif replacing := before.LastEvalResult != nil && before.LastEvalResult.Version == *ver; replacing {",
     "new": "\tif replacing := false; replacing { // deliberately: a permitted overwrite is reported exactly like a first verdict",
     "run": "TestEvalResultForceOverwritesTheStoredVerdict"
+  },
+  {
+    "name": "150-dry-run-accepted-with-no-listener",
+    "file": "srv/api.go",
+    "old": "\tif s.Conductor.Snapshot().ListenerCount == 0 {",
+    "new": "\tif false { // deliberately: nobody is asked, so the request waits out its timeout instead of failing fast",
+    "run": "TestDryRunWithNoListenerFailsFast"
+  },
+  {
+    "name": "151-dry-run-publishes-the-candidate",
+    "file": "srv/api.go",
+    "old": "\tdryReq, answer := s.dryRuns.Register(req.Code)",
+    "new": "\ts.Conductor.Publish(req.Code, \"\") // deliberately: the candidate becomes the live document\n\tdryReq, answer := s.dryRuns.Register(req.Code)",
+    "run": "TestDryRunChangesNothingObservable"
+  },
+  {
+    "name": "152-dry-run-verdict-stored-as-the-real-one",
+    "file": "srv/api.go",
+    "old": "\tif err := s.dryRuns.Resolve(verdict); err != nil {",
+    "new": "\t// deliberately: a dry-run verdict about code that was never published is\n\t// stored as if it were the browser verdict for the LIVE version.\n\t_, _ = s.Conductor.RecordEvalResult(EvalResult{\n\t\tVersion: s.Conductor.Snapshot().Version,\n\t\tOK:      verdict.OK,\n\t\tError:   verdict.Error,\n\t\tStats:   verdict.Stats,\n\t})\n\tif err := s.dryRuns.Resolve(verdict); err != nil {",
+    "run": "TestDryRunVerdictDoesNotOverwriteTheStoredOne"
+  },
+  {
+    "name": "153-dry-run-entry-never-expires",
+    "file": "srv/dryrun.go",
+    "old": "\tdefer s.dryRuns.Cancel(req.ID)",
+    "new": "\t// deliberately: an abandoned or timed-out dry-run keeps its registry entry",
+    "run": "TestDryRunTimeoutIsBounded"
+  },
+  {
+    "name": "154-dry-run-verdicts-cross",
+    "file": "srv/dryrun.go",
+    "old": "\tentry, ok := r.entries[v.ID]\n\tif ok {\n\t\tdelete(r.entries, v.ID)\n\t}",
+    "new": "\tentry, ok := r.entries[v.ID]\n\t// deliberately: the entry is NOT removed, so a second listener's\n\t// report overwrites the answer the agent was already given.\n\tr.entries[v.ID] = &dryRunEntry{req: entry.req, answer: entry.answer}",
+    "run": "TestDryRunsDoNotCrossVerdicts"
+  },
+  {
+    "name": "155-cli-dry-run-ignores-a-failing-verdict",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\tif !verdict.OK {\n\t\treturn fmt.Errorf(\"the dry-run candidate did not evaluate: %s\", orNone(verdict.Error))\n\t}",
+    "new": "\tif false && !verdict.OK { // deliberately: a rejected candidate still exits 0, so `push --dry-run && push` commits it\n\t\treturn fmt.Errorf(\"the dry-run candidate did not evaluate: %s\", orNone(verdict.Error))\n\t}",
+    "run": "TestPushDryRunExitsOneOnAFailingCandidate"
   }
 ]

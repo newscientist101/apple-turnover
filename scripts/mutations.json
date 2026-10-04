@@ -945,5 +945,12 @@
     "old": "\t\tfmt.Fprintf(out, \"last eval:      version=%d ok=%t\", v.Version, v.OK)",
     "new": "\t\tfmt.Fprintf(out, \"verdict detail: version=%d ok=%t\", v.Version, v.OK) // deliberately: the pre-existing row is reworded, breaking every caller that scrapes it",
     "run": "TestEvalResultDistinguishesStoredFromIgnored|TestStatePrintsTheWholeSnapshot"
+  },
+  {
+    "name": "140-eval-stats-checked-after-version",
+    "file": "srv/conductor.go",
+    "old": "\tstats, err := normalizeStats(res.Stats)\n\tif err != nil {\n\t\treturn false, err\n\t}\n\n\tif res.Version <= 0 || res.Version > c.version {\n\t\treturn false, fmt.Errorf(\"%w: %d (latest is %d)\", ErrUnknownVersion, res.Version, c.version)\n\t}",
+    "new": "\tif res.Version <= 0 || res.Version > c.version {\n\t\treturn false, fmt.Errorf(\"%w: %d (latest is %d)\", ErrUnknownVersion, res.Version, c.version)\n\t}\n\tstats, err := normalizeStats(res.Stats) // deliberately: the version is diagnosed first, so a body wrong in two ways never names the field the sender can fix\n\tif err != nil {\n\t\treturn false, err\n\t}",
+    "run": "TestConductorEvalResultStatsCheckedBeforeVersion"
   }
 ]

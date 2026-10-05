@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -202,6 +203,16 @@ type Snapshot struct {
 	// state, and the nil/absent case is a fact of its own ("nothing observed
 	// yet") rather than a zero value. See SyncObservation.
 	LastSync *SyncObservation `json:"lastSync"`
+
+	// Samples is what the AUDIENCE can hear, or nil before any listener has
+	// reported (strudel-agent-f79). It is the per-listener answer to a question
+	// LastEvalResult cannot answer, because a verdict records whichever listener
+	// reported last and cannot say anything about the others.
+	//
+	// A pointer, for the same reason LastSync is one: "nobody has reported yet" is
+	// a fact an agent must be able to see, and it is not the same fact as "no
+	// listener has samples". See SamplesSummary.
+	Samples *SamplesSummary `json:"samples"`
 }
 
 // Conductor owns the single live performance. It is safe for concurrent use:
@@ -247,6 +258,25 @@ type Conductor struct {
 	// running — which is exactly what reproducing real decay requires.
 	clockOffsetMS atomic.Int64
 
+	// knownListeners is every connection the hub has issued an id to that has not
+	// yet been forgotten (strudel-agent-f79).
+	//
+	// It is the authority RecordListenerSamples checks before storing anything.
+	// Without it the store would hold claims about listeners that never existed,
+	// which is the same defect as storing a verdict for a version that was never
+	// published: a report about nothing, kept as though it were about something.
+	knownListeners map[string]struct{}
+
+	// listenerSamples is one stored report per connected listener that has
+	// reported at least once. It is keyed by the same ids as knownListeners, so
+	// every entry here names a live connection and a departed listener's record
+	// leaves with it.
+	//
+	// It is a map because the audience is a SET, not a sequence — the snapshot
+	// sorts it into order on the way out — and because the summary's whole point
+	// is to enumerate what is there rather than count it.
+	listenerSamples map[string]listenerSampleRecord
+
 	history  []Version
 	histLen  int
 	histNext int
@@ -263,6 +293,11 @@ func NewConductor(historyLimit int) *Conductor {
 		// A fresh conductor is un-hushed: nothing has been sounded yet, but the
 		// transport is not muted either.
 		playing: true,
+		// Both maps are made here rather than lazily, so the connect path — which
+		// is concurrent with the first report a listener can make — never writes
+		// to a nil map.
+		knownListeners:  make(map[string]struct{}),
+		listenerSamples: make(map[string]listenerSampleRecord),
 	}
 }
 
@@ -709,6 +744,263 @@ func normalizeStats(raw json.RawMessage) (json.RawMessage, error) {
 	}
 }
 
+// ErrUnknownListener is returned when a per-listener report names an id the
+// server never issued, or one it has already forgotten.
+//
+// It is the same refusal dry-run makes for a second answer, and for the same
+// reason: the report is about a CONNECTION, and there is no such connection. A
+// server that stored it would be publishing a claim about an audience it cannot
+// enumerate — a tab that closed moments ago, or an id a client made up — and
+// that is the precise confusion strudel-agent-f79 exists to remove.
+//
+// The check lives here rather than only in the HTTP handler for the reason every
+// other invariant in this file lives here: a guard enforced at one call site is
+// enforced once.
+var ErrUnknownListener = errors.New("unknown listener")
+
+// ListenerSamples is what ONE listener says about its own sample registry
+// (strudel-agent-f79).
+//
+// The bead this type exists for is the remainder of strudel-agent-uvj.18.
+// `samplesResolved` is verdict-scoped: every listener evaluates and reports, the
+// server stored whichever answer arrived last, and with listeners anonymous it
+// could neither dedupe them, forget a departed one, nor say which answered. So a
+// pattern naming a missing sample could be reported resolved — by the one tab
+// that had the pack — while every other listener heard nothing at all.
+//
+// Loaded is a POINTER, for exactly the reason EvalResult.SamplesResolved is.
+// Three facts must stay apart:
+//
+//	true   this listener's registry holds every sound its last verdict checked
+//	false  this listener's registry is missing at least one
+//	nil    UNKNOWN — this listener has no registry to check, so nothing was
+//	       learned. Reporting false here would invent a defect nobody found, and
+//	       reporting true would be the original uvj.18 defect wearing a fix's
+//	       clothes: success for a check that never ran.
+//
+// Count is how many sounds the registry held at report time. It is a browser
+// observation, not something the server can verify, and it exists because a
+// boolean cannot distinguish "no samples at all" from "some samples, but not the
+// one this code names" — a distinction an agent needs when deciding whether to
+// ask a human to press the Samples button.
+//
+// EpochMS is the SERVER's receipt stamp, never the reporter's clock, for the
+// same reason SyncObservation.EpochMS is the server's: the browser's clock is
+// precisely what disagrees with the server's, and freshness is only comparable
+// against the clock an agent reads /api/state with.
+type ListenerSamples struct {
+	Loaded *bool `json:"loaded,omitempty"`
+	Count  int   `json:"count,omitempty"`
+}
+
+// listenerSampleRecord is the STORED form of one listener's report: the report
+// plus who sent it and when the server received it.
+//
+// It is a distinct type from ListenerSamples rather than an embedded pointer so
+// that no code path can confuse "what this listener claims" with "the audience
+// summary", and so the identity travels inside the record rather than beside it.
+type listenerSampleRecord struct {
+	ListenerID string
+	Samples    ListenerSamples
+	EpochMS    int64
+}
+
+// SamplesSummary is what the snapshot exposes about the AUDIENCE
+// (strudel-agent-f79).
+//
+// It answers a question `lastEvalResult.samplesResolved` structurally cannot:
+// not "could the reporting browser resolve the sounds?" but "what do we know
+// about what the listeners can hear?".
+//
+// The enumerated Listeners is the load-bearing field. Loaded and Reporting are
+// counts DERIVED from it, and they exist only because an agent should not have to
+// walk a slice to answer "can anyone hear this". They are earned rather than
+// invented: this is exactly the opaque-number case AGENTS.md declined to publish
+// when listeners had no identity, and the reason it can be published now is that
+// identity makes the audience enumerable at all.
+//
+// Listeners is sorted by id so two successive reads — and two agents reading at
+// once — see the same order; ranging a map directly would make an unstable
+// ordering look like listeners coming and going.
+type SamplesSummary struct {
+	// Reporting is how many listeners have reported at least once and are still
+	// connected.
+	Reporting int `json:"reporting"`
+
+	// Loaded is how many of those reported Loaded == true. It is a COUNT of
+	// findings, not a verdict: Loaded == Reporting means every listener that
+	// answered has the pack, and Loaded == 0 with Reporting > 0 means none does.
+	Loaded int `json:"loaded"`
+
+	// Listeners is the per-listener evidence, sorted by id. Each entry's Loaded
+	// is tri-state, so a listener that could not check is visible as such rather
+	// than counted as a failure.
+	Listeners []ListenerSampleView `json:"listeners"`
+}
+
+// ListenerSampleView is one listener's row in the audience summary.
+type ListenerSampleView struct {
+	// ID is the opaque connection id the hub minted. It is echoed verbatim and
+	// must be treated as a token, never parsed.
+	ID string `json:"id"`
+
+	// Loaded is the tri-state; see ListenerSamples.
+	Loaded *bool `json:"loaded,omitempty"`
+
+	// Count is how many sounds the listener's registry held at report time.
+	Count int `json:"count,omitempty"`
+
+	// EpochMS is the server's receipt time for this report.
+	EpochMS int64 `json:"epochMs"`
+}
+
+// ReportListenerSamples records what one listener says about its sample registry,
+// and reports whether that CHANGED anything an observer could notice.
+//
+// The bool is the whole point of the second return value, and it means the same
+// thing RecordEvalResult's does: a nil error alone cannot distinguish "this
+// changed the audience" from "this was understood and changed nothing". The HTTP
+// layer needs the distinction because a `samples` frame is sent for a
+// TRANSITION, not for an accepted write that changed nothing observable — a
+// browser polling its registry would otherwise put a frame on the wire every
+// poll, filling listeners' bounded queues and, on a busy tab, evicting peers.
+//
+// It never touches the version, the code document or the history. Sample state is
+// evidence about the AUDIENCE, in the same class as a drift observation and a
+// listener count: reporting on your packs is not an edit, and bumping the version
+// would put a browser's registry in an agent's code history.
+func (c *Conductor) RecordListenerSamples(id string, s ListenerSamples) (bool, error) {
+	if id == "" {
+		return false, fmt.Errorf("%w: a report must name a listener", ErrUnknownListener)
+	}
+	if s.Count < 0 {
+		return false, fmt.Errorf("listener %q reported a negative registry size: %d", id, s.Count)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, known := c.knownListeners[id]; !known {
+		return false, fmt.Errorf("%w: %q has not connected to this server", ErrUnknownListener, id)
+	}
+
+	prev, existed := c.listenerSamples[id]
+	if existed && triStateKey(prev.Samples.Loaded) == triStateKey(s.Loaded) && prev.Samples.Count == s.Count {
+		return false, nil
+	}
+
+	c.listenerSamples[id] = listenerSampleRecord{
+		ListenerID: id,
+		// Copied, not aliased: the caller keeps its *bool, and a later write
+		// through it must not reach back into the stored finding.
+		Samples: ListenerSamples{Loaded: cloneBool(s.Loaded), Count: s.Count},
+		// The receipt stamp is the SERVER's clock, overwriting anything the
+		// reporter sent.
+		EpochMS: c.nowMS(),
+	}
+	return true, nil
+}
+
+// ForgetListenerSamples drops a listener's report when its connection ends.
+//
+// It exists because a departed tab cannot be allowed to keep answering for the
+// audience. Without this, a tab that closed while holding a pack would leave
+// behind a `loaded: true` nothing is standing behind, and an agent reading it
+// would believe a pack is available to listeners that have all gone.
+//
+// Removing a listener is a CHANGE, and the caller is told whether a record was
+// actually removed. Forgetting the last listener is the case that matters most:
+// the summary then becomes ABSENT rather than an audience of zero, because
+// "nobody has said anything" and "the audience checked and has no samples" are
+// different facts and only one of them is true.
+//
+// Forgetting an id that was never recorded is not an error. This is called from a
+// deferred cleanup on the /ws connect path, where it runs on EVERY exit,
+// including the ones where the listener never reported; making the normal case an
+// error would force every disconnect path to handle it.
+func (c *Conductor) ForgetListenerSamples(id string) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if id == "" {
+		return false, nil
+	}
+	if _, known := c.knownListeners[id]; !known {
+		return false, nil
+	}
+	delete(c.knownListeners, id)
+	_, existed := c.listenerSamples[id]
+	delete(c.listenerSamples, id)
+	return existed, nil
+}
+
+// NoteListener records that the server issued an id to a live connection, which
+// is what makes a later report from it acceptable.
+//
+// It is deliberately separate from RecordListenerSamples: connecting is not a
+// report. A listener that connects and never evaluates anything has told the
+// server NOTHING about its samples, and admitting its record here — rather than
+// at report time — is what lets the store refuse a report naming an id it never
+// issued.
+//
+// It never bumps the version and never broadcasts. A listener arriving is a count
+// change, and the count hook already announces that; a second frame for the same
+// arrival would be indistinguishable from a stream of no-ops.
+func (c *Conductor) NoteListener(id string) {
+	if id == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.knownListeners[id] = struct{}{}
+}
+
+// triStateKey renders a tri-state pointer as a comparable string.
+//
+// It exists because "did this change" is a question about VALUES, and a *bool
+// cannot be compared by content: two distinct pointers to false are the same
+// fact, so a browser re-sending false would otherwise look like a transition
+// every poll. nil is its own key so UNKNOWN never compares equal to either
+// boolean, which is what stops a listener moving from "could not check" to
+// "checked and missing" from being filed as a no-op.
+func triStateKey(b *bool) string {
+	if b == nil {
+		return "unknown"
+	}
+	if *b {
+		return "loaded"
+	}
+	return "unloaded"
+}
+
+// samplesSummaryLocked builds the audience summary, or nil when no listener has
+// ever reported. The caller must hold the mutex.
+//
+// The nil is the load-bearing part: it is the same "nothing observed yet is not
+// zero" rule that LastSync follows. A summary object with reporting:0 would read
+// as "the audience checked and has no samples", which is a finding about
+// listeners rather than the absence of one.
+func (c *Conductor) samplesSummaryLocked() *SamplesSummary {
+	if len(c.listenerSamples) == 0 {
+		return nil
+	}
+	sum := &SamplesSummary{Reporting: len(c.listenerSamples)}
+	for _, rec := range c.listenerSamples {
+		sum.Listeners = append(sum.Listeners, ListenerSampleView{
+			ID:      rec.ListenerID,
+			Loaded:  cloneBool(rec.Samples.Loaded),
+			Count:   rec.Samples.Count,
+			EpochMS: rec.EpochMS,
+		})
+		if rec.Samples.Loaded != nil && *rec.Samples.Loaded {
+			sum.Loaded++
+		}
+	}
+	// Sorted so successive reads agree; ranging a map would not.
+	sort.Slice(sum.Listeners, func(i, j int) bool { return sum.Listeners[i].ID < sum.Listeners[j].ID })
+	return sum
+}
+
 // Snapshot returns a copy of the current state.
 func (c *Conductor) Snapshot() Snapshot {
 	c.mu.RLock()
@@ -739,6 +1031,11 @@ func (c *Conductor) snapshotLocked() Snapshot {
 		ListenerCount:    c.listeners,
 		LastEvalResult:   cloneEvalResult(c.lastEval),
 		LastSync:         cloneSyncObservationPtr(c.lastSync),
+		// Built fresh on every read, sorted, and deep-copied per listener: a
+		// summary assembled from the map once and cached would hand every
+		// successive snapshot the same slice, so a caller mutating one would
+		// rewrite what the next reader sees.
+		Samples: c.samplesSummaryLocked(),
 		// Derived here rather than stored, so every snapshot is consistent with
 		// the instant it was built. c.nowMS is called under the lock the caller
 		// already holds, so the timestamp cannot drift mid-snapshot.
@@ -785,4 +1082,19 @@ func cloneRawMessage(raw json.RawMessage) json.RawMessage {
 	cp := make(json.RawMessage, len(raw))
 	copy(cp, raw)
 	return cp
+}
+
+// knownListenerIDs returns the ids of every connected listener, in no particular
+// order. Only tests read it: it is the read side of the authority
+// RecordListenerSamples checks, exposed so a test can build a report that the
+// store will actually accept rather than one it invented.
+func (c *Conductor) knownListenerIDs() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	ids := make([]string, 0, len(c.knownListeners))
+	for id := range c.knownListeners {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }

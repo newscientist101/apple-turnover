@@ -19,7 +19,7 @@ Browser modules:
 
 The page also has local **Play/Pause** and **Samples** controls. Play/Pause calls the browser REPL directly and does not change the server's `playing` intent.
 
-**Samples** loads `github:tidalcycles/dirt-samples` into that one browser and is likewise page-local: nothing is shared, and pressing it in one tab leaves every other tab without samples. Each browser reports what it could resolve, so a verdict carries `samplesResolved` — see `AGENT_API.md` for the tri-state. Two consequences worth knowing before you rely on it: the stored verdict describes the **reporting** browser rather than the audience (with several listeners it is whichever reported last, and the server has no way to tell you which), and turning Samples "off" unloads nothing — it only relabels the button, so the pack stays resolvable.
+**Samples** loads `github:tidalcycles/dirt-samples` into that one browser and is likewise page-local: nothing is shared, and pressing it in one tab leaves every other tab without samples. Each browser reports what it could resolve, so a verdict carries `samplesResolved` — see `AGENT_API.md` for the tri-state. That verdict describes the **reporting** browser, not the audience: with several listeners it is whichever reported last. For the audience question — can *anybody* hear this? — each listener also reports its own registry to `POST /api/samples`, and `GET /api/state` returns the whole audience under `samples`, one entry per listener. Three things worth knowing before you rely on it: the verdict is still scoped to one browser, `samples` is `null` until somebody reports rather than zero, and turning Samples "off" unloads nothing — it only relabels the button, so the pack stays resolvable.
 
 ## Requirements
 
@@ -70,6 +70,7 @@ The agent uses HTTP; listeners use WebSocket. `/api` request bodies are JSON and
 | `POST /api/dry-run` | Evaluate a candidate in a connected browser without publishing it |
 | `POST /api/dry-run-result` | How a browser answers a dry-run (agents do not call this) |
 | `POST /api/sync-result` | How a browser reports where its commit landed; read back from `lastSync` |
+| `POST /api/samples` | How one listener reports its sample registry; read back from `samples` |
 | `GET /ws` | Listener WebSocket |
 | `GET /` | Browser application |
 | `/static/` | Browser assets |

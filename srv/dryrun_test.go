@@ -52,9 +52,12 @@ func wsListener(t *testing.T, s *Server) (*httptest.Server, *websocket.Conn) {
 
 	conn := dialListener(t, "ws"+strings.TrimPrefix(ts.URL, "http")+"/ws")
 
-	// Consume the catch-up snapshot the server sends on connect. Every caller
-	// below wants the frame that comes AFTER it, and reading it here is what
-	// keeps each test from having to know that a listener is greeted first.
+	// Consume the connect frames the server sends on connect: the identity frame
+	// first, then the catch-up snapshot. Every caller below wants the frame that
+	// comes AFTER them, and reading them here is what keeps each test from having
+	// to know that a listener is greeted first — and, more importantly, keeps the
+	// ORDER (identity before snapshot) asserted in exactly one place.
+	wsReadNextEvent(t, conn, EventListener)
 	wsReadNextEvent(t, conn, EventSnapshot)
 
 	// The count lands asynchronously (the hub's hook runs on the hub goroutine),

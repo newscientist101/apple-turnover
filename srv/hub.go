@@ -87,6 +87,7 @@ package srv
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 )
 
@@ -117,13 +118,45 @@ var ErrHubClosed = errors.New("hub closed")
 // defines; the close is the signal, not a discard.
 //
 // A Subscriber is a handle, not a lock: C is safe to call from any goroutine.
+//
+// id is the OPAQUE, SERVER-ASSIGNED name of this connection (strudel-agent-f79).
+// It is the one thing that makes a per-listener report attributable: without it
+// the server cannot say which listener answered, cannot forget a tab that has
+// closed, and cannot dedupe two reports from one tab.
+//
+// It is minted by the hub goroutine, which is the only place a subscriber
+// exists, and it is monotonic and NEVER REUSED. Reuse is the specific failure
+// that would defeat the feature: a report from a closed tab would then be
+// indistinguishable from one by whatever connection inherited its number, which
+// is the very confusion identity exists to remove.
+//
+// The id is not a claim about a browser, a tab or a user. It names one socket,
+// and everything the server says about a listener is scoped to that socket —
+// which is why the wording throughout is "this listener" and never "this
+// browser's user".
 type Subscriber struct {
 	ch chan []byte
+	id string
 }
 
 // C returns the subscriber's message channel. It is closed when the subscriber
 // leaves the hub.
 func (s *Subscriber) C() <-chan []byte { return s.ch }
+
+// ID returns this connection's opaque identifier.
+//
+// It is readable only after Subscribe has returned, because that is when the
+// hub goroutine has finished writing it; the field is otherwise unexported, so
+// there is no window in which a caller could observe a half-built id.
+//
+// A nil Subscriber has no id. Every method that mints one returns a non-nil
+// handle or an error, so this is reachable only from a caller's own bug.
+func (s *Subscriber) ID() string {
+	if s == nil {
+		return ""
+	}
+	return s.id
+}
 
 // Hub fans one encoded message out to every current subscriber. It is created
 // with NewHub, which starts its goroutine, and stopped with Close.
@@ -140,6 +173,7 @@ type Hub struct {
 	subscribe   chan *subscribeReq
 	unsubscribe chan *unsubscribeReq
 	broadcast   chan []byte
+	direct      chan *directReq
 	count       chan chan int
 
 	// closeOnce makes Close idempotent and safe to race with itself. closeReq
@@ -173,6 +207,28 @@ type unsubscribeReq struct {
 	sub   *Subscriber
 	reply chan bool
 }
+
+// directReq asks the hub to deliver one message to exactly one subscriber.
+//
+// It exists because identity has to be TOLD to a listener: a connection cannot
+// learn its own id, and a `listener` frame delivered to the whole audience would
+// hand every browser somebody else's id. See Direct.
+type directReq struct {
+	sub   *Subscriber
+	msg   []byte
+	reply chan error
+}
+
+// ErrNoSubscriber is returned by Direct for a subscriber that is no longer in
+// the hub's set — one already unsubscribed, one dropped for not keeping up, or
+// one closed along with the hub.
+//
+// It is a distinct error rather than a nil return because the two mean opposite
+// things to a caller: a nil error says the frame is in that subscriber's buffer,
+// and this says the connection is gone. Reporting "sent" for a listener that no
+// longer exists would be a lie about the only thing this feature exists to
+// track.
+var ErrNoSubscriber = errors.New("subscriber is no longer connected")
 
 // NewHub starts a hub whose subscribers each get a send buffer of sendBuffer
 // messages. A non-positive sendBuffer means HubDefaultSendBuffer.
@@ -212,6 +268,7 @@ func NewHubWithCountHook(sendBuffer int, onCount func(int) []byte) *Hub {
 		subscribe:   make(chan *subscribeReq),
 		unsubscribe: make(chan *unsubscribeReq),
 		broadcast:   make(chan []byte),
+		direct:      make(chan *directReq),
 		count:       make(chan chan int),
 		closeReq:    make(chan chan struct{}),
 		done:        make(chan struct{}),
@@ -244,9 +301,55 @@ func (h *Hub) Broadcast(msg []byte) {
 	}
 }
 
+// Direct delivers one encoded message to exactly one subscriber, and to no other.
+//
+// It exists for one reason: a connection cannot learn its own identity, so the
+// server has to tell it. That frame goes to the addressed listener alone — sent
+// to the audience it would hand every browser an id belonging to somebody else,
+// which is worse than sending nothing, because the reports that followed would
+// be keyed to the wrong listener.
+//
+// Two properties are inherited from the rest of the delivery path rather than
+// re-invented here, and both are load-bearing:
+//
+//   - IT NEVER BLOCKS. A subscriber whose buffer is full is not waited for: the
+//     send is the same non-blocking deliver a broadcast uses, so a client that
+//     has stopped reading cannot pin the goroutine serving every other listener.
+//     This matters more here than for a broadcast, because the caller is a /ws
+//     handler holding a socket open on the connect path.
+//   - IT IS SERVED BY THE HUB GOROUTINE. Membership of the subscriber set is
+//     knowable only there, and a subscriber the hub dropped for falling behind
+//     has a closed channel that a caller cannot detect on its own. Checking here
+//     is what makes ErrNoSubscriber honest instead of a send racing a close.
+//
+// The reply is sent AFTER delivery, so a nil error means the frame is in that
+// subscriber's buffer — which is what lets handleWS order the identity frame
+// before the catch-up snapshot deterministically rather than by hope.
+func (h *Hub) Direct(sub *Subscriber, msg []byte) error {
+	if sub == nil {
+		return ErrNoSubscriber
+	}
+	req := &directReq{sub: sub, msg: msg, reply: make(chan error, 1)}
+	select {
+	case h.direct <- req:
+	case <-h.done:
+		return ErrNoSubscriber
+	}
+	select {
+	case err := <-req.reply:
+		return err
+	case <-h.done:
+		return ErrNoSubscriber
+	}
+}
+
 // Subscribe registers a new subscriber and returns its handle. It returns
 // ErrHubClosed if the hub has been closed. On success the subscriber is already
 // registered when Subscribe returns, so a Broadcast issued afterwards sees it.
+//
+// The returned handle carries the connection's opaque id (Subscriber.ID),
+// assigned by the hub goroutine and never reused, which is what lets a report
+// from this listener be told apart from every other listener's.
 //
 // Every reply channel here has capacity 1 on purpose: the hub goroutine always
 // completes its send without a receiver, so a caller that gives up (because
@@ -362,6 +465,27 @@ func (h *Hub) run() {
 
 	subs := make(map[*Subscriber]struct{})
 
+	// nextID mints connection identities. It is a LOCAL of the hub goroutine,
+	// not a Hub field, for the same reason subs is: one owner means no lock and
+	// no ordering to reason about, and -race is clean because nothing else can
+	// touch it.
+	//
+	// Ids are monotonic and never reused, including after a subscriber is
+	// removed. That is the property that keeps a stored per-listener report
+	// attributable to the connection that sent it: a recycled id would make a
+	// departed tab's finding readable as the new tab's.
+	var nextID uint64
+
+	// listenerID is the id handed to the next connection. It is a printable,
+	// opaque token rather than the bare counter so that nothing downstream is
+	// tempted to parse it, infer an ordering from it, or assume it means
+	// anything beyond "this socket". An agent must treat it as a token it echoes
+	// back verbatim.
+	listenerID := func() string {
+		nextID++
+		return fmt.Sprintf("L%d", nextID)
+	}
+
 	// fanOut delivers one frame to the whole set minus skip, dropping any
 	// subscriber that cannot keep up, and publishes the new count for each drop
 	// it causes (issue .3.7) — a dropped subscriber is a count change like any
@@ -429,10 +553,25 @@ func (h *Hub) run() {
 	for {
 		select {
 		case req := <-h.subscribe:
-			sub := &Subscriber{ch: make(chan []byte, h.sendBuffer)}
+			// The id is minted here, before the subscriber joins the set, so a
+			// caller that has the handle already has the id. The count hook runs
+			// before the reply for the reason the file header gives.
+			sub := &Subscriber{ch: make(chan []byte, h.sendBuffer), id: listenerID()}
 			subs[sub] = struct{}{}
 			publishCount(sub)
 			req.reply <- sub
+
+		case req := <-h.direct:
+			err, dropped := h.directOne(subs, req)
+			// A subscriber that cannot accept even a single addressed frame is
+			// not keeping up, and is treated exactly as fanOut treats one: it is
+			// dropped, which is a count change its peers are owed a frame for.
+			// The drop is reported to the caller as ErrNoSubscriber, because the
+			// frame genuinely did not reach anybody.
+			if dropped != nil {
+				publishCount(dropped)
+			}
+			req.reply <- err
 
 		case req := <-h.unsubscribe:
 			removed := removeSubscriber(subs, req.sub)
@@ -464,6 +603,32 @@ func (h *Hub) run() {
 			return
 		}
 	}
+}
+
+// directOne serves one Direct command on the hub goroutine. It returns the
+// error the caller sees, and the subscriber it had to drop to produce it.
+//
+// It is a method taking the set explicitly rather than a closure over it so that
+// the membership check and the delivery sit next to each other and cannot be
+// reordered apart: every path that answers ErrNoSubscriber has already proved
+// the subscriber is not in the set, or has just removed it.
+//
+// A subscriber that is present but whose buffer is full is REMOVED, not waited
+// for. That is the same rule fanOut applies, and it is the reason Direct cannot
+// block: the alternative is a /ws handler pinned on a client that stopped
+// reading, which is exactly what the bounded-write invariant exists to prevent.
+func (h *Hub) directOne(subs map[*Subscriber]struct{}, req *directReq) (error, *Subscriber) {
+	if req.sub == nil {
+		return ErrNoSubscriber, nil
+	}
+	if _, present := subs[req.sub]; !present {
+		return ErrNoSubscriber, nil
+	}
+	if !h.deliver(req.sub, req.msg) {
+		removeSubscriber(subs, req.sub)
+		return ErrNoSubscriber, req.sub
+	}
+	return nil, nil
 }
 
 // removeSubscriber takes sub out of the live set and closes its channel. It is

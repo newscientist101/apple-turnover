@@ -96,6 +96,14 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/sync-result", s.handleAPISyncResult)
 	mux.HandleFunc("/api/sync-result", methodNotAllowed(http.MethodPost))
 
+	// Per-listener sample state (strudel-agent-f79). It is a report only a
+	// browser sends, keyed by the connection id the server handed it on connect,
+	// and an agent READS the stored result back from GET /api/state — because the
+	// question it answers ("can anyone actually hear this?") is not about the
+	// document and so cannot live on a verdict.
+	mux.HandleFunc("POST /api/samples", s.handleAPISamples)
+	mux.HandleFunc("/api/samples", methodNotAllowed(http.MethodPost))
+
 	// The listener WebSocket. It follows the /api idiom above rather than
 	// letting net/http answer: the bare pattern is the wrong-verb fallback (405
 	// plus Allow), while a WebSocket request without valid upgrade headers is
@@ -511,6 +519,81 @@ func (s *Server) handleAPISyncResult(w http.ResponseWriter, r *http.Request) {
 	s.broadcast(EventSync, s.Conductor.Snapshot())
 
 	writeJSON(w, http.StatusOK, apiEvalAck{Accepted: true, Version: req.Version})
+}
+
+// samplesRequest is the POST /api/samples body: one listener's claim about its
+// own sample registry (strudel-agent-f79).
+//
+// ListenerID is REQUIRED, and it is the whole reason this endpoint can exist. It
+// is the connection id the server minted and handed to that browser on its
+// `listener` frame; without it the server has no way to tell this report from any
+// other, which is the defect the bead describes.
+//
+// Loaded is a POINTER so "I have no registry to check" arrives as absent rather
+// than as false. The difference is the same one EvalResult.SamplesResolved keeps,
+// and it is the original uvj.18 defect arriving one layer out: a false there would
+// invent a missing-sample defect nobody found, and a true would be success for a
+// check that never ran.
+//
+// EpochMS is absent from the request on purpose: the SERVER stamps receipt, for
+// the reason it does so on a sync observation and an eval result. The browser's
+// clock is precisely what disagrees with the server's.
+type samplesRequest struct {
+	ListenerID string `json:"listenerId"`
+	Loaded     *bool  `json:"loaded"`
+	Count      int    `json:"count"`
+}
+
+// handleAPISamples records what one listener says its sample registry holds.
+//
+// It exists because `lastEvalResult.samplesResolved` is verdict-scoped and the
+// audience is not. Every listener evaluates and reports, the server stored
+// whichever answer arrived last, and with listeners anonymous it could not say
+// which — so an agent could read "resolved" from the one tab that had the pack
+// while every other listener heard silence. This endpoint makes the audience
+// answerable by keying every report to a connection.
+//
+// Validation order within one body is BODY-THEN-IDENTITY, matching
+// /api/eval-result: a report wrong in two ways is diagnosed by the check its
+// sender can act on, and a sender who typed a bad field can fix that without
+// first having to know it has the wrong id.
+//
+// An ack, not a snapshot, for the same reason as the sync report: a browser needs
+// to know its claim landed, not what the performance now looks like. The stored
+// result is read from GET /api/state, which is the agent's path.
+//
+// THE BROADCAST IS CONDITIONAL and this is the load-bearing part of the handler.
+// A `samples` frame is sent for a TRANSITION, not for an accepted write: a browser
+// re-reporting an unchanged registry has told the server nothing new, and
+// publishing that would put a frame on the wire every poll, filling listeners'
+// bounded queues and evicting peers on a busy tab. The store decides, because it
+// is the only place that knows the previous value — a handler that broadcast on
+// every 200 would re-introduce the defect the transition rule exists to prevent.
+//
+// A REFUSED report broadcasts nothing, like every other accepted-mutation path:
+// a listener told about sample state the server refused to store would be
+// describing a claim that does not exist.
+func (s *Server) handleAPISamples(w http.ResponseWriter, r *http.Request) {
+	var req samplesRequest
+	if err := decodeBody(r, &req); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+
+	changed, err := s.Conductor.RecordListenerSamples(req.ListenerID, ListenerSamples{
+		Loaded: req.Loaded,
+		Count:  req.Count,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if changed {
+		s.broadcast(EventSamples, s.Conductor.Snapshot())
+	}
+
+	writeJSON(w, http.StatusOK, apiEvalAck{Accepted: true, Version: s.Conductor.Snapshot().Version})
 }
 
 // apiEvalAck is the response to an accepted eval report. The field is named

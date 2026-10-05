@@ -137,9 +137,29 @@ Read `lastSync`. All three of these states are distinct, and the third is the on
 
 Treat `lastSync:null` as unknown, never as zero. A system that has never reported is indistinguishable from a healthy one if you fold the two, and that is how a silently broken audience keeps looking fine.
 
-**It describes one reporting browser, not the audience.** Every listener measures its own commit against the shared anchor and the server keeps the **most recent** report, so `lastSync` is the answer of whichever browser reported last. Listeners can be in materially different states — one machine's event loop may be 200 ms behind another's — so with more than one listener this is an observation, not a guarantee. Per-listener drift needs listener identity, which this API does not have. Re-anchoring on a large single-listener reading is the documented recovery for drift; with several listeners, treat one browser's number as a floor rather than the spread.
+**It describes one reporting browser, not the audience.** Every listener measures its own commit against the shared anchor and the server keeps the **most recent** report, so `lastSync` is the answer of whichever browser reported last. Listeners can be in materially different states — one machine's event loop may be 200 ms behind another's — so with more than one listener this is an observation, not a guarantee. Re-anchoring on a large single-listener reading is the documented recovery for drift; with several listeners, treat one browser's number as a floor rather than the spread. Listener **identity** now exists — see [`POST /api/samples`](#post-apisamples) — but per-listener *drift* is still not reported: a listener reports its sample registry, not its bar alignment.
 
 Use `epochMs` on the observation to judge freshness: it is the server's receipt time, so compare it against your own reads rather than against the browser's clock.
+
+### `POST /api/samples`
+
+How one listener reports what its own sample registry holds. An agent does not call this; it **reads** the result from `snapshot.samples`.
+
+<!-- shape:samplesRequest -->
+```json
+{"listenerId":"L2","loaded":false,"count":0}
+```
+
+- `listenerId` is required and must be an id the server issued to a **currently connected** listener. It arrives on that listener's `listener` frame (see [Listener identity](#listener-identity)).
+- `loaded` is optional and **tri-state**: `true`, `false`, or **absent** for a browser with no registry to check. See [Audience sample state](#audience-sample-state).
+- `count` is optional: how many sounds the browser's registry held at report time. A browser observation, never verified by the server.
+- `epochMs` is **not accepted**. The server stamps receipt itself, for the reason it does so everywhere else.
+
+Answers `{accepted,version}` like `/api/eval-result`. It never bumps the version and never enters the history: what a browser can hear is evidence about the audience, not a document.
+
+**A refused report broadcasts nothing.** A report naming an id that never connected, or one whose connection has since closed, is `400` — the server has no such listener and stores no claim about it.
+
+**A report that changes nothing is accepted but silent.** The server compares the report against what that listener last said, and broadcasts a `samples` frame only when something actually changed. A browser re-reporting an unchanged registry is understood and deliberately not published — the same rule an accepted-but-stale eval-result follows, and for the same reason: announcing a no-op would put a frame on the wire every time a browser polled, and a listener's queue is bounded.
 
 ### `POST /api/message`
 
@@ -226,11 +246,45 @@ Read the absent case as its own answer, not as a quiet `false`. A browser that c
 
 The named sounds, when any are unresolved, are listed in `stats.samples.missing` (sorted and capped; `stats.samples.totalMissing` gives the true count). Those keys are opaque like the rest of `stats` — the server stores and echoes them without interpreting them.
 
-**It describes one browser, not the audience.** Every listener evaluates and reports, and the server stores the most recent report for a version, so `samplesResolved` is the answer of whichever browser reported last. Listeners can be in materially different states — one may have loaded a sample pack while another has not — so with more than one listener the stored value is an observation, not a guarantee. Per-listener sample state would need listener identity, which this API does not have. Treat `false` as "at least one listener could not resolve this".
+**It describes one browser, not the audience.** Every listener evaluates and reports, and the server stores the most recent report for a version, so `samplesResolved` is the answer of whichever browser reported last. Listeners can be in materially different states — one may have loaded a sample pack while another has not — so with more than one listener the stored value is an observation, not a guarantee. Treat `false` as "at least one listener could not resolve this". The question this field cannot answer — whether *any* listener can hear the pattern — is answered by [`snapshot.samples`](#audience-sample-state), which is per-listener because listeners now have identity.
 
 `ok` and `samplesResolved` are stored independently and neither implies the other: a pattern that parses is not thereby audible, and a missing sample is not a parse failure.
 
 `accepted:true` means the report was understood, not necessarily stored. A valid report older than the stored verdict is accepted but discarded as stale.
+
+### Audience sample state
+
+`samplesResolved` answers a question about **one** browser. It cannot answer "can anybody actually hear this?", which is the question an agent needs before it treats a push as working: with two listeners disagreeing, the stored verdict is whichever tab reported last, and an agent reading `true` from the one tab that had the pack learns nothing about the tab that does not.
+
+`snapshot.samples` is that answer. It exists because a listener now has an identity, so the audience is enumerable rather than an opaque `listenerCount`.
+
+<!-- shape:samplesSummary -->
+```json
+{"reporting":2,"loaded":1,"listeners":[{"id":"L2","loaded":true,"count":412,"epochMs":1757000000200},{"id":"L3","epochMs":1757000000300}]}
+```
+
+| Field | Meaning |
+|---|---|
+| `samples` | `null` until some listener has reported. **Absent is not zero.** |
+| `reporting` | How many connected listeners have reported at least once |
+| `loaded` | How many of those reported `loaded:true` |
+| `listeners[].id` | The opaque connection id, echoing what that listener was told |
+| `listeners[].loaded` | Tri-state, per listener: `true`, `false`, or **absent** for a browser that could not check |
+| `listeners[].count` | Sounds in that listener's registry at report time |
+| `listeners[].epochMs` | Server receipt time for that listener's report |
+
+Read the cases like this:
+
+- `samples:null` — **nobody has said anything yet.** Not "the audience has no samples."
+- `reporting:2, loaded:0` — every listener that answered is missing samples. The push will be inaudible everywhere.
+- `reporting:2, loaded:1` — **some** listeners can hear it and some cannot. This is the case a single verdict could never show you, and it is the one this field exists for.
+- `listeners[].loaded` **absent** — that listener had no registry to check. It is neither a pass nor a failure, and it is not counted in `loaded`.
+
+`loaded` and `reporting` are counts derived from the enumerated `listeners`, not independent claims: with identity, the audience can be listed, so the counts are arithmetic rather than invention. Prefer reading `listeners` when you want to act — the counts are a convenience for "can anyone hear this at all?".
+
+**A listener that disconnects is forgotten.** Its record leaves the summary when its `/ws` connection ends, so a tab that closed while holding a pack cannot keep answering for the audience. Once the last listener has gone, `samples` returns to `null` rather than reporting an audience of zero — "nobody has reported" and "the audience checked and has no samples" are different facts.
+
+**It describes what listeners reported, not what they will hear.** A listener that has not loaded a pack yet, or that loaded one after its last report, is described by its most recent report; `epochMs` is how you judge whether that report is still current.
 
 ### `POST /api/heartbeat`
 
@@ -266,7 +320,8 @@ This is liveness, not a session. The server cannot distinguish an agent that cra
   "listenerCount":3,
   "lastEvalResult":null,
   "agent":{"active":true,"lastSeenMs":1757000000123},
-  "lastSync":null
+  "lastSync":null,
+  "samples":null
 }
 ```
 
@@ -283,6 +338,7 @@ This is liveness, not a session. The server cannot distinguish an agent that cra
 | `agent.active` | Whether an agent heartbeat landed within the TTL |
 | `agent.lastSeenMs` | Server timestamp of the last heartbeat; `0` if no agent has ever connected |
 | `lastSync` | Newest listener drift observation, or `null` before one is reported. See [Reading drift](#reading-drift) |
+| `samples` | Per-listener sample state, or `null` before any listener has reported. See [Audience sample state](#audience-sample-state) |
 
 `anchor.cps` defaults to `0.5` cycles per second. `history` is bounded at 32 versions.
 
@@ -413,6 +469,16 @@ The candidate is here rather than in the snapshot precisely because it was never
 | `agent` | The agent lease lapsed |
 | `dry-run` | A candidate must be evaluated without being published |
 | `sync` | A listener reported where its commit landed |
+| `listener` | Sent once, to one connection only: the id the server assigned it |
+| `samples` | A listener's sample registry changed in a way an observer can see |
+
+Two of these are not transitions of the performance, and both are reasons of the same kind.
+
+`listener` is the only frame ever sent to **one** subscriber rather than the audience. Identity is a fact about the recipient, and a `listener` frame broadcast would tell every browser which listener it is not — after which every report each of them sent would be keyed to the wrong listener. It arrives **first on connect, before the catch-up snapshot**, and that order is load-bearing: the snapshot may carry a code version the browser validates and reports on immediately, so a listener that learned its id afterwards would have to report against an identity it did not have yet. It carries the only other optional frame member, `listener.id`.
+
+`samples` is sent for a **transition**, not for an accepted report. A browser re-reporting a registry that has not changed has told the server nothing new, and publishing that would put a frame on the wire every time one polled — filling listeners' bounded queues and evicting peers on a busy tab. A refused report is not broadcast either, so a `samples` frame always describes state the server actually stored.
+
+Like `sync`, it never bumps the version and never enters the history: what the audience can hear is evidence about the performance, not a change to it.
 
 `hush` and `play` intentionally share `transport` because listeners care about the resulting `playing` state.
 
@@ -425,6 +491,24 @@ The candidate is here rather than in the snapshot precisely because it was never
 A listener is subscribed before its initial snapshot is generated. That ordering prevents a state change from landing in the gap between subscribing and receiving the snapshot.
 
 The new listener's own count change is not sent as a separate `listener-count` event because its snapshot already includes itself.
+
+### Listener identity
+
+Every listener is assigned an opaque id by the server, delivered in a `listener` frame **before** its catch-up snapshot:
+
+<!-- shape:listenerFrame -->
+```json
+{"kind":"listener","snapshot":{...},"listener":{"id":"L2"}}
+```
+
+Rules an agent can rely on:
+
+- Ids are **distinct** across live connections and are **never reused**, so a stored per-listener report always describes the connection that sent it.
+- Ids are **opaque**. Echo them back verbatim; never parse them or infer an ordering from them. They name a **socket**, not a browser, tab, user or machine.
+- Ids are **process-local**: there is no persistence, so a restart renumbers from the beginning. A report carrying an id from before a restart is refused.
+- A report naming a listener that never connected, or whose connection has closed, is `400`. The server does not keep claims about listeners it no longer has.
+
+`listener` is the only frame with an optional member other than `dry-run`, and it has exactly one — a frame carries **at most one** optional member, so `listener` and `dryRun` are absent on every kind they do not belong to, rather than null.
 
 ### Listener-count behavior
 

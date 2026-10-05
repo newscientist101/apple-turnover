@@ -89,6 +89,39 @@ type snapshot struct {
 	// rendered as a drift of zero, or `state` would print a confident healthy
 	// row over a system nobody has measured.
 	LastSync *syncObservation `json:"lastSync"`
+
+	// Samples is what the AUDIENCE can hear, or nil before any listener has
+	// reported. It is a POINTER for the same reason as the two above: absent means
+	// nobody has said anything, which is not the same fact as "no listener has
+	// samples", and rendering it as a zero would print a confident unhealthy row
+	// over an audience nobody has measured.
+	//
+	// It exists because LastEvalResult.SamplesResolved answers for ONE browser.
+	// With several listeners the stored verdict is whichever tab reported last, so
+	// it cannot say whether the push is audible to the others (strudel-agent-f79).
+	Samples *samplesSummary `json:"samples"`
+}
+
+// samplesSummary mirrors the server's SamplesSummary.
+//
+// Loaded is a count of listeners that REPORTED having samples, not a verdict
+// about the audience, and the distinction is the whole reason this type exists:
+// "1 of 3 listeners can hear this" and "the audience is fine" are different
+// claims, and only the first is true.
+type samplesSummary struct {
+	Reporting int                  `json:"reporting"`
+	Loaded    int                  `json:"loaded"`
+	Listeners []listenerSampleView `json:"listeners"`
+}
+
+// listenerSampleView is one listener's row. Loaded is a POINTER so that a
+// listener with no registry to check stays distinct from one that checked and
+// found nothing -- the same tri-state discipline as evalResult.SamplesResolved.
+type listenerSampleView struct {
+	ID      string `json:"id"`
+	Loaded  *bool  `json:"loaded,omitempty"`
+	Count   int    `json:"count,omitempty"`
+	EpochMS int64  `json:"epochMs"`
 }
 
 // syncObservation mirrors the server's SyncObservation. DriftMS is a pointer for

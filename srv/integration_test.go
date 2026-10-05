@@ -1445,6 +1445,10 @@ type fanoutListener struct {
 	// connection died", or a broken listener would read as a pass.
 	done chan struct{}
 	err  error
+	// listenerID is the opaque id the server assigned to this connection, taken
+	// from its `listener` frame. Tests that report AS this listener post with it,
+	// which is the only way to produce a report the server will accept.
+	listenerID string
 }
 
 // fanoutAttach starts reading a listener connection in the background and
@@ -1480,7 +1484,18 @@ func fanoutAttach(t *testing.T, name string, conn *websocket.Conn, wantSnap Snap
 		}
 	}()
 
-	// The catch-up frame is the first thing, always.
+	// The greeting is always the same two frames, in this order: identity first,
+	// then the catch-up snapshot. Asserting both here means every listener in the
+	// integration harness agrees on the greeting, and a server that reordered them
+	// — so a browser evaluated the current version before it knew its own id —
+	// fails here rather than in one test that happens to notice.
+	identity := l.next(t, "connect identity")
+	if identity.Kind != EventListener || identity.Listener == nil || identity.Listener.ID == "" {
+		t.Fatalf("%s: first connect frame = %q with listener %+v, want a %q frame carrying an id",
+			name, identity.Kind, identity.Listener, EventListener)
+	}
+	l.listenerID = identity.Listener.ID
+
 	got := l.next(t, "connect snapshot")
 	if got.Kind != EventSnapshot {
 		t.Fatalf("%s: connect frame kind = %q, want %q", name, got.Kind, EventSnapshot)
@@ -1640,6 +1655,22 @@ func TestIntegrationConnectReceivesTheLiveSnapshot(t *testing.T) {
 	var ev Event
 	if err := json.Unmarshal(frame, &ev); err != nil {
 		t.Fatalf("connect frame is not a JSON Event (%v): %q", err, frame)
+	}
+	if ev.Kind != EventListener {
+		t.Fatalf("first connect frame kind = %q, want %q: identity must arrive before the snapshot",
+			ev.Kind, EventListener)
+	}
+
+	// Then the catch-up snapshot, which must be the second frame on the wire.
+	typ, frame, err = conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("a late listener received no snapshot frame within 5s: %v", err)
+	}
+	if typ != websocket.MessageText {
+		t.Fatalf("connect snapshot frame type = %v, want text", typ)
+	}
+	if err := json.Unmarshal(frame, &ev); err != nil {
+		t.Fatalf("connect snapshot is not a JSON Event (%v): %q", err, frame)
 	}
 	if ev.Kind != EventSnapshot {
 		t.Fatalf("connect frame kind = %q, want %q", ev.Kind, EventSnapshot)

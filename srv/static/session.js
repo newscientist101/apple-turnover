@@ -35,6 +35,12 @@
   // timer fires, so the drift does not exist yet at the time it goes out. See
   // recordObservation.
   var SYNC_RESULT_PATH = "/api/sync-result";
+  // How one listener reports what its OWN sample registry holds
+  // (strudel-agent-f79). It is keyed by the connection id the server assigned
+  // us, which is what makes the answer PER-LISTENER: lastEvalResult records
+  // whichever listener reported last, so an agent reading it cannot tell whether
+  // the other tabs can hear the code.
+  var SAMPLES_PATH = "/api/samples";
   var RECONNECT_BASE_MS = 1000;
   var RECONNECT_MAX_MS = 15000;
 
@@ -48,6 +54,18 @@
   // version can supersede a PENDING one (issue .3vo.8.2). Null when nothing is
   // pending.
   var pendingCommit = null;
+
+  // The id the server assigned THIS connection, or null before it has told us.
+  // It arrives on the `listener` frame, which the server sends before the
+  // catch-up snapshot precisely so this is set before we can report anything: a
+  // report keyed to an identity we do not have yet would be refused.
+  var listenerId = null;
+
+  // The signature of the sample state we last reported, so a poll that finds
+  // nothing new stays silent. The server ignores an unchanged report anyway, but
+  // not making the request at all is what keeps a periodic check from being a
+  // periodic POST — and a request that is never made cannot fail.
+  var lastSampleSignature = null;
 
   // Sync status UI state (issue .3vo.8.5).
   var connectionState = "reconnecting";
@@ -212,7 +230,22 @@
 
   function startStatusTimer() {
     if (statusTimer === null) {
-      statusTimer = setInterval(updateSyncStatusUI, 250);
+      statusTimer = setInterval(function onTick() {
+        updateSyncStatusUI();
+        // Re-check the sample registry on the same tick that refreshes the status
+        // line. A pack is loaded by a HUMAN pressing a button in welcome.html,
+        // asynchronously and with no callback into this module — so nothing here
+        // would otherwise notice that the audience just became able to hear the
+        // code, and the agent would keep working from a stale answer.
+        //
+        // reportAudienceSamples is gated on the state having actually changed, so this
+        // costs one registry read per tick and issues no request unless something
+        // moved. That ordering matters: the alternative — hooking the button — is
+        // what the uvj.18 work deliberately avoided, because that button's "off"
+        // branch flips a label and unregisters nothing, so a hook would report a
+        // state the registry does not agree with.
+        reportAudienceSamples();
+      }, 250);
     }
   }
 
@@ -757,7 +790,88 @@
     );
   }
 
-  // applyFrame is everything a decoded frame does apart from parsing it and
+  // describeSamples reads the CURRENT sample state of this browser, for the
+// per-listener audience report (strudel-agent-f79).
+//
+// It is the same registry the verdict-scoped resolver reads — soundRegistry() — so
+// the two paths cannot disagree about what this browser can hear. That matters
+// more than it looks: an agent comparing `lastEvalResult.samplesResolved` against
+// `snapshot.samples` would be comparing two answers to one question, and a client
+// that answered on one path and stayed silent on the other would give it two.
+//
+// The tri-state is load-bearing. A browser with no registry returns loaded=null
+// (UNKNOWN) rather than false, because it learned nothing — and reporting false
+// would tell an agent its samples are missing on the strength of a check that
+// never ran, which is the defect strudel-agent-uvj.18 was filed for.
+//
+// `count` is how many sounds the registry holds. It distinguishes "no samples at
+// all" from "some samples, but not the one this code names", which a boolean
+// cannot.
+function describeSamples() {
+  var registry = soundRegistry();
+  if (!registry) {
+    return { loaded: null, count: 0 };
+  }
+  var names = [];
+  for (var name in registry) {
+    if (Object.prototype.hasOwnProperty.call(registry, name)) {
+      names.push(name);
+    }
+  }
+  // A registry that exists but is empty is genuinely "no samples loaded", which
+  // is a finding and not the same as having no registry to ask.
+  return { loaded: names.length > 0, count: names.length };
+}
+
+// reportAudienceSamples sends this listener's sample state to POST /api/samples, keyed by
+// the connection id the server assigned us.
+//
+// It is a REPORT, like the eval verdict and the drift observation: the server
+// never evaluates JavaScript and cannot look at a registry itself, so the browser
+// is the only thing that can answer. Without this the audience question was
+// unanswerable — and the failure mode this bead exists to prevent is precisely
+// that: an agent pushing sample-dependent code to an audience that cannot hear it,
+// with no signal that says so.
+//
+// A report is made only when the state actually CHANGED. The server ignores an
+// unchanged one, but not issuing the request at all is what keeps a periodic check
+// from being a periodic POST, and a request never made cannot fail.
+//
+// Before the server has told us our id there is nothing to report against, so this
+// is a no-op rather than a POST with an empty key: the server refuses a report
+// naming no listener, and firing one on every frame until the `listener` frame
+// arrived would fill its error path with our own connect handshake.
+//
+// A failure is warned about and swallowed, for the reason postEvalResult's is: the
+// report is feedback, not part of the audio path, and a server that is briefly
+// unreachable must not take the music down with it.
+function reportAudienceSamples(force) {
+  if (!listenerId) {
+    return undefined;
+  }
+  var state = describeSamples();
+  var signature = state.loaded + ":" + state.count;
+  if (!force && signature === lastSampleSignature) {
+    return undefined;
+  }
+  lastSampleSignature = signature;
+
+  var body = { listenerId: listenerId, count: state.count };
+  // Omitted, not null, when unknown: the server's tri-state is a *bool, and a
+  // JSON null there is not the same as an absent key.
+  if (state.loaded !== null) {
+    body.loaded = state.loaded;
+  }
+  return fetch(SAMPLES_PATH, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).catch(function (err) {
+    console.info("[session] samples report: " + err);
+  });
+}
+
+// applyFrame is everything a decoded frame does apart from parsing it and
   // painting the presence badge. It is split out of handleFrame so the decode
   // seam and the badge can be exercised together, and so ws.onmessage stays a
   // one-liner that routes through the same path the harness drives.
@@ -767,6 +881,39 @@
     }
     updateSyncStatusUI();
     if (!snapshot) {
+      return;
+    }
+    // The `listener` frame is this connection's identity, and it arrives BEFORE
+    // the catch-up snapshot precisely so it is known before anything else can be
+    // reported. Capturing it here — rather than in ws.onmessage — keeps the decode
+    // seam the single place a frame is interpreted, which is what lets the harness
+    // drive the real path instead of a reimplementation of it.
+    //
+    // The report is made HERE, immediately, rather than after the snapshot is
+    // processed: a listener's sample state does not depend on the code it is
+    // playing, and waiting would mean an audience answer missing for a frame.
+    if (frame.kind === "listener" && frame.listener && typeof frame.listener.id === "string" && frame.listener.id) {
+      // A RECONNECT gets a different id, because ids are never reused. The
+      // signature gate is cleared here for that reason: the previous connection's
+      // id is gone, so an unchanged registry is still a report the new connection
+      // has never made, and without this a reconnected tab would be absent from
+      // the audience summary until its registry happened to change.
+      //
+      // The force flag carries the same weight for the first report: it must go
+      // out even if nothing about the registry has moved.
+      if (listenerId !== frame.listener.id) {
+        lastSampleSignature = null;
+      }
+      listenerId = frame.listener.id;
+      reportAudienceSamples(true);
+      return;
+    }
+    // A `samples` frame describes what the AUDIENCE can hear. It is not rendered
+    // here and deliberately does not become a listener-count-like badge: it is
+    // evidence for the agent, which reads it from the snapshot, and painting it
+    // would be the same mistake as the drift indicator — measured, stored, and
+    // displayed to a human who cannot act on it while the agent never sees it.
+    if (frame.kind === "samples") {
       return;
     }
     // Transport / message / eval-result / listener-count frames carry the
@@ -892,6 +1039,14 @@
     // the browser, because every test of it stopped at the display.
     recordObservation: recordObservation,
     postSyncResult: postSyncResult,
+    // The audience report (strudel-agent-f79) is exposed for the same reason, and
+    // the same discipline: the assertion must be on the body that would have been
+    // POSTed, not on what this module computed. A browser that resolves samples
+    // correctly and never tells the server would pass every test that stopped at
+    // describeSamples.
+    describeSamples: describeSamples,
+    reportAudienceSamples: reportAudienceSamples,
+    getListenerId: function () { return listenerId; },
     getLastVersion: function () { return lastVersion; },
     getCurrentPattern: function () { return currentPattern; },
     getPendingCommit: function () { return pendingCommit; },

@@ -137,6 +137,39 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// handler has finished. See hub.go.
 	defer s.Hub.Unsubscribe(sub)
 
+	// The server issues this connection its identity here, and only here: the hub
+	// is the one owner of the subscriber set and the one place an id is minted, so
+	// admitting the listener to the Conductor at the same instant is what makes
+	// every report it can possibly send acceptable later. A report arriving before
+	// this point would name an id the server had not yet admitted.
+	//
+	// NoteListener neither bumps the version nor broadcasts. Arriving is a count
+	// change and the count hook has already announced it; a second frame for the
+	// same arrival would be indistinguishable from a stream of no-ops.
+	listenerID := sub.ID()
+	s.Conductor.NoteListener(listenerID)
+
+	// Departure is remembered so a closed tab stops answering for the audience.
+	//
+	// The ORDER of these two defers is load-bearing and is the reason this one is
+	// registered second. Go runs deferred calls last-in-first-out, so this forget
+	// runs BEFORE the Unsubscribe above, and therefore before the count frame the
+	// hub publishes as part of removing the subscriber. The reverse order would
+	// encode a listener-count frame whose snapshot still listed the listener that
+	// had just left — a frame describing a state that never existed, sent to every
+	// listener still connected.
+	//
+	// It is deferred rather than called at each return because the exits are
+	// numerous and a forget missed on one would leak a record for ever: a departed
+	// tab holding a pack would leave a `loaded: true` behind that no connection
+	// stands behind, and an agent would believe samples were available to an
+	// audience that has gone.
+	defer func() {
+		if _, err := s.Conductor.ForgetListenerSamples(listenerID); err != nil {
+			slog.Debug("forget listener samples", "id", listenerID, "error", err)
+		}
+	}()
+
 	// Send the catch-up snapshot BEFORE entering the loop, so a listener that
 	// connects mid-performance lands in the music rather than waiting for the
 	// next change — which may be minutes away, or may never come.
@@ -154,6 +187,27 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// will receive every subsequent change. Dropping the connection instead
 	// would turn a transient write timeout into a listener that can never hear
 	// anything again.
+	//
+	// IDENTITY GOES FIRST, and that order is load-bearing rather than incidental.
+	// The snapshot may carry a code version the browser has never seen; it
+	// validates it and reports on its samples straight away. A listener that
+	// learned its id AFTER that snapshot would have to make its first report
+	// against an identity it did not have yet, and the server — which refuses a
+	// report naming an id it never issued — would correctly reject it.
+	//
+	// Both writes carry the same per-frame deadline as every other, so a listener
+	// that has stopped reading cannot pin the handler here either.
+	//
+	// A failure to deliver the identity is not fatal either, for the same reason:
+	// the connection stays up and keeps receiving every other frame. What it loses
+	// is the ability to have its reports accepted, which is a degraded listener
+	// rather than a dead one. Sending the snapshot regardless is therefore
+	// deliberate: a listener is better off with an unusable identity than with no
+	// performance at all.
+	if err := s.writeToListener(conn, s.encodeListenerEvent(listenerID)); err != nil {
+		slog.Debug("websocket listener identity", "path", r.URL.Path, "error", err)
+	}
+
 	if err := s.sendSnapshot(conn); err != nil {
 		slog.Debug("websocket snapshot", "path", r.URL.Path, "error", err)
 	}

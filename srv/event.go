@@ -148,30 +148,100 @@ const (
 	// rule here: listeners must never be told about a measurement the server did
 	// not store.
 	EventSync = "sync"
+
+	// EventSamples is a CHANGE in what the AUDIENCE can hear
+	// (POST /api/samples, strudel-agent-f79).
+	//
+	// It is its own kind because sample state is the one fact about the
+	// performance that a verdict structurally cannot carry: lastEvalResult
+	// records whichever listener reported LAST, so with two listeners disagreeing
+	// an agent could see one tab's answer and infer it was everyone's. This frame
+	// carries the enumerated audience instead, which is only possible because a
+	// listener now has an identity (see EventListener).
+	//
+	// It is sent for a TRANSITION and not for an accepted report. A browser
+	// re-reporting a registry that has not changed has told the server nothing new,
+	// and publishing that would put a frame on the wire every poll — filling
+	// listeners' bounded queues and, on a busy tab, evicting peers. The store
+	// decides this, because it is the only place that knows the previous value; the
+	// handler broadcasts only when it is told something changed.
+	//
+	// It never bumps the version, never enters history, and a REFUSED report is
+	// never broadcast: a listener told about sample state the server refused to
+	// store would be describing a claim that does not exist.
+	EventSamples = "samples"
+
+	// EventListener tells ONE connection the opaque id the server assigned to it
+	// (strudel-agent-f79).
+	//
+	// It is its own kind, and it is the only frame ever sent to exactly one
+	// subscriber, because identity is a fact about the recipient rather than about
+	// the performance. Every other kind is either a transition everyone observes or
+	// a request everyone answers; this one cannot be broadcast, since that would
+	// hand every browser an id belonging to somebody else and every report that
+	// followed would be keyed to the wrong listener.
+	//
+	// It carries one optional member for that reason: the snapshot cannot express
+	// "which connection are you", because a snapshot describes the performance and
+	// the recipient is not part of it.
+	//
+	// It is sent once, immediately after the subscription is registered and BEFORE
+	// the catch-up snapshot. That order is load-bearing: the snapshot may carry a
+	// new code version, and the browser evaluates it and reports on its samples
+	// straight away, so a listener that learned its id afterwards would have to
+	// report against an identity it did not yet have. Delivering it first means
+	// every report a listener can possibly make is keyed to an id the server has
+	// already issued.
+	EventListener = "listener"
 )
+
+// ListenerIdentity is the optional member of an EventListener frame: the id the
+// server assigned to the connection it was sent to.
+//
+// It is a wrapper rather than a bare string so the frame has a name an agent can
+// read, and so `{"listener":{"id":"L2"}}` cannot be confused with a bare
+// `"listener":"L2"` — a shape a client would have to guess at.
+type ListenerIdentity struct {
+	// ID is the opaque, server-assigned connection id. It is minted by the hub,
+	// is monotonic, and is never reused: a report keyed to a recycled id would be
+	// indistinguishable from one sent by whichever connection inherited it.
+	//
+	// Treat it as a token. It names a SOCKET, not a browser, tab, user or machine,
+	// so it resets on restart and says nothing about who is watching.
+	ID string `json:"id"`
+}
 
 // Event is the single frame shape sent to listeners. Snapshot holds the full
 // Conductor state as of this event, so a listener never has to merge a partial
 // delta into its own copy: it replaces what it holds. That is what makes a
 // reconnecting or lagging listener safe rather than merely usually-right.
 //
-// DryRun is the single OPTIONAL member, and it exists because one kind needs to
-// say something the snapshot cannot. Every other frame is fully described by its
+// DryRun and Listener are the frame's only OPTIONAL members, and there is
+// deliberately AT MOST ONE PER KIND. Every other frame is fully described by its
 // kind plus the snapshot, which is the property that lets a client decode any
-// frame with one code path. A dry-run frame has to carry a candidate document
-// that was never published, and the snapshot is the wrong place for it twice
-// over: a snapshot is Conductor state, and the candidate is deliberately NOT
-// state. So the one request-shaped frame carries one extra field, omitted (not
-// null) on every other kind.
+// frame with one code path, and a second member on an existing kind would break
+// that without earning anything.
 //
-// omitempty rather than a pointer-only tag is what keeps the other frames
-// BYTE-IDENTICAL to what they were before dry-run existed: a nil pointer plus
+// Each earns its place for the same reason, which is that the snapshot cannot
+// express it:
+//
+//   - dry-run must carry a candidate document that was NEVER published, and the
+//     snapshot is the wrong place for it twice over: a snapshot is Conductor state,
+//     and the candidate is deliberately not state.
+//   - listener must carry the recipient's own id, because a snapshot describes the
+//     performance and "which connection are you" is not part of it. Only this kind
+//     is ever sent to one subscriber, and this is the only member that tells that
+//     subscriber who it is.
+//
+// omitempty rather than a pointer-only tag is what keeps every other frame
+// BYTE-IDENTICAL to what they were before these members existed: a nil pointer plus
 // omitempty emits nothing at all, so a client decoding the documented two-field
 // envelope sees exactly two fields on every kind it already knew.
 type Event struct {
-	Kind     string         `json:"kind"`
-	Snapshot Snapshot       `json:"snapshot"`
-	DryRun   *DryRunRequest `json:"dryRun,omitempty"`
+	Kind     string            `json:"kind"`
+	Snapshot Snapshot          `json:"snapshot"`
+	DryRun   *DryRunRequest    `json:"dryRun,omitempty"`
+	Listener *ListenerIdentity `json:"listener,omitempty"`
 }
 
 // broadcast encodes one event for listeners and hands it to the Hub.
@@ -223,6 +293,30 @@ func (s *Server) broadcastDryRun(req DryRunRequest) {
 		return
 	}
 	s.Hub.Broadcast(msg)
+}
+
+// encodeListenerEvent builds the one frame addressed to a single connection.
+//
+// It is separate from encodeEvent because it is the only frame that cannot go
+// through the hub's fan-out: the id belongs to the recipient, so sending it to
+// the audience would tell every browser which listener it is not. The caller
+// passes the subscriber's own id rather than having it look one up, so there is
+// no path by which an id can be paired with the wrong connection.
+//
+// The snapshot is the ordinary one, taken at the same instant, so a listener
+// receives the same state from this frame as from the catch-up snapshot that
+// follows it.
+func (s *Server) encodeListenerEvent(id string) []byte {
+	msg, err := json.Marshal(Event{
+		Kind:     EventListener,
+		Snapshot: s.Conductor.Snapshot(),
+		Listener: &ListenerIdentity{ID: id},
+	})
+	if err != nil {
+		slog.Warn("encode listener identity event", "id", id, "error", err)
+		return nil
+	}
+	return msg
 }
 
 // encodeEvent is the single place a frame is built. broadcast and the

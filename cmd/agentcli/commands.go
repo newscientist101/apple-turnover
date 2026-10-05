@@ -272,7 +272,82 @@ func cmdState(ctx context.Context, c *client, args []string, out, stderr io.Writ
 	// distinctly, and UNKNOWN says nothing has been observed rather than borrowing
 	// a zero that would read as "perfectly aligned".
 	fmt.Fprintf(out, "drift:          %s\n", driftLine(snap.LastSync))
+	// The audience row is ADDED, never a rewording, for the same reason as the
+	// two above it.
+	//
+	// The `samples:` row above describes ONE reporting browser, and with several
+	// listeners that is whichever tab reported last. This row describes the
+	// AUDIENCE, which is the question an agent actually has: a push can be
+	// resolved in the tab that has the pack and inaudible in every tab that does
+	// not, and no verdict can show that (strudel-agent-f79).
+	//
+	// The counts are printed as a fraction precisely because "loaded: 1" reads as
+	// a verdict and "1 of 2 listeners have samples" does not. A listener that
+	// could not check is named as such rather than counted as a failure.
+	if s := snap.Samples; s != nil {
+		fmt.Fprintf(out, "audience:       %s\n", audienceLine(s))
+		for _, l := range s.Listeners {
+			fmt.Fprintf(out, "  listener %s:  %s\n", l.ID, listenerSamplesWord(l))
+		}
+	}
 	return verdictFailure(*requireCurrent, *snap)
+}
+
+// audienceLine renders the audience summary as one phrase.
+//
+// It reports the FRACTION rather than the bare count because a count alone invites
+// the reading this field exists to prevent: "loaded:1" next to "listeners:3" is
+// easy to skim as a partial success, when it is in fact the signal that two thirds
+// of the audience hears silence.
+func audienceLine(s *samplesSummary) string {
+	if s.Reporting == 0 {
+		return "no listener has reported its samples yet"
+	}
+	// Count the listeners that actually CHECKED, and say so when none of them did.
+	//
+	// This branch is the one the fraction would get wrong. With reporting:1 and
+	// loaded:0, a naive reading is "the audience has no samples" -- but a listener
+	// whose `loaded` is absent never looked, and reporting its silence as a
+	// missing-sample finding invents a defect nobody established. That is the
+	// strudel-agent-uvj.18 defect arriving on the row whose whole purpose is to be
+	// trustworthy about the audience, so it gets its own wording rather than being
+	// folded into the count.
+	checked, unknown := 0, 0
+	for _, l := range s.Listeners {
+		if l.Loaded == nil {
+			unknown++
+		} else {
+			checked++
+		}
+	}
+	if checked == 0 {
+		return fmt.Sprintf("UNKNOWN -- none of the %d reporting listener(s) could check its registry, so nothing is known about the audience", s.Reporting)
+	}
+	if s.Loaded == checked {
+		if unknown == 0 {
+			return fmt.Sprintf("all %d reporting listener(s) have samples loaded", s.Reporting)
+		}
+		return fmt.Sprintf("every listener that CHECKED (%d of %d) has samples loaded; %d could not check", checked, s.Reporting, unknown)
+	}
+	if s.Loaded == 0 {
+		return fmt.Sprintf("NONE of the %d listener(s) that checked have samples loaded -- the performance is inaudible to all of them", checked)
+	}
+	return fmt.Sprintf("only %d of %d listener(s) that checked have samples loaded -- the others cannot hear this", s.Loaded, checked)
+}
+
+// listenerSamplesWord renders one listener's own finding.
+//
+// An UNKNOWN listener gets its own wording and is never folded into "missing":
+// it did not check, and reporting it as a defect would invent one.
+func listenerSamplesWord(l listenerSampleView) string {
+	switch {
+	case l.Loaded == nil:
+		return fmt.Sprintf("UNKNOWN -- no registry to check (%d sounds reported)", l.Count)
+	case *l.Loaded:
+		return fmt.Sprintf("loaded (%d sounds)", l.Count)
+	default:
+		return "no samples loaded"
+	}
 }
 
 // driftLine renders the three states of lastSync as three distinct words.

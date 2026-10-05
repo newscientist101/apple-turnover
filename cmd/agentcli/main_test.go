@@ -2478,3 +2478,158 @@ func TestPushWithoutWaitIsUnchanged(t *testing.T) {
 		t.Errorf("a plain push made %d state reads; only --wait polls", n)
 	}
 }
+
+// connectListenerIDs connects n real listeners to base and returns the ids the
+// server assigned them.
+//
+// It dials /ws for real and reads each connection's `listener` frame, because the
+// ids are server-minted and a report naming anything else is REFUSED. Inventing an
+// id here would make every audience test pass against a server that silently
+// accepted reports from listeners that do not exist -- the exact defect identity
+// was introduced to remove.
+func connectListenerIDs(t *testing.T, base string, n int) []string {
+	t.Helper()
+	ids := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		wsBase := "ws" + strings.TrimPrefix(base, "http")
+		conn, _, err := websocket.Dial(context.Background(), wsBase+"/ws", nil)
+		if err != nil {
+			t.Fatalf("dial listener %d: %v", i, err)
+		}
+		t.Cleanup(func() { conn.Close(websocket.StatusNormalClosure, "") })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, data, err := conn.Read(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("listener %d: no identity frame within 5s: %v", i, err)
+		}
+		var frame struct {
+			Kind     string `json:"kind"`
+			Listener *struct {
+				ID string `json:"id"`
+			} `json:"listener"`
+		}
+		if err := json.Unmarshal(data, &frame); err != nil {
+			t.Fatalf("listener %d: identity frame is not JSON: %v (%s)", i, err, data)
+		}
+		if frame.Kind != "listener" || frame.Listener == nil || frame.Listener.ID == "" {
+			t.Fatalf("listener %d: first frame = %q with %+v, want a listener frame carrying an id",
+				i, frame.Kind, frame.Listener)
+		}
+		ids = append(ids, frame.Listener.ID)
+	}
+	return ids
+}
+
+func oneConnectedListenerID(t *testing.T, base string) string {
+	t.Helper()
+	return connectListenerIDs(t, base, 1)[0]
+}
+
+func twoConnectedListenerIDs(t *testing.T, base string) []string {
+	t.Helper()
+	return connectListenerIDs(t, base, 2)
+}
+
+// TestStateReportsTheAudienceNotJustTheReportingBrowser is the CLI half of
+// strudel-agent-f79.
+//
+// The `samples:` row above it answers for ONE browser, and with two listeners
+// disagreeing that is whichever tab reported last. This is the row that answers
+// the question an agent actually has -- can anybody hear this? -- and the case
+// asserted here is the one no single verdict can express: one listener holds the
+// pack, the other does not, and the push is audible to exactly half the audience.
+//
+// It is asserted on the fraction rather than the bare counts, because "loaded:1"
+// beside "listeners:2" is easy to skim as a partial success rather than as the
+// signal that somebody hears silence.
+func TestStateReportsTheAudienceNotJustTheReportingBrowser(t *testing.T) {
+	base := newTestServer(t)
+
+	// Two listeners, connected so the server admits both ids. Reports are keyed
+	// to the ids the server issued, because a report naming any other listener is
+	// refused -- which is the property that makes the row trustworthy.
+	ids := twoConnectedListenerIDs(t, base)
+	post := func(id string, loaded bool, count int) {
+		t.Helper()
+		body := fmt.Sprintf(`{"listenerId":%q,"loaded":%t,"count":%d}`, id, loaded, count)
+		if code, raw := postJSON(t, base, "/api/samples", body); code != http.StatusOK {
+			t.Fatalf("POST /api/samples %s = %d %s", body, code, raw)
+		}
+	}
+	post(ids[0], true, 412)
+	post(ids[1], false, 0)
+
+	got := runCLI(t, base, "", "state")
+	if got.code != exitOK {
+		t.Fatalf("state: exit %d, stderr %q", got.code, got.stderr)
+	}
+	out := got.stdout
+
+	if !strings.Contains(out, "audience:") {
+		t.Fatalf("stdout has no audience row, so the CLI cannot answer \"can anybody hear this?\":\n%s", out)
+	}
+	if !strings.Contains(out, "1 of 2") {
+		t.Errorf("stdout does not report the split audience (want \"1 of 2\"):\n%s", out)
+	}
+	// Both listeners are named, because the per-listener rows are the evidence
+	// behind the fraction.
+	for _, id := range ids {
+		if !strings.Contains(out, id) {
+			t.Errorf("listener %s is not named in the output, so the fraction has nothing to point at:\n%s", id, out)
+		}
+	}
+}
+
+// TestStateSaysSoWhenNobodyHasReported proves the absent audience is not printed
+// as an empty one.
+//
+// This is the row's version of the "nothing observed is not zero" rule. A CLI
+// that always printed "0 of 0" would be reporting a measurement nobody made, and
+// an agent reading it would conclude the audience is broken when in fact nobody has
+// spoken. Silence is the honest output, and it matches snapshot.samples being null.
+func TestStateSaysSoWhenNobodyHasReported(t *testing.T) {
+	base := newTestServer(t)
+
+	got := runCLI(t, base, "", "state")
+	if got.code != exitOK {
+		t.Fatalf("state: exit %d, stderr %q", got.code, got.stderr)
+	}
+	if strings.Contains(got.stdout, "audience:") {
+		t.Errorf("stdout printed an audience row before any listener reported; "+
+			"absence must print as absence, not as an audience of zero:\n%s", got.stdout)
+	}
+	// The pre-existing rows must be untouched by any of this.
+	if !strings.Contains(got.stdout, "last eval:") {
+		t.Errorf("stdout lost the `last eval:` row, which existing callers scrape:\n%s", got.stdout)
+	}
+}
+
+// TestStateNamesAnUnknownListener proves the tri-state reaches the CLI.
+//
+// A listener with no registry has learned nothing. Printing it as "no samples
+// loaded" would tell an agent its packs are missing on the strength of a check that
+// never ran -- the uvj.18 defect arriving in new clothes, and now on the row whose
+// entire purpose is to be trustworthy about the audience.
+func TestStateNamesAnUnknownListener(t *testing.T) {
+	base := newTestServer(t)
+
+	id := oneConnectedListenerID(t, base)
+	body := fmt.Sprintf(`{"listenerId":%q,"count":0}`, id)
+	if code, raw := postJSON(t, base, "/api/samples", body); code != http.StatusOK {
+		t.Fatalf("POST /api/samples %s = %d %s", body, code, raw)
+	}
+
+	got := runCLI(t, base, "", "state")
+	if got.code != exitOK {
+		t.Fatalf("state: exit %d, stderr %q", got.code, got.stderr)
+	}
+	if !strings.Contains(got.stdout, "UNKNOWN") {
+		t.Errorf("stdout does not mark the un-checkable listener as UNKNOWN:\n%s", got.stdout)
+	}
+	if strings.Contains(got.stdout, "NONE of the") {
+		t.Errorf("stdout reports an UNKNOWN listener as a missing-sample finding; "+
+			"it did not check, and saying so would invent a defect:\n%s", got.stdout)
+	}
+}

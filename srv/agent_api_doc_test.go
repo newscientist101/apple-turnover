@@ -396,6 +396,9 @@ func TestAgentAPIDocPayloadShapesMatchARunningServer(t *testing.T) {
 	wantDryRunResultReq := docShape(t, doc, "dryRunResultRequest")
 	wantDryRunFrame := docShape(t, doc, "dryRunFrame")
 	wantSyncReq := docShape(t, doc, "syncResultRequest")
+	wantSamplesReq := docShape(t, doc, "samplesRequest")
+	wantSamplesSummary := docShape(t, doc, "samplesSummary")
+	wantListenerFrame := docShape(t, doc, "listenerFrame")
 
 	_, base, wsBase := fanoutServer(t)
 
@@ -441,6 +444,57 @@ func TestAgentAPIDocPayloadShapesMatchARunningServer(t *testing.T) {
 		t.Fatalf("/ws frame has no snapshot field: %q", bodyOf(string(frameJSON)))
 	}
 	if err := sameFields("/ws frame .snapshot", keysOf(t, snapIn), sortedKeys(wantSnapshot)); err != nil {
+		t.Error(err)
+	}
+
+	// ---- the listener identity frame, live ----
+	// It is read separately from wsReadConnectSnapshot because that helper
+	// consumes the identity frame on its way to the snapshot; here the frame
+	// itself is the thing under test, so it is dialled on a second connection and
+	// read directly. The documented keys are compared against a live frame, so a
+	// renamed member cannot survive in the document.
+	conn2, _, err := websocket.Dial(context.Background(), wsBase, nil)
+	if err != nil {
+		t.Fatalf("dial %s: %v", wsBase, err)
+	}
+	defer conn2.Close(websocket.StatusNormalClosure, "")
+	identity := wsReadEvent(t, conn2, "listener identity")
+	identityJSON, err := json.Marshal(identity)
+	if err != nil {
+		t.Fatalf("re-encode listener frame: %v", err)
+	}
+	if err := sameFields("/ws listener frame", keysOf(t, identityJSON), sortedKeys(wantListenerFrame)); err != nil {
+		t.Error(err)
+	}
+	if identity.Kind != EventListener {
+		t.Errorf("identity frame kind = %q, want %q", identity.Kind, EventListener)
+	}
+
+	// ---- the audience sample summary, live ----
+	// Reported AS the second connection, using the id that connection was just
+	// given, which is the only way to produce a report the server accepts. The
+	// documented summary is then compared with the live one, so the shape an agent
+	// codes against is the shape the server emits.
+	if identity.Listener == nil || identity.Listener.ID == "" {
+		t.Fatalf("the listener frame carried no id, so no report can be keyed to it: %+v", identity.Listener)
+	}
+	if err := checkRequestShape(t, base, "/api/samples", "samplesRequest", wantSamplesReq,
+		map[string]any{
+			"listenerId": identity.Listener.ID,
+			"loaded":     true,
+			"count":      412,
+		}); err != nil {
+		t.Error(err)
+	}
+	stateAfterCode, stateAfter := fanoutGet(t, base, "/api/state")
+	if stateAfterCode != http.StatusOK {
+		t.Fatalf("GET /api/state after a sample report: %d %q", stateAfterCode, bodyOf(stateAfter))
+	}
+	liveSummary := nestedRaw(t, []byte(stateAfter), "samples")
+	if len(liveSummary) == 0 {
+		t.Fatalf("GET /api/state.samples is absent after a listener reported: %q", bodyOf(stateAfter))
+	}
+	if err := sameFields("GET /api/state .samples", keysOf(t, liveSummary), sortedKeys(wantSamplesSummary)); err != nil {
 		t.Error(err)
 	}
 
@@ -971,7 +1025,7 @@ func TestAgentAPIDocShapesAreStable(t *testing.T) {
 		"error", "codeRequest", "messageRequest", "evalResultRequest",
 		"evalAck", "snapshot", "storedEvalResult", "frame", "anchorRequest",
 		"dryRunRequest", "dryRunVerdict", "dryRunResultRequest", "dryRunFrame",
-		"syncResultRequest",
+		"syncResultRequest", "samplesRequest", "samplesSummary", "listenerFrame",
 	}
 	for _, name := range want {
 		docShape(t, doc, name) // fails loudly if the anchor or its JSON is gone

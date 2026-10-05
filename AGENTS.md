@@ -153,7 +153,7 @@ Every listener event has this shape:
 - `snapshot` is the actual snapshot value, not a second bespoke representation.
 - All frame construction goes through one encoder.
 - The event vocabulary is `snapshot`, `code`, `message`, `transport`, `eval-result`, `listener-count`, `anchor`, `agent`, `dry-run`.
-- **One optional member, on one kind.** `dry-run` frames carry a fourth field, `dryRun` (`{id, code}`), because that frame asks a listener to evaluate a candidate that was **not** published, and the snapshot cannot say so: it is performance state, and the candidate is deliberately not state. Every other kind omits the field entirely — `omitempty` on a nil pointer emits nothing, so the frames a client already knew stay byte-identical. A second bespoke frame *shape* would be worse than this, because it would break the single decode path; a new field on the existing envelope does not.
+- **AT MOST ONE OPTIONAL MEMBER, PER KIND.** `dry-run` frames carry a fourth field, `dryRun` (`{id, code}`), because that frame asks a listener to evaluate a candidate that was **not** published, and the snapshot cannot say so: it is performance state, and the candidate is deliberately not state. `listener` frames carry `listener` (`{id}`), because identity is a fact about the *recipient* and a snapshot describes the performance. Every kind omits both fields entirely — `omitempty` on a nil pointer emits nothing, so the frames a client already knew stay byte-identical. A second bespoke frame *shape* would be worse than this, because it would break the single decode path; a new field on the existing envelope does not. The rule is per-KIND rather than "one member in the whole protocol" so that a second need can be met by its own kind without ever giving a frame two optional members — see [Listener identity](#listener-identity-and-audience-state).
 - Event names describe listener-visible changes, not endpoint names; therefore play and hush both use `transport`.
 - A frame is sent for a **transition**, not for an accepted write that changed nothing observable. A heartbeat is accepted and silent; a lease lapse is announced once.
 - `dry-run` is the one kind that is a **request** rather than a transition, which is also why its `snapshot` does not describe what the frame is about. It never bumps the version and never enters history.
@@ -339,12 +339,68 @@ unqualified success.
   reader sees, and the write would succeed, so nothing would report it.
 - **It describes ONE reporting browser, not the audience.** Listeners can be in
   materially different states and the server stores the most recent report, so the
-  value is an observation. Per-listener sample state needs listener identity,
-  which does not exist yet — see `strudel-agent-f79`. A single opaque count would
-  be the same class of defect this one is about, so the limit is documented rather
-  than papered over with a number that cannot be earned.
+  value is an observation. That limit is now ADDRESSED rather than documented:
+  `snapshot.samples` answers the audience question per listener, because listeners
+  have identity — see [Listener identity](#listener-identity-and-audience-state).
+  The verdict-scoped field keeps its own single-browser meaning, and the two are
+  separate because they answer separate questions.
 - Resolution lives in the browser, so it is proved by executing the SERVED
   JavaScript (goja), never by translating the algorithm into Go.
+
+### Listener identity and audience state
+
+`strudel-agent-f79` is the remainder of `uvj.18`: `samplesResolved` is
+verdict-scoped, and with listeners anonymous the server could not dedupe them,
+forget a departed one, or say which answered. This section owns identity itself,
+because listeners will need it for things beyond samples.
+
+- **THE HUB MINTS IDS, AND ONLY THE HUB.** It is the one owner of the subscriber
+  set, so it is the only place a connection exists. `Subscriber.ID` is assigned on
+  the subscribe path, before the handle is returned.
+- **AN ID IS NEVER REUSED.** This is the property the whole feature rests on: a
+  recycled id would make a report from a closed tab indistinguishable from one by
+  whatever connection inherited its number, which is the exact confusion identity
+  was added to remove. `TestSubscriberIDsAreNeverReused` is the guard.
+- **AN ID NAMES A SOCKET, NOT A BROWSER.** Not a tab, a user, or a machine. Ids are
+  process-local and renumber after a restart. Every wording here and in the docs is
+  "this listener" for that reason.
+- **IDENTITY ARRIVES BEFORE THE CATCH-UP SNAPSHOT, and that order is load-bearing.**
+  The snapshot may carry a version the browser validates and reports on
+  immediately; a listener that learned its id afterwards would have to report
+  against an identity it did not have, and the server — correctly — refuses it.
+  `listener` is also the only frame delivered to ONE subscriber, via `Hub.Direct`,
+  which never blocks and answers `ErrNoSubscriber` rather than writing to a closed
+  channel.
+- **A REPORT NAMES A LIVE CONNECTION OR IT IS REFUSED.** `knownListeners` is the
+  authority, and `ErrUnknownListener` is what a stale or invented id gets. A server
+  that stored it would hold claims about an audience it cannot enumerate.
+- **DEPARTURE IS FORGOTTEN, AND THE DEFER ORDER IS LOAD-BEARING.** The forget is
+  registered *after* `defer s.Hub.Unsubscribe(sub)` so it runs *first* — otherwise
+  the `listener-count` frame the hub publishes on removal would encode a snapshot
+  still listing the listener that just left, describing a state that never existed.
+- **THE TRI-STATE IS PER LISTENER, NOT PER AUDIENCE.** `ListenerSamples.Loaded` is
+  a `*bool` for the reason `EvalResult.SamplesResolved` is: a listener with no
+  registry learned nothing, and folding that into `false` would invent a defect
+  nobody found. `agentcli state` counts only listeners that CHECKED for its
+  headline fraction — a fraction over `reporting` would report an un-checked
+  listener's silence as a missing-sample finding.
+- **`samples:null` IS NOT AN EMPTY AUDIENCE.** "Nobody has reported" and "the
+  audience checked and has no samples" are different facts, so the summary is a
+  pointer and goes absent when the last listener leaves.
+- **THE COUNTS ARE DERIVED, NOT INVENTED.** `reporting` and `loaded` are arithmetic
+  over the enumerated `listeners`. This is the opaque-number case the drift section
+  above declined to publish; it is publishable *now* only because identity makes the
+  audience enumerable, and it would be a defect again if the counts were computed
+  any other way.
+- **THE BROWSDRIVER IS PROVED ON THE WIRE.** `srv/samples_audience_browser_test.go`
+  asserts on the body that would have been POSTed, never on what `describeSamples`
+  returned — the `uvj.15` lesson, and it is why the report is exercised through the
+  real `handleFrame` seam.
+- **THE RESOLVER IS THE REGISTRY, NEVER THE Samples BUTTON.** `welcome.html`'s
+  "off" branch flips a label and unregisters nothing, so the client polls
+  `soundMap.get()` on the status tick and reports only on a real change. The
+  server ignores an unchanged report regardless, so the frame rule holds even if a
+  client polls carelessly.
 
 ## Standing limitations
 
@@ -354,7 +410,8 @@ These are design properties, not bugs:
 - **Browser-only evaluation.** A server-accepted pattern can still fail in Strudel.
 - **Bar-aligned synchronization only.** There is no cross-machine sample clock.
 - **Drift is observable, not eliminated.** The client reports measured drift and `unscheduled` when the anchor cannot be used, to `POST /api/sync-result`; an agent reads it from `snapshot.lastSync`, where `null` means nothing has been observed yet rather than zero. One reading describes one reporting browser, not the whole audience — see [Drift reporting](#drift-reporting).
-- **No persistence.** Restart returns to version 0.
+- **Per-listener sample state is observable.** Each listener reports its own registry to `POST /api/samples`, keyed by the connection id the server assigned it; an agent reads the enumerated audience from `snapshot.samples`, where `null` means nobody has reported yet rather than zero. It is what listeners reported, not a prediction of what they will hear — see [Listener identity](#listener-identity-and-audience-state).
+- **No persistence.** Restart returns to version 0. Listener ids are process-local and renumber, which is why a report carrying a pre-restart id is refused.
 - **Network required at browser load.** Pinned CDN dependencies are not vendored.
 
 Any change to these limitations changes the API/README contract and must be documented with the implementation.

@@ -312,8 +312,8 @@
   {
     "name": "48-stale-eval-result-broadcasts",
     "file": "srv/conductor.go",
-    "old": "return false, nil",
-    "new": "return true, nil // deliberately claims a stale report was stored",
+    "old": "\t\t// Understood, valid, and deliberately not stored: nothing changed.\n\t\treturn false, nil",
+    "new": "\t\t// Understood, valid, and deliberately not stored: nothing changed.\n\t\treturn true, nil // deliberately claims a stale report was stored",
     "run": "TestIntegrationRejectedAndStaleWritesBroadcastNothing"
   },
   {
@@ -1212,5 +1212,82 @@
     "old": "\tstored.EpochMS = c.nowMS()",
     "new": "\t// deliberately: keeps whatever the reporter sent, so freshness is read against a clock the agent cannot see",
     "run": "TestRecordSyncObservationStoresWithoutTouchingThePerformance"
+  },
+  {
+    "name": "180-unchanged-sample-report-is-broadcast",
+    "file": "srv/api.go",
+    "old": "\tif changed {\n\t\ts.broadcast(EventSamples, s.Conductor.Snapshot())\n\t}",
+    "new": "\t// deliberately: broadcast on every accepted report, so a browser that polls its registry fills listeners' bounded queues\n\ts.broadcast(EventSamples, s.Conductor.Snapshot())\n\t_ = changed",
+    "run": "TestAnUnchangedReReportBroadcastsNothing"
+  },
+  {
+    "name": "181-unknown-listener-report-is-stored",
+    "file": "srv/conductor.go",
+    "old": "\tif _, known := c.knownListeners[id]; !known {\n\t\treturn false, fmt.Errorf(\"%w: %q has not connected to this server\", ErrUnknownListener, id)\n\t}",
+    "new": "\t// deliberately: no membership check, so a stale or invented id is stored as a claim about an audience",
+    "run": "TestAnUnknownSampleReportIsRefused"
+  },
+  {
+    "name": "182-departed-listener-keeps-answering",
+    "file": "srv/ws.go",
+    "old": "\t\tif _, err := s.Conductor.ForgetListenerSamples(listenerID); err != nil {",
+    "new": "\t\tif _, err := error(nil), error(nil); err != nil { // deliberately: the record outlives the connection",
+    "run": "TestADepartedListenerStopsAnsweringForTheAudience"
+  },
+  {
+    "name": "183-identity-frame-arrives-after-the-snapshot",
+    "file": "srv/ws.go",
+    "old": "\tif err := s.writeToListener(conn, s.encodeListenerEvent(listenerID)); err != nil {\n\t\tslog.Debug(\"websocket listener identity\", \"path\", r.URL.Path, \"error\", err)\n\t}\n\n\tif err := s.sendSnapshot(conn); err != nil {",
+    "new": "\t// deliberately: the snapshot goes first, so a browser evaluates the current version and reports before it knows its own id\n\tif err := s.sendSnapshot(conn); err != nil {",
+    "run": "TestAgentAPIDocPayloadShapesMatchARunningServer"
+  },
+  {
+    "name": "184-unknown-listener-counts-as-unloaded",
+    "file": "srv/conductor.go",
+    "old": "\t\tif rec.Samples.Loaded != nil && *rec.Samples.Loaded {\n\t\t\tsum.Loaded++\n\t\t}",
+    "new": "\t\tif rec.Samples.Loaded == nil || *rec.Samples.Loaded {\n\t\t\tsum.Loaded++ // deliberately: counts a listener that could not check as one holding samples\n\t\t}",
+    "run": "TestAnUnknownListenerIsNotZeroLoaded"
+  },
+  {
+    "name": "185-empty-audience-published-as-a-summary",
+    "file": "srv/conductor.go",
+    "old": "\tif len(c.listenerSamples) == 0 {\n\t\treturn nil\n\t}",
+    "new": "\t// deliberately: publish an empty audience, so 'nobody reported' reads as 'the audience has no samples'\n\tif len(c.listenerSamples) == 0 {\n\t\treturn &SamplesSummary{}\n\t}",
+    "run": "TestForgettingTheLastListenerRestoresAbsence"
+  },
+  {
+    "name": "186-sample-report-enters-the-code-history",
+    "file": "srv/conductor.go",
+    "old": "\tc.listenerSamples[id] = listenerSampleRecord{\n\t\tListenerID: id,",
+    "new": "\tc.version++ // deliberately: an audience report becomes a new document\n\tc.listenerSamples[id] = listenerSampleRecord{\n\t\tListenerID: id,",
+    "run": "TestSamplesNeverTouchThePerformance"
+  },
+  {
+    "name": "187-listener-ids-are-reused",
+    "file": "srv/hub.go",
+    "old": "\t\tnextID++\n\t\treturn fmt.Sprintf(\"L%d\", nextID)",
+    "new": "\t\t// deliberately: reuse the counter, so a departed tab's report is readable as its replacement's\n\t\treturn fmt.Sprintf(\"L%d\", nextID%1+1)",
+    "run": "TestSubscriberIDsAreNeverReused"
+  },
+  {
+    "name": "188-identity-frame-is-broadcast-to-everyone",
+    "file": "srv/ws.go",
+    "old": "\tif err := s.writeToListener(conn, s.encodeListenerEvent(listenerID)); err != nil {\n\t\tslog.Debug(\"websocket listener identity\", \"path\", r.URL.Path, \"error\", err)\n\t}",
+    "new": "\t// deliberately: broadcast one listener's id to the whole audience, so every browser is told which listener it is not\n\tif frame := s.encodeListenerEvent(listenerID); frame != nil {\n\t\ts.Hub.Broadcast(frame)\n\t}",
+    "run": "TestListenerIdentityIsNotBroadcast"
+  },
+  {
+    "name": "189-audience-report-is-never-sent",
+    "file": "srv/static/session.js",
+    "old": "  return fetch(SAMPLES_PATH, {",
+    "new": "  return undefined; // deliberately: computes the audience answer and drops it, the uvj.15 defect\n  return fetch(SAMPLES_PATH, {",
+    "run": "TestTheAudienceReportActuallyLeavesTheBrowser"
+  },
+  {
+    "name": "190-audience-reporter-shadows-the-verdict-one",
+    "file": "srv/static/session.js",
+    "old": "function reportAudienceSamples(force) {",
+    "new": "function reportSamples(force) { // deliberately: collides with the verdict reporter of the same name",
+    "run": "TestTheAudienceReporterDoesNotShadowTheVerdictReporter"
   }
 ]

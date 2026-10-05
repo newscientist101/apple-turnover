@@ -221,13 +221,54 @@ func wsWaitForSubscribers(t *testing.T, h *Hub, want int) {
 	}
 }
 
-// wsReadConnectSnapshot reads the one frame every listener is sent on connect
-// and asserts it is a well-formed EventSnapshot whose payload equals wantSnap.
+// wsReadConnectFrames consumes the frames EVERY listener is sent on connect and
+// asserts both of them: the `listener` identity frame, then the catch-up
+// `snapshot`.
 //
-// It exists because "the first thing a listener sees" is now a load-bearing
-// part of the contract rather than an absence of one. Every test that goes on
-// to assert about LATER frames has to consume this one first, or it would read
-// the catch-up snapshot and mistake it for the broadcast it meant to check.
+// It returns the connection's assigned id alongside the snapshot event, so a
+// test that needs to report AS this listener can key its report to an id the
+// server actually issued.
+//
+// The identity frame is read HERE rather than in each caller because the ordering
+// is the contract: identity first, then the snapshot. A harness that skipped it
+// would silently assert against whatever frame happened to arrive first, and a
+// server that sent the snapshot before the identity — so a browser evaluated the
+// current version and reported against an identity it did not have yet — would
+// pass every test that only looked for "a snapshot at some point".
+func wsReadConnectFrames(t *testing.T, conn *websocket.Conn, wantSnap Snapshot) (string, Event) {
+	t.Helper()
+
+	identity := wsReadEvent(t, conn, "listener identity")
+	if identity.Kind != EventListener {
+		t.Fatalf("first connect frame: kind = %q, want %q: identity must arrive before anything else",
+			identity.Kind, EventListener)
+	}
+	if identity.Listener == nil || identity.Listener.ID == "" {
+		t.Fatalf("the %q frame carried no usable id: %+v", EventListener, identity.Listener)
+	}
+	if identity.DryRun != nil {
+		t.Errorf("the %q frame also carried a dryRun member; a frame has at most one optional member", EventListener)
+	}
+
+	ev := wsReadEvent(t, conn, "connect snapshot")
+	if ev.Kind != EventSnapshot {
+		t.Fatalf("connect snapshot: kind = %q, want %q: the opening snapshot tells a client it has caught up, not that the performance changed", ev.Kind, EventSnapshot)
+	}
+	if ev.Snapshot.Version != wantSnap.Version || ev.Snapshot.Code != wantSnap.Code ||
+		ev.Snapshot.LastAgentMessage != wantSnap.LastAgentMessage || ev.Snapshot.Playing != wantSnap.Playing {
+		t.Fatalf("connect snapshot: got %+v, want %+v", ev.Snapshot, wantSnap)
+	}
+	return identity.Listener.ID, ev
+}
+
+// wsReadConnectSnapshot reads the frames every listener is sent on connect and
+// asserts they are a well-formed EventListener followed by an EventSnapshot whose
+// payload equals wantSnap.
+//
+// It exists because "what a listener sees first" is now a load-bearing part of the
+// contract rather than an absence of one. Every test that goes on to assert about
+// LATER frames has to consume these first, or it would read a connect frame and
+// mistake it for the broadcast it meant to check.
 //
 // wantSnap is compared field by field rather than as encoded bytes because the
 // snapshot is captured at a slightly different instant on each run (the anchor
@@ -235,28 +276,7 @@ func wsWaitForSubscribers(t *testing.T, h *Hub, want int) {
 // once, properly, in the integration harness.
 func wsReadConnectSnapshot(t *testing.T, conn *websocket.Conn, wantSnap Snapshot) Event {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), wsReadTimeout)
-	defer cancel()
-
-	typ, data, err := conn.Read(ctx)
-	if err != nil {
-		t.Fatalf("connect snapshot: no frame within %s: %v", wsReadTimeout, err)
-	}
-	if typ != websocket.MessageText {
-		t.Fatalf("connect snapshot: frame type = %v, want %v", typ, websocket.MessageText)
-	}
-
-	var ev Event
-	if err := json.Unmarshal(data, &ev); err != nil {
-		t.Fatalf("connect snapshot: frame is not a JSON Event (%v): %q", err, data)
-	}
-	if ev.Kind != EventSnapshot {
-		t.Fatalf("connect snapshot: kind = %q, want %q: the opening frame tells a client it has caught up, not that the performance changed", ev.Kind, EventSnapshot)
-	}
-	if ev.Snapshot.Version != wantSnap.Version || ev.Snapshot.Code != wantSnap.Code ||
-		ev.Snapshot.LastAgentMessage != wantSnap.LastAgentMessage || ev.Snapshot.Playing != wantSnap.Playing {
-		t.Fatalf("connect snapshot: got %+v, want %+v", ev.Snapshot, wantSnap)
-	}
+	_, ev := wsReadConnectFrames(t, conn, wantSnap)
 	return ev
 }
 

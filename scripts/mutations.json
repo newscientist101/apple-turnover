@@ -620,15 +620,15 @@
   {
     "name": "91-cli-anchor-half-not-carried-over",
     "file": "cmd/agentcli/commands.go",
-    "old": "\treq := anchorRequest{EpochMS: before.Anchor.EpochMS, CPS: before.Anchor.CPS}",
-    "new": "\treq := anchorRequest{} // deliberately: the half the caller did not name is sent as zero, so a tempo change loses the epoch",
-    "run": "TestAnchorCarriesOverTheHalfItWasNotGiven"
+    "old": "\t\tReq:           anchorRequest{EpochMS: stored.EpochMS, CPS: stored.CPS},",
+    "new": "\t\tReq:           anchorRequest{}, // deliberately: the half the caller did not name is sent as zero, so a tempo change loses the epoch",
+    "run": "TestAnchorCarriesOverTheHalfItWasNotGiven|TestPlanAnchorBoundaryAgreesWithTheServer"
   },
   {
     "name": "92-cli-anchor-no-pre-read",
     "file": "cmd/agentcli/commands.go",
-    "old": "\tbefore, err := c.get(ctx, \"/api/state\")\n\tif err != nil {\n\t\treturn err\n\t}\n\n\t// The half the caller did not name is carried over from the state just",
-    "new": "\tvar before snapshot\n\t// deliberately: the comparison is gone, so every accepted re-anchor reads as a change",
+    "old": "\tplan := planAnchor(before.Anchor, supplied, *epoch, *cps, c.serverNowMS())",
+    "new": "\tplan := planAnchor(anchor{}, supplied, *epoch, *cps, c.serverNowMS()) // deliberately: the pre-read is ignored, so the carry-over and the no-change comparison both rest on nothing",
     "run": "TestAnchorReportsANoopAsANoop|TestAnchorCarriesOverTheHalfItWasNotGiven"
   },
   {
@@ -1289,5 +1289,40 @@
     "old": "function reportAudienceSamples(force) {",
     "new": "function reportSamples(force) { // deliberately: collides with the verdict reporter of the same name",
     "run": "TestTheAudienceReporterDoesNotShadowTheVerdictReporter"
+  },
+  {
+    "name": "191-cli-anchor-resends-a-stale-epoch",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\tif absMS(serverNowMS-plan.Req.EpochMS) > anchorSkewWindowMS {\n\t\tplan.Req.EpochMS = serverNowMS\n\t\tplan.Rebased = true\n\t}",
+    "new": "\tif absMS(serverNowMS-plan.Req.EpochMS) > anchorSkewWindowMS && false {\n\t\tplan.Req.EpochMS = serverNowMS\n\t\tplan.Rebased = true\n\t} // deliberately: the stored epoch is carried forward however old it is, so the server refuses the tempo change on skew",
+    "run": "TestAnchorRetimesWhenTheStoredEpochIsTooOldToReuse|TestAnchorEpochSubstitutionUsesTheServerClock|TestPlanAnchorBoundaryAgreesWithTheServer"
+  },
+  {
+    "name": "192-cli-anchor-always-rebases-the-epoch",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\tif absMS(serverNowMS-plan.Req.EpochMS) > anchorSkewWindowMS {\n\t\tplan.Req.EpochMS = serverNowMS\n\t\tplan.Rebased = true\n\t}",
+    "new": "\tplan.Req.EpochMS = serverNowMS\n\tplan.Rebased = true // deliberately: every half-anchor re-bases, moving the bar grid even when the stored epoch was perfectly usable",
+    "run": "TestAnchorLeavesAUsableStoredEpochAlone|TestPlanAnchorBoundaryAgreesWithTheServer"
+  },
+  {
+    "name": "193-cli-anchor-rebases-silently",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\tif plan.Rebased {\n\t\tfmt.Fprintf(stderr, \"agentcli: the stored epochMs=%d is outside the server's %d ms window, \"+\n\t\t\t\"so it could not be reused; the timeline was re-based onto epochMs=%d (the server's clock). \"+\n\t\t\t\"This moves the shared bar grid.\\n\",\n\t\t\tplan.StoredEpochMS, int64(anchorSkewWindowMS), snap.Anchor.EpochMS)\n\t}",
+    "new": "\tif false {\n\t\t_ = snap // deliberately: the epoch is re-based with no notice, so the caller never learns the shared bar grid moved\n\t}",
+    "run": "TestAnchorSaysItReBasedTheEpoch"
+  },
+  {
+    "name": "194-cli-anchor-substitutes-its-own-clock",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\tplan := planAnchor(before.Anchor, supplied, *epoch, *cps, c.serverNowMS())",
+    "new": "\tplan := planAnchor(before.Anchor, supplied, *epoch, *cps, time.Now().UnixMilli()) // deliberately: the CLI's own clock stands in for the server's",
+    "run": "TestAnchorEpochSubstitutionUsesTheServerClock"
+  },
+  {
+    "name": "195-cli-anchor-overrides-an-explicit-epoch",
+    "file": "cmd/agentcli/commands.go",
+    "old": "\tif supplied[\"epoch-ms\"] {\n\t\tplan.Req.EpochMS = epoch\n\t\treturn plan\n\t}",
+    "new": "\tif supplied[\"epoch-ms\"] {\n\t\tplan.Req.EpochMS = serverNowMS // deliberately: the caller's epoch is overwritten by a guess, so the server never gets to judge it\n\t\treturn plan\n\t}",
+    "run": "TestPlanAnchorNeverTouchesAnExplicitEpoch"
   }
 ]

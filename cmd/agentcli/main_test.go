@@ -1565,6 +1565,288 @@ func TestAnchorUsageErrorsExitTwo(t *testing.T) {
 	}
 }
 
+// TestAnchorRefreshWindowMatchesTheServer keeps the CLI's copy of the skew
+// window honest. The CLI mirrors srv's AnchorMaxSkewMS so it can recognise a
+// stored epoch the server is about to refuse, and a mirror that drifts would
+// either re-base an epoch the server would have accepted (a needless timeline
+// jump) or carry one forward that it will reject — the original defect, arrived
+// at from the other direction.
+func TestAnchorRefreshWindowMatchesTheServer(t *testing.T) {
+	if anchorSkewWindowMS != int64(srv.AnchorMaxSkewMS) {
+		t.Errorf("CLI skew window = %d ms, server AnchorMaxSkewMS = %d ms; the CLI must not disagree with the guard it works around",
+			anchorSkewWindowMS, int64(srv.AnchorMaxSkewMS))
+	}
+}
+
+// newAgedAnchorServer boots the real handler tree behind a proxy that makes the
+// stored anchor LOOK stale, and optionally reports a skewed server clock. It
+// returns the PROXY base to point the CLI at, and the INNER base to read true
+// state from.
+//
+// The two bases are separate because the proxy ages every GET /api/state, so an
+// assertion that read the anchor back through it would measure the rewrite
+// rather than what the server stored — a green test of nothing. `trueBase` is
+// where the outcome is read.
+//
+// Rewriting only GET /api/state is what an aged anchor looks like from the CLI's
+// side, and it is enough on its own: the pre-read sees an epoch the real server
+// would reject, so a CLI that carries that value forward verbatim gets a genuine
+// 400 from the real validateAnchorAt — the bug, with no server behaviour faked.
+// Skewing Date additionally separates "the server's clock" from "the CLI's
+// clock": a CLI that substituted time.Now() would store an epoch near the REAL
+// now, and the assertion against the skewed value fails.
+func newAgedAnchorServer(t *testing.T, staleAge, dateSkew time.Duration) (proxyBase, trueBase string, staleEpochMS int64) {
+	t.Helper()
+	inner := srv.New().Handler()
+	// The aged epoch is computed ONCE, here, and served from this value on every
+	// request. Recomputing it per request — or recomputing it in the test — leaves
+	// the two a millisecond apart, which is indistinguishable from correct but
+	// makes the assertion on the declined value flaky. One instant, one number.
+	stale := time.Now().Add(-staleAge).UnixMilli()
+	real := httptest.NewServer(inner)
+	t.Cleanup(func() { closeBounded(t, real) })
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if dateSkew != 0 {
+			// net/http only sets Date itself when absent, so setting it here is
+			// how the proxy claims to be a server with a different clock.
+			w.Header().Set("Date", time.Now().Add(dateSkew).UTC().Format(http.TimeFormat))
+		}
+		if r.Method != http.MethodGet || r.URL.Path != "/api/state" || staleAge == 0 {
+			inner.ServeHTTP(w, r)
+			return
+		}
+		// Re-serve the snapshot with only the anchor's epoch aged. Everything
+		// else — cps, version, the rest of the state — is the real server's.
+		rec := httptest.NewRecorder()
+		inner.ServeHTTP(rec, r)
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		stored, ok := body["anchor"].(map[string]any)
+		if !ok {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		stored["epochMs"] = float64(stale)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(body)
+	}))
+	t.Cleanup(func() { closeBounded(t, ts) })
+	addr := ts.Listener.Addr().String()
+	if strings.HasSuffix(addr, ":8000") {
+		t.Fatalf("test server bound %s, the production port", addr)
+	}
+	return "http://" + addr, real.URL, stale
+}
+
+// TestAnchorRetimesWhenTheStoredEpochIsTooOldToReuse is strudel-agent-uvj.11: the
+// documented partial-update form (`anchor -cps` alone) failed for EVERY session
+// older than five minutes, because the CLI carried the stored epoch forward and
+// the server refused it on skew.
+//
+// The half-anchor carry-over is correct and stays — a re-anchor REPLACES the
+// timeline, so sending only one half is a 400 by contract. The defect is that it
+// re-sent a value the server itself had published and no longer accepted, so the
+// one invocation an agent actually wants (change the tempo, leave the epoch) was
+// the one that could not work.
+func TestAnchorRetimesWhenTheStoredEpochIsTooOldToReuse(t *testing.T) {
+	// Ten minutes: well past the five-minute window, so this cannot pass by
+	// accident.
+	base, trueBase, _ := newAgedAnchorServer(t, 10*time.Minute, 0)
+
+	// Publish first, so an unchanged version is evidence rather than the
+	// trivial case of a performance that never had a version.
+	if got := runCLI(t, base, `s("bd")`, "push"); got.code != exitOK {
+		t.Fatalf("push: exit %d, stderr %q", got.code, got.stderr)
+	}
+	_, cpsBefore := currentAnchor(t, trueBase)
+
+	got := runCLI(t, base, "", "anchor", "-cps", "0.75")
+	if got.code != exitOK {
+		t.Fatalf("anchor -cps 0.75 with a stale stored epoch: exit %d, stderr %q", got.code, got.stderr)
+	}
+
+	epochAfter, cpsAfter := currentAnchor(t, trueBase)
+	if cpsAfter != 0.75 {
+		t.Errorf("server anchor cps = %g, want 0.75 — the tempo change did not land", cpsAfter)
+	}
+	if cpsAfter == cpsBefore {
+		t.Error("cps did not change; the command reported success without moving the tempo")
+	}
+	// SEMANTICALLY correct means inside the window the server enforces, rather
+	// than inherited from the stale stored value.
+	if skew := time.Now().UnixMilli() - epochAfter; skew < 0 || skew > int64(srv.AnchorMaxSkewMS) {
+		t.Errorf("stored epochMs %d is %d ms from the server clock, outside the %d ms window the server accepts",
+			epochAfter, skew, int64(srv.AnchorMaxSkewMS))
+	}
+	// And the re-anchor still must not touch the version.
+	if !strings.Contains(got.stdout, "version 1 unchanged") {
+		t.Errorf("stdout %q, want it to say the version did not move", got.stdout)
+	}
+}
+
+// TestAnchorEpochSubstitutionUsesTheServerClock separates the two clocks a
+// substitution could plausibly use. The CLI does not know the server's time, so
+// the temptation is time.Now() — which is exactly wrong whenever the agent's
+// machine and the server disagree, and silently so: the stored anchor is then
+// accepted or refused according to the skew of a clock the caller never chose.
+//
+// The proxy reports a Date header a full minute and a half ahead of real time. A
+// CLI reading the server's clock stores an epoch near THAT; one calling
+// time.Now() stores one near real now, ninety seconds away, and fails here.
+func TestAnchorEpochSubstitutionUsesTheServerClock(t *testing.T) {
+	const skew = 90 * time.Second
+	base, trueBase, _ := newAgedAnchorServer(t, 10*time.Minute, skew)
+
+	if got := runCLI(t, base, "", "anchor", "-cps", "0.75"); got.code != exitOK {
+		t.Fatalf("anchor -cps 0.75: exit %d, stderr %q", got.code, got.stderr)
+	}
+
+	epochAfter, _ := currentAnchor(t, trueBase)
+	// Date has one-second granularity, hence the tolerance; the local-clock
+	// reading this guards against is ninety seconds out, not a rounding away.
+	serverDelta := absMS(epochAfter - time.Now().Add(skew).UnixMilli())
+	if serverDelta > 1500 {
+		t.Errorf("stored epochMs %d is %d ms from the SERVER's clock; the CLI used its own local clock instead (%d ms from real time)",
+			epochAfter, serverDelta, absMS(epochAfter-time.Now().UnixMilli()))
+	}
+}
+
+// TestAnchorSaysItReBasedTheEpoch pins the disclosure. A re-anchor replaces the
+// whole timeline, so quietly moving the epoch leaves the agent discovering its
+// bar grid shifted by a substitution nobody mentioned — the "silently inventing
+// a new timeline" outcome the acceptance criteria name. The notice carries BOTH
+// epochs: the stale one that could not be reused, and the one sent in its place.
+//
+// It goes to STDERR, which is what keeps `anchor -json` emitting the snapshot and
+// nothing else.
+func TestAnchorSaysItReBasedTheEpoch(t *testing.T) {
+	base, trueBase, staleEpoch := newAgedAnchorServer(t, 10*time.Minute, 0)
+
+	// -json, because the claim under test is precisely that the notice stays OFF
+	// the machine-readable stream. In prose mode stdout carries the human line
+	// and the assertion would prove nothing about the JSON contract.
+	got := runCLI(t, base, "", "-json", "anchor", "-cps", "0.75")
+	if got.code != exitOK {
+		t.Fatalf("anchor -cps 0.75: exit %d, stderr %q", got.code, got.stderr)
+	}
+	epochAfter, _ := currentAnchor(t, trueBase)
+
+	if !strings.Contains(got.stderr, "epoch") {
+		t.Errorf("stderr %q does not mention the epoch at all; the caller cannot tell the timeline moved", got.stderr)
+	}
+	if !strings.Contains(got.stderr, strconv.FormatInt(staleEpoch, 10)) {
+		t.Errorf("stderr %q does not name the stale stored epoch %d it declined to reuse", got.stderr, staleEpoch)
+	}
+	if !strings.Contains(got.stderr, strconv.FormatInt(epochAfter, 10)) {
+		t.Errorf("stderr %q does not name the epoch it sent instead (%d)", got.stderr, epochAfter)
+	}
+	// The substitution is reported on stderr precisely so the machine-readable
+	// stream stays exactly the documented snapshot.
+	var snap snapshot
+	if err := json.Unmarshal([]byte(got.stdout), &snap); err != nil {
+		t.Errorf("stdout %q is not the bare snapshot any more: %v", got.stdout, err)
+	}
+	if snap.Anchor.EpochMS != epochAfter || snap.Anchor.CPS != 0.75 {
+		t.Errorf("stdout snapshot anchor = %+v, want the server's own {epochMs:%d cps:0.75}", snap.Anchor, epochAfter)
+	}
+}
+
+// TestAnchorLeavesAUsableStoredEpochAlone is the other half of the conditional:
+// a stored epoch inside the window is still carried forward verbatim, because
+// re-basing a perfectly good epoch moves the bar grid for a reason the caller
+// never asked for. Without this, "fix the stale case" could be satisfied by
+// always re-basing, which is the same class of defect — inventing a timeline.
+func TestAnchorLeavesAUsableStoredEpochAlone(t *testing.T) {
+	base := newTestServer(t)
+	epochBefore, _ := currentAnchor(t, base)
+
+	got := runCLI(t, base, "", "anchor", "-cps", "0.75")
+	if got.code != exitOK {
+		t.Fatalf("anchor -cps 0.75: exit %d, stderr %q", got.code, got.stderr)
+	}
+
+	if epochAfter, _ := currentAnchor(t, base); epochAfter != epochBefore {
+		t.Errorf("stored epochMs moved %d -> %d; a usable stored epoch must be carried forward verbatim",
+			epochBefore, epochAfter)
+	}
+	if strings.Contains(got.stderr, "epochMs=") {
+		t.Errorf("stderr %q announces a re-base that should not have happened", got.stderr)
+	}
+}
+
+// TestPlanAnchorBoundaryAgreesWithTheServer pins the comparison itself, which the
+// end-to-end tests cannot reach: they only ever try ten minutes stale or seconds
+// stale.
+//
+// The server's window is INCLUSIVE (`skew > AnchorMaxSkewMS` is the refusal), so
+// an epoch exactly on the limit must be sent verbatim — re-basing it would move
+// the shared bar grid for an epoch the server was always going to accept. One
+// millisecond past it must be re-based, because the server will refuse it. An
+// off-by-one here is invisible above: both sides still "work", and the only
+// symptom is a grid that jumps when it had no reason to.
+func TestPlanAnchorBoundaryAgreesWithTheServer(t *testing.T) {
+	now := int64(1_700_000_000_000)
+	tests := []struct {
+		name       string
+		storedMS   int64
+		wantUsed   bool // was the stored epoch reused verbatim?
+		wantRebase bool
+	}{
+		{"far inside the window", now - anchorSkewWindowMS + 60_000, true, false},
+		{"exactly on the inclusive limit", now - anchorSkewWindowMS, true, false},
+		{"one millisecond past the limit", now - anchorSkewWindowMS - 1, false, true},
+		{"long past the limit", now - 10*anchorSkewWindowMS, false, true},
+		// The server compares ABSOLUTE skew, so a clock running fast is refused
+		// on the same terms as one running slow. The CLI must agree in both
+		// directions or it re-bases for the wrong reason on a fast clock.
+		{"one millisecond past the limit, in the future", now + anchorSkewWindowMS + 1, false, true},
+		{"exactly on the limit, in the future", now + anchorSkewWindowMS, true, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := planAnchor(anchor{EpochMS: tc.storedMS, CPS: 0.5},
+				map[string]bool{"cps": true}, 0, 0.75, now)
+			if gotUsed := plan.Req.EpochMS == tc.storedMS; gotUsed != tc.wantUsed {
+				t.Errorf("stored epoch reused = %t, want %t (sent epochMs=%d, stored %d)",
+					gotUsed, tc.wantUsed, plan.Req.EpochMS, tc.storedMS)
+			}
+			if plan.Rebased != tc.wantRebase {
+				t.Errorf("Rebased = %t, want %t", plan.Rebased, tc.wantRebase)
+			}
+			if plan.Req.CPS != 0.75 {
+				t.Errorf("cps = %g, want the supplied 0.75; the re-base must not disturb the half that was named", plan.Req.CPS)
+			}
+			if plan.StoredEpochMS != tc.storedMS {
+				t.Errorf("StoredEpochMS = %d, want %d; the notice names this value", plan.StoredEpochMS, tc.storedMS)
+			}
+		})
+	}
+}
+
+// TestPlanAnchorNeverTouchesAnExplicitEpoch pins the one input the CLI must not
+// "help" with. The caller stated a value and is in a position to judge it; the
+// server stays the only authority on whether it is acceptable, and the CLI
+// guessing would silently override a decision the caller made.
+func TestPlanAnchorNeverTouchesAnExplicitEpoch(t *testing.T) {
+	now := int64(1_700_000_000_000)
+	// An epoch from a badly skewed clock, which the server will refuse — and the
+	// CLI must still send it, so the refusal is the server's to give in its own
+	// words rather than a precondition failure from the client.
+	const badlySkewed = 1_000_000_000_000
+
+	plan := planAnchor(anchor{EpochMS: now - 10*anchorSkewWindowMS, CPS: 0.5},
+		map[string]bool{"epoch-ms": true, "cps": true}, badlySkewed, 0.75, now)
+	if plan.Req.EpochMS != badlySkewed {
+		t.Errorf("epochMs = %d, want the caller's %d sent verbatim", plan.Req.EpochMS, badlySkewed)
+	}
+	if plan.Rebased {
+		t.Error("Rebased = true for an explicitly supplied epoch; the CLI overrode the caller")
+	}
+}
+
 // TestHelpExitsZero covers the one non-error path that is not a command, and
 // checks every subcommand is discoverable from it.
 func TestHelpExitsZero(t *testing.T) {
@@ -1630,7 +1912,13 @@ func TestSubcommandHelpPrintsItsOwnFlags(t *testing.T) {
 		{
 			command:   "anchor",
 			wantFlags: []string{"-epoch-ms", "-cps"},
-			wantText:  []string{"the shared timeline's epoch", "cycles per second"},
+			wantText: []string{"the shared timeline's epoch", "cycles per second",
+				// The default must describe what the code DOES. It used to claim
+				// "the current epoch" while carrying the stored one forward, so the
+				// help and the behaviour disagreed about the very thing a caller
+				// needs to know before trusting a half-anchor (strudel-agent-uvj.11).
+				"re-based",
+			},
 		},
 	}
 

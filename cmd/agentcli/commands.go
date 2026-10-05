@@ -958,6 +958,97 @@ type anchorRequest struct {
 	CPS     float64 `json:"cps"`
 }
 
+// anchorSkewWindowMS mirrors the server's AnchorMaxSkewMS: how far an anchor's
+// epoch may sit from the server's own clock.
+//
+// It is a mirror rather than a fresh policy because the CLI needs to recognise a
+// stored epoch the server is ABOUT TO refuse, and the server's guard is the only
+// authority on where that line sits. TestAnchorRefreshWindowMatchesTheServer is
+// what stops the copy drifting: a wider mirror re-bases epochs the server would
+// have accepted (a needless jump of the shared bar grid), and a narrower one
+// carries forward an epoch that gets refused — the uvj.11 defect reached from the
+// other direction.
+//
+// The server's window is NOT widened to accommodate this. It is a documented
+// invariant and it is what stops a stale client silently resetting the shared
+// timeline; the CLI is the side that is wrong.
+const anchorSkewWindowMS = 5 * 60 * 1000
+
+// anchorPlan is what cmdAnchor decided to send, and why.
+//
+// Rebased is reported rather than inferred, because the substitution is the one
+// thing this command does that the caller did not ask for: a re-anchor replaces
+// the whole timeline, so moving the epoch silently would leave an agent
+// discovering its bar grid shifted by a decision nobody told it about
+// (strudel-agent-uvj.11).
+type anchorPlan struct {
+	Req     anchorRequest
+	Rebased bool
+	// StoredEpochMS is the epoch the server held before this request, i.e. the
+	// one that could not be reused. It is carried so the notice can name the
+	// value that was declined rather than only the one sent.
+	StoredEpochMS int64
+}
+
+// planAnchor decides the epoch to send, which is where the whole defect lived.
+//
+// The half the caller did not name is carried over from the state just read,
+// which is exactly what the contract tells an agent to do by hand ("resend the
+// current epochMs") and is what stops the CLI half-anchoring the way a
+// hand-written body easily could. That carry-over is correct and stays.
+//
+// The defect was that it carried a STALE epoch forward: the server publishes its
+// anchor once and pins it at start, so past the five-minute skew window the
+// carried value is one the server refuses — it was rejecting a value it had
+// itself handed out. A carried epoch is therefore reused only while it is still
+// inside the server's window; past it, the epoch is re-based onto the server's
+// clock.
+//
+// What "leave the epoch alone" means when the stored epoch is UNUSABLE, decided
+// and documented: the stored epoch is not preserved, because preserving it is
+// exactly what the server forbids. It is replaced by the server's current time,
+// which is the only epoch that both (a) satisfies the guard and (b) means "the
+// bar grid starts now" — the same thing an agent does by hand with
+// `-epoch-ms $(date +%s000)`. This does invent a new grid, and that is why the
+// caller is told; the alternative — refusing, or demanding both flags — left the
+// most natural invocation of the documented partial form unusable for every
+// session older than five minutes, which is the bug being fixed.
+//
+// An EXPLICITLY supplied -epoch-ms is never touched. The caller asked for that
+// value, and the server remains the only judge of whether it is acceptable; a
+// guess would override a decision the caller is in a position to make.
+func planAnchor(stored anchor, supplied map[string]bool, epoch int64, cps float64, serverNowMS int64) anchorPlan {
+	plan := anchorPlan{
+		Req:           anchorRequest{EpochMS: stored.EpochMS, CPS: stored.CPS},
+		StoredEpochMS: stored.EpochMS,
+	}
+	if supplied["epoch-ms"] {
+		plan.Req.EpochMS = epoch
+		return plan
+	}
+	if absMS(serverNowMS-plan.Req.EpochMS) > anchorSkewWindowMS {
+		plan.Req.EpochMS = serverNowMS
+		plan.Rebased = true
+	}
+	if supplied["cps"] {
+		plan.Req.CPS = cps
+	}
+	return plan
+}
+
+// absMS is the absolute value of a millisecond difference.
+//
+// The comparison is ABSOLUTE because the server's guard is: it refuses an epoch
+// running fast on the same terms as one running slow, so a one-sided comparison
+// here would leave the CLI re-basing for the wrong reason on a fast clock — or,
+// worse, declining to re-base an epoch the server is about to refuse.
+func absMS(d int64) int64 {
+	if d < 0 {
+		return -d
+	}
+	return d
+}
+
 // cmdAnchor republishes the shared timeline every listener schedules against.
 //
 // It is here because the CLI is one-to-one with the documented endpoints: POST
@@ -981,7 +1072,8 @@ type anchorRequest struct {
 func cmdAnchor(ctx context.Context, c *client, args []string, out, stderr io.Writer) error {
 	fs := flag.NewFlagSet("anchor", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	epoch := fs.Int64("epoch-ms", 0, "the shared timeline's epoch, in Unix milliseconds (default: the current epoch)")
+	epoch := fs.Int64("epoch-ms", 0, "the shared timeline's epoch, in Unix milliseconds "+
+		"(default: the stored epoch, re-based onto the server clock when it is too old for the server to accept)")
 	cps := fs.Float64("cps", 0, "cycles per second, greater than 0 and at most 1000 (default: the current rate)")
 	if err := parseFlags(fs, args, stderr); err != nil {
 		return err
@@ -1002,22 +1094,29 @@ func cmdAnchor(ctx context.Context, c *client, args []string, out, stderr io.Wri
 		return err
 	}
 
-	// The half the caller did not name is carried over from the state just
-	// read, which is exactly what the contract tells an agent to do by hand
-	// ("resend the current epochMs") — so the CLI cannot half-anchor the way a
-	// hand-written body easily could.
-	req := anchorRequest{EpochMS: before.Anchor.EpochMS, CPS: before.Anchor.CPS}
-	if supplied["epoch-ms"] {
-		req.EpochMS = *epoch
-	}
-	if supplied["cps"] {
-		req.CPS = *cps
-	}
+	plan := planAnchor(before.Anchor, supplied, *epoch, *cps, c.serverNowMS())
+	req := plan.Req
 
 	var snap snapshot
 	if err := c.post(ctx, "/api/anchor", req, &snap); err != nil {
 		return err
 	}
+
+	// The substitution is announced on STDERR, and only once the write is known
+	// to have landed, so the notice can name the epoch the server actually
+	// stored rather than the one that was proposed.
+	//
+	// STDERR specifically, for two reasons. It must be visible to a human reading
+	// a terminal, and it must stay off stdout so `anchor -json` remains the
+	// documented snapshot and nothing else — a machine-readable stream is exactly
+	// where an unrequested narrative line does the most damage.
+	if plan.Rebased {
+		fmt.Fprintf(stderr, "agentcli: the stored epochMs=%d is outside the server's %d ms window, "+
+			"so it could not be reused; the timeline was re-based onto epochMs=%d (the server's clock). "+
+			"This moves the shared bar grid.\n",
+			plan.StoredEpochMS, int64(anchorSkewWindowMS), snap.Anchor.EpochMS)
+	}
+
 	if c.jsonOutput {
 		return writeJSONLine(out, snap)
 	}

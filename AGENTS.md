@@ -547,6 +547,67 @@ an invented report silently replaced a genuine one while "testing the endpoint"
   could store a verdict between the read and the write, which is the same
   wording discipline `anchor`'s comparison follows.
 
+### Half-anchoring in the CLI
+
+`agentcli anchor` exists because `POST /api/anchor` REPLACES the whole timeline:
+both fields are required, so a hand-written body naming only `cps` is a `400`. The
+CLI reads state first and carries the unsupplied half forward, which is correct
+and is exactly what `AGENT_API.md` tells an agent to do by hand. strudel-agent-uvj.11
+is what that convenience ran into.
+
+- **THE SERVER'S FIVE-MINUTE WINDOW IS AN INVARIANT AND IS NEVER RELAXED FOR A
+  CLIENT.** It is what stops a stale client silently resetting the shared
+  timeline. The server publishing an anchor it will later refuse is *intended*
+  behaviour: the epoch is stamped at start and does not advance. A fix that
+  widens the window, skips validation for a known client, or treats the stored
+  anchor as grandfathered has fixed the wrong side — the CLI is what is wrong.
+- **A CARRIED EPOCH IS REUSED ONLY WHILE IT IS STILL INSIDE THE WINDOW.** Past it,
+  the carried value is one the server has already promised to refuse, so
+  re-sending it is guaranteed failure rather than an edge case. Given the epoch
+  does not advance, this is the *steady state* of any session over five minutes,
+  not a corner — which is why the invariant is about the whole session rather
+  than about a race.
+- **WHAT "LEAVE THE EPOCH ALONE" MEANS IS THE SERVER'S CLOCK, AND IT IS
+  DISCLOSED.** A stored epoch outside the window cannot be preserved, because
+  preserving it is precisely what the guard forbids. It is replaced with the
+  server's current time: the only value that both satisfies the guard and means
+  "the grid starts now". This does move the shared bar grid, so it is **announced
+  on stderr naming both epochs** — never silently. An agent that discovered its
+  grid had shifted by an unmentioned substitution would be worse off than one
+  that got a `400`.
+- **THE SERVER'S CLOCK COMES FROM THE `Date` RESPONSE HEADER, NEVER FROM
+  `time.Now()`.** The CLI does not know the server's time, and its own clock is
+  the one thing guaranteed to disagree. `Date` is set by `net/http` on every
+  response whether or not the application knows about it, so learning the clock
+  adds **nothing to the wire contract** — no endpoint, no snapshot field, nothing
+  for an agent to read. A body field would have moved `AGENT_API.md` for a purely
+  local need. Absent or unparseable, it falls back to the local clock, which is
+  the pre-existing behaviour and so cannot be a downgrade.
+- **`anchorSkewWindowMS` MIRRORS `srv.AnchorMaxSkewMS`, AND THE COMPARISON IS
+  INCLUSIVE.** The CLI needs to know where the server's line sits to avoid
+  crossing it, so the mirror must not drift: wider re-bases epochs the server
+  would have accepted, narrower carries forward one it will refuse.
+  `TestPlanAnchorBoundaryAgreesWithTheServer` pins the boundary itself, because
+  an off-by-one is invisible from outside — both sides still "work", and the only
+  symptom is a grid that jumps for no reason. Both directions are tested, since
+  the server compares *absolute* skew.
+- **AN EXPLICIT `-epoch-ms` IS NEVER REWRITTEN.** The caller stated a value and is
+  in a position to judge it; the server stays the only authority on whether it is
+  acceptable. "Helping" here would silently override a decision the caller made,
+  and would replace a clear server `400` with a client-side guess.
+- **THE NOTICE GOES TO STDERR SO `-json` STAYS THE SNAPSHOT.** An unrequested
+  narrative line is most damaging in a machine-readable stream, and the existing
+  `-json` contract is that stdout is the snapshot and nothing else.
+
+Each of those claims is a mutation row, because each is a way this could look
+fixed while being wrong: `191-cli-anchor-resends-a-stale-epoch` (the original
+defect, restored), `192-cli-anchor-always-rebases-the-epoch` (fixing the stale case
+by re-basing *every* epoch, which invents the timeline the disclosure exists to
+prevent), `193-cli-anchor-rebases-silently`, `194-cli-anchor-substitutes-its-own-clock`
+and `195-cli-anchor-overrides-an-explicit-epoch`. Rows 91 and 92 were re-anchored
+onto the extracted `planAnchor` when it was introduced; a re-anchored row must be
+confirmed **caught**, since `--lint` only proves the anchor is unique and present.
+
 ### Waiting for a verdict in the CLI
 
 `agentcli wait` (and `push --wait`) close step 4 of the agent loop, which is the

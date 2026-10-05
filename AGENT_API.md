@@ -184,9 +184,29 @@ Replaces the shared timeline.
 Both fields are required.
 
 - `cps` must be `> 0` and `<= 1000`.
-- `epochMs` must be within five minutes of the server clock.
+- `epochMs` must be within five minutes of the server clock. The bound is **inclusive**.
 - Invalid anchors change nothing and are not broadcast.
 - Anchors do not bump the code version.
+
+Because both fields are required and the anchor is a full replacement, changing
+only the tempo means reading `anchor.epochMs` from `GET /api/state` and resending
+it. The server stamps its anchor once, at start, and does not advance it, so that
+resent value goes stale: after five minutes it is a value the server will refuse,
+which is why re-temping by hand needs a **fresh** `epochMs` rather than the
+stored one.
+
+`agentcli anchor` handles this for you. Given `-cps` alone it carries the stored
+epoch forward while that epoch is still inside the five-minute window, and past
+the window it re-bases the timeline onto the server's current time instead — the
+only epoch that both satisfies the guard and means "the grid starts now". It
+prints the substitution to **stderr**, naming both epochs, so `agentcli anchor
+-json` still emits the snapshot and nothing else. An explicitly supplied
+`-epoch-ms` is never rewritten: the server remains the only judge of it.
+
+The five-minute window is **not** relaxed to accommodate any client. It is what
+stops a stale client silently resetting the shared timeline, and the server
+publishing a value it will later refuse is the intended behaviour, not a bug to be
+worked around on the server side.
 
 The shared cycle grid is:
 

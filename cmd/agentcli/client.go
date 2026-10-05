@@ -186,6 +186,62 @@ type client struct {
 	// rather than passed to every call so that no command can print prose when
 	// the caller asked for JSON.
 	jsonOutput bool
+
+	// serverTimeMS is the server's own clock, learned from the Date response
+	// header of the last response received. It is what lets `anchor` reason
+	// about the server's skew window without a second endpoint (strudel-agent-uvj.11).
+	//
+	// The header rather than a body field, deliberately: it is set by net/http on
+	// every response whether or not the application knows about it, so learning
+	// the server's clock adds NOTHING to the documented wire contract — no new
+	// endpoint, no new snapshot field, no change for an agent to read. A body
+	// field would have moved AGENT_API.md for a purely local need.
+	//
+	// Zero means "not observed yet, or unparseable", and the caller falls back to
+	// the local clock — which is the pre-existing behaviour, so the fallback
+	// cannot make anything worse than it was.
+	serverTimeMS int64
+}
+
+// serverNowMS is the server's clock as of the last response, or the local clock
+// when no usable Date header has been seen.
+//
+// The fallback is not a silent downgrade to a worse answer, it is the same answer
+// the CLI gave before it knew the server's clock existed; where the header IS
+// present it is strictly better, because it is the clock the server will judge
+// the request against. Note this is an OBSERVATION of the server's clock, not a
+// guarantee about what the server holds now — the same wording discipline `anchor`
+// already follows for its no-change comparison.
+func (c *client) serverNowMS() int64 {
+	if c.serverTimeMS != 0 {
+		return c.serverTimeMS
+	}
+	return time.Now().UnixMilli()
+}
+
+// noteServerTime records the server's clock from a response's Date header.
+//
+// A malformed or absent header is ignored rather than fatal: the header is a
+// convenience for one command, and a proxy that strips it must not break the
+// other eight.
+//
+// The one-second granularity is SAFE in the direction that matters, and it is
+// worth being explicit about why rather than assuming it. Truncation can only
+// make the observed clock EARLIER, which makes a computed skew look LARGER — so
+// the CLI can re-base an epoch the server would have accepted (a needless jump
+// of the bar grid, corrected by the next read), but it can never carry forward an
+// epoch the server is about to refuse, which is the failure this exists to
+// prevent. The error is therefore always in the safe direction.
+func (c *client) noteServerTime(h http.Header) {
+	raw := h.Get("Date")
+	if raw == "" {
+		return
+	}
+	parsed, err := http.ParseTime(raw)
+	if err != nil {
+		return
+	}
+	c.serverTimeMS = parsed.UnixMilli()
 }
 
 // newClient validates the base URL and builds the bounded transport.
@@ -287,6 +343,12 @@ func (c *client) do(ctx context.Context, method, path string, body any, out any)
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBytes))
 		_ = resp.Body.Close()
 	}()
+
+	// Every response teaches the client the server's clock, not just the ones a
+	// command happens to care about: the pre-read and the write are separate
+	// requests, and learning the clock from the PRE-READ is what lets `anchor`
+	// decide before it sends anything.
+	c.noteServerTime(resp.Header)
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {

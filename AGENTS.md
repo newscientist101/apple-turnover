@@ -736,22 +736,6 @@ whatsoever — including `|`, `||`, tabs and newlines.** Omit `run` entirely to
 mean the whole suite, because an empty `run` is rejected and "no `-run`" must
 stay distinguishable from `""`. No row may be added back into the shell script.
 
-**Any text describing a "pipe-delimited row", a "5th field", or "`|` is safe in
-a run regex" is HISTORY from before `231764d` and must not be copied into a
-row.** The table used to be a heredoc inside `mutation-check.sh`, parsed as
-`<name>|<file>|<old>|<new>|<optional -run regex>`, and that format could not
-express an anchor containing a `|`: the delimiter split the row, `old` was
-truncated at the bar, and the rest was read as the `-run` regex. **Every one of
-those outcomes was non-diagnostic**: a truncated anchor matched nothing
-(`BROKEN`, blaming the implementation for a table typo), failed to compile as a
-regexp (`WEAK`, which reads like a routing mistake), or — worst — happened to
-match exactly once, so the grid mutated the **wrong text** and reported the row
-healthy. Commit `12f3a3d` worked around it by re-anchoring a row onto a
-pipe-free line rather than by fixing the format. JSON removed the class of bug
-rather than relocating it: there is no delimiter left for an anchor to collide
-with. (Row 126 is the worked example — it was moved off its real target by that
-workaround and is back on it; see `scripts/mutation-check.sh`.)
-
 Two consequences are load-bearing:
 
 - **A `WEAK` row caused by a malformed `-run` regexp is a table defect, not

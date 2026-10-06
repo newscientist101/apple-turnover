@@ -314,7 +314,7 @@ An agent speaks plain request/response HTTP and holds **no persistent connection
 
 - Send it periodically — more often than the TTL — to be counted as present.
 - It never bumps the version and never changes the music.
-- A heartbeat broadcasts **nothing** to listeners: it renews a lease they already believe is held.
+- A heartbeat broadcasts nothing to listeners directly: it renews a lease every listener already believes is held. When the heartbeat CHANGES what is observably true instead — the first beat from a server that has never seen an agent, or the first beat after a lapse — the lease sweeper turns that transition into a single `agent` frame on its next tick (at most ~1.5s later), and routine renewals stay silent.
 
 **The lease decays.** A heartbeat counts the agent as present for **15 seconds** (`AgentTTL`). Stop sending and the server reports the agent absent 15s after the last beat, exactly once.
 
@@ -486,7 +486,7 @@ The candidate is here rather than in the snapshot precisely because it was never
 | `eval-result` | A browser verdict was stored |
 | `listener-count` | A listener connected, left, or was reaped |
 | `anchor` | Shared timeline changed |
-| `agent` | The agent lease lapsed |
+| `agent` | Agent presence changed: an agent arrived, its lease lapsed, or it returned |
 | `dry-run` | A candidate must be evaluated without being published |
 | `sync` | A listener reported where its commit landed |
 | `listener` | Sent once, to one connection only: the id the server assigned it |
@@ -502,7 +502,7 @@ Like `sync`, it never bumps the version and never enters the history: what the a
 
 `hush` and `play` intentionally share `transport` because listeners care about the resulting `playing` state.
 
-`agent` is sent on exactly one occasion: a **held** lease lapsing. A heartbeat broadcasts nothing, and a server that has never seen an agent never announces one going away, because never-seen is the initial state rather than a transition. A client therefore treats `agent` as "the agent you were watching has gone", and re-reads `agent.active` from the frame rather than inferring the timing itself.
+`agent` is sent when presence CHANGES, each transition exactly once: never-seen to active (the agent arrived), lapsed to active (it returned), and active to lapsed (the lease decayed). A heartbeat that merely renews an already-announced lease broadcasts nothing, and a server that has never seen an agent never announces one going away, because never-seen is the initial state rather than a transition. A client therefore treats `agent` as "the agent's presence is now as stated" — which includes the recovery case the badge once missed: a return after a lapse — and re-reads `agent.active` from the frame rather than inferring the timing itself.
 
 `sync` is the opposite direction of information from `anchor`. An `anchor` frame is a command every listener must obey; a `sync` frame is evidence coming back that the shared grid did or did not hold. Do not treat one as the other: re-anchoring because some listener was 12 ms late would be noise, and ignoring a large reading because no anchor changed would lose the only recovery signal there is. A refused sync report broadcasts nothing, so a `sync` frame always describes a measurement the server actually stored.
 

@@ -10,13 +10,27 @@ package srv
 // something when the server broadcasts, so a lease that lapses in silence leaves
 // every open page reporting an agent the server already considers gone —
 // precisely the stale green badge this feature exists to replace. Deciding the
-// expiry is free; announcing it needs a clock.
+// expiry is free; announcing it needs a clock. The same argument covers an agent
+// that ARRIVES or RETURNS: a badge showing NEVER or LOST while the server holds
+// a live lease is the identical defect in the other direction, and until
+// strudel-agent-uvj.7.6 no tick ever announced it, so the badge corrected only
+// when an unrelated frame happened along.
 //
-// So this file owns exactly one job: notice that a HELD lease has lapsed, once,
-// and say so. It deliberately does not maintain a boolean, does not mutate the
-// Conductor's presence, and does not touch lastSeenMS. If it could be deleted
-// and presence would still be correct in every snapshot and every HTTP response,
-// that is by design — only the push is lost.
+// So this file owns exactly one job: notice that the PRESENCE STATE listeners
+// were last told has changed, and say so — arrival, lapse, or return, each
+// exactly once. It deliberately does not maintain the presence boolean, does not
+// mutate the Conductor's presence, and does not touch lastSeenMS. If it could be
+// deleted and presence would still be correct in every snapshot and every HTTP
+// response, that is by design — only the push is lost.
+//
+// The SWEEPER is the sole announcer of presence frames. POST /api/heartbeat
+// itself broadcasts nothing (TestHeartbeatDoesNotBroadcast pins that, and the
+// bounded subscriber queue depends on it): a renewal that changed nothing
+// observable is silent, and the one heartbeat that DOES change something — a
+// transition into active — is announced from here, by the same goroutine that
+// announces the transition out of it. Two announcers could interleave into
+// [active, lapsed] ordering against the state they each read; one announcer
+// compares against what it last said and self-corrects on the next tick.
 
 import (
 	"log/slog"
@@ -82,36 +96,61 @@ func (s *Server) stopAgentSweeper() {
 
 // sweepAgentLease is the sweeper goroutine.
 //
-// It announces expiries, and only expiries: a lease that has already lapsed and
-// been announced must not be announced again on every later tick.
+// It announces presence TRANSITIONS — never-seen→active (arrival), active→lapsed
+// (departure), lapsed→active (return) — each exactly once, and nothing else. A
+// renewal of a held lease, a repeat of an already-announced lapse, and the
+// never-seen initial state are all silent.
 //
-// The bookkeeping is a single remembered timestamp, announcedMS, and the order of
-// the guards below is the whole design. Two distinct mistakes are being avoided,
-// and each corresponds to a way this sweeper was wrong first:
+// The bookkeeping is announcedActive (what listeners were last TOLD about the
+// active flag) plus announcedMS (the lastSeenMs of the last announcement), and
+// the decision is one disjunction with two clauses that each defuse a distinct
+// historical mistake:
 //
-//  1. Reacting only to "a lastSeenMs value I have not seen before". That misses
-//     real decay outright, because decay does not move lastSeenMs: time passes
-//     and the stored heartbeat gets OLDER while keeping the same value. The
-//     sweeper would see a value it already knows and stay silent, leaving every
-//     listener showing an agent the server already considers gone.
-//  2. Reacting only to "I watched this lease go from held to lapsed". That misses
-//     a lease taken and dropped between two ticks, because no tick ever saw it
-//     held.
+//  1. presence.Active != announcedActive — the flag listeners hold is wrong.
+//     This covers arrival (never-seen→active), lapse (active→false), and return
+//     (lapsed→active) in one comparison, and it is keyed on the remembered
+//     STATE rather than on observing a lease grow stale — so a lease taken and
+//     dropped between two ticks cannot slip through just because no tick saw
+//     it held. Real decay also lands here: it does not move lastSeenMs, but it
+//     always flips this flag.
+//  2. !presence.Active && presence.LastSeenMS != announcedMS — an inactive
+//     lease whose timestamp is one not yet announced: the taken-and-dropped
+//     case above, where the flag never changed from the listeners' perspective
+//     (false → false) so clause 1 cannot see it.
 //
-// So the announcement is keyed on the STATE, with the remembered timestamp only
-// suppressing a repeat of the state already reported: a lease is announced when
-// it is inactive AND its timestamp is one not yet announced. Both orderings fall
-// out of that, and re-announcement cannot.
+// The never-seen state falls out of the conjunction: lastSeenMs is 0 and
+// announcedMS seeds to 0 (the server's "no agent has ever been seen" marker),
+// and the flag matches, so a server that never sees an agent says nothing —
+// never-seen is the initial state, not a transition. The seed carries the rule
+// and the comment carries the reason; a mutation changing the seed to -1 makes
+// clause 2 fire every tick and is caught by TestAgentFrameDoesNotFireWithoutAnAgent.
+//
+// Announcements are made from THIS goroutine only. POST /api/heartbeat never
+// broadcasts (TestHeartbeatDoesNotBroadcast pins that, and the bounded
+// subscriber queue depends on it): the endpoint records the lease, and the next
+// tick notices the flag listeners hold no longer matches reality. One announcer
+// means the frames cannot interleave into a wrong order, and the memory is
+// updated BEFORE the broadcast so a concurrent tick cannot double-announce. The
+// frame itself re-reads a fresh Snapshot at broadcast time, so even a heartbeat
+// landing mid-decision sends the truth; the memory then converges on the next
+// tick — at worst one redundant frame, never a wrong one.
+//
+// The announcement delay is one sweep interval (AgentTTL/10 = 1.5s in
+// production), the same bound the lapse announcement has always had.
 func (s *Server) sweepAgentLease(done, stopped chan struct{}) {
 	defer close(stopped)
 
 	ticker := time.NewTicker(s.agentSweepInterval)
 	defer ticker.Stop()
 
-	// announcedMS is the lastSeenMs of the most recent expiry already published.
-	// It starts at 0, the server's "no agent has ever been seen" marker, so a
-	// server that never sees an agent never announces one going away.
+	// announcedMS is the lastSeenMs of the most recent presence announcement
+	// already published. It starts at 0, the server's "no agent has ever been
+	// seen" marker.
 	announcedMS := int64(0)
+	// announcedActive is the active flag of the most recent announcement: what
+	// listeners currently believe. It starts false, matching the never-seen
+	// connect snapshot every listener receives.
+	announcedActive := false
 
 	for {
 		select {
@@ -122,24 +161,13 @@ func (s *Server) sweepAgentLease(done, stopped chan struct{}) {
 
 			presence := s.Conductor.AgentPresenceAt(s.Conductor.NowMS())
 
-			// Still inside the window. Nothing to announce.
-			if presence.Active {
-				continue
-			}
-			// A lapsed lease whose departure has not been published yet.
-			//
-			// This single comparison is also what suppresses announcing an agent
-			// that was NEVER seen: announcedMS seeds to 0, the server's "no
-			// agent has ever been here" marker, so a never-seen server finds
-			// lastSeenMs == announcedMS and stays silent. An earlier version
-			// spelled that out as its own `if lastSeenMs == 0` guard, which a
-			// mutation showed could be deleted with every test still green —
-			// it was unreachable as a separate case. The seed carries the rule
-			// and the comment carries the reason.
-			if presence.LastSeenMS == announcedMS {
+			announce := presence.Active != announcedActive ||
+				(!presence.Active && presence.LastSeenMS != announcedMS)
+			if !announce {
 				continue
 			}
 
+			announcedActive = presence.Active
 			announcedMS = presence.LastSeenMS
 			s.broadcast(EventAgent, s.Conductor.Snapshot())
 			s.agentSweeps.Add(1)

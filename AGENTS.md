@@ -94,9 +94,9 @@ Agent liveness is a **lease**, not a connection: the agent speaks plain HTTP and
 
 ### Lease sweeper
 
-The sweeper exists only to **push** the expiry. It must not maintain the flag.
+The sweeper exists only to **push** presence transitions. It must not maintain the flag.
 
-- It broadcasts `agent` on exactly one occasion: a **held** lease lapsing. A heartbeat broadcasts nothing, and a never-seen agent is an initial state rather than a transition, so it is never announced.
+- It broadcasts `agent` for every presence **transition** — never-seen→active (arrival), active→lapsed, lapsed→active (return) — each exactly once; renewals stay silent. `POST /api/heartbeat` itself broadcasts nothing. A never-seen agent is an initial state rather than a transition, so the sweeper never announces one going away (the only announcement a never-seen server ever makes is none at all).
 - The announcement keys on the **state**, with the last-announced `lastSeenMS` used only to suppress a repeat. Keying on "a value I have not seen" misses real decay, which does not move the value; keying on "I watched it go stale" misses a lease that is taken and dropped between two ticks. Both orderings must work.
 - It starts in `Serve`, not `New`, so configuration between construction and running is not a data race.
 - Shutdown is joined, bounded, and idempotent. A stop that signals without joining leaks a goroutine per `Server`.
@@ -155,7 +155,7 @@ Every listener event has this shape:
 - The event vocabulary is `snapshot`, `code`, `message`, `transport`, `eval-result`, `listener-count`, `anchor`, `agent`, `dry-run`.
 - **AT MOST ONE OPTIONAL MEMBER, PER KIND.** `dry-run` frames carry a fourth field, `dryRun` (`{id, code}`), because that frame asks a listener to evaluate a candidate that was **not** published, and the snapshot cannot say so: it is performance state, and the candidate is deliberately not state. `listener` frames carry `listener` (`{id}`), because identity is a fact about the *recipient* and a snapshot describes the performance. Every kind omits both fields entirely — `omitempty` on a nil pointer emits nothing, so the frames a client already knew stay byte-identical. A second bespoke frame *shape* would be worse than this, because it would break the single decode path; a new field on the existing envelope does not. The rule is per-KIND rather than "one member in the whole protocol" so that a second need can be met by its own kind without ever giving a frame two optional members — see [Listener identity](#listener-identity-and-audience-state).
 - Event names describe listener-visible changes, not endpoint names; therefore play and hush both use `transport`.
-- A frame is sent for a **transition**, not for an accepted write that changed nothing observable. A heartbeat is accepted and silent; a lease lapse is announced once.
+- A frame is sent for a **transition**, not for an accepted write that changed nothing observable. A heartbeat that merely renews a held lease is accepted and silent; a heartbeat that establishes or revives presence is announced by the lease sweeper on its next tick, as is every lease lapse — each transition exactly once.
 - `dry-run` is the one kind that is a **request** rather than a transition, which is also why its `snapshot` does not describe what the frame is about. It never bumps the version and never enters history.
 
 ### Anchor and coherence

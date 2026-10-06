@@ -135,13 +135,14 @@ func TestHeartbeatNeverBumpsVersion(t *testing.T) {
 	}
 }
 
-// TestHeartbeatDoesNotBroadcast proves a routine heartbeat is SILENT on the
-// listener socket.
-//
-// The contract in event.go is that broadcast happens only after a mutation an
-// existing listener could act on. A heartbeat is already covered by the active
-// flag every listener holds, so it must not generate a frame: otherwise a
-// listener whose queue is bounded at 64 could be evicted by heartbeats alone.
+// TestHeartbeatDoesNotBroadcast proves the /api/heartbeat ENDPOINT never
+// broadcasts — not that listeners never learn of a heartbeat. Presence
+// transitions (arrival, lapse, return) are announced by the lease sweeper on
+// its next tick, and that promotion is covered in
+// TestAgentFrameAnnouncesArrivalAndRevival. This test pins the endpoint half:
+// renewals of an already-established lease must generate no frame, because
+// otherwise a listener whose queue is bounded at 64 could be evicted by
+// heartbeats alone (mutation 114-heartbeat-broadcasts is caught here).
 //
 // It uses the shared fanoutListener rather than a raw Read, because a WebSocket
 // read that times out leaves the connection unusable — the exact trap
@@ -163,6 +164,94 @@ func TestHeartbeatDoesNotBroadcast(t *testing.T) {
 	l.expectNone(t, "three heartbeats")
 }
 
+// TestAgentFrameAnnouncesArrivalAndRevival is the push half of the badge's
+// honesty contract (strudel-agent-uvj.7.6): a listener must be told when an
+// agent APPEARS and when it RETURNS, not only when it goes away.
+//
+// The original uvj.6 design announced only lapses, on the reasoning that "a
+// heartbeat renews a lease they already believe is held". That reasoning holds
+// for a RENEWAL and fails for an arrival: a listener holding the connect
+// snapshot from a never-seen server believes NO agent, and a listener that was
+// told the lease lapsed believes the agent is GONE. In both cases the heartbeat
+// changes what is observably true, and with no frame the badge stays NEVER or
+// LOST until some unrelated broadcast happens along — which is precisely what
+// live testing observed: the badge corrected only when a listener-count frame
+// from an unrelated probe arrived, then decayed again.
+//
+// So the announcement keys on the TRANSITION, not on the beat:
+//
+//	never-seen  -> active   one agent frame (the arrival)
+//	lapsed      -> active   one agent frame (the return)
+//	active      -> active   NOTHING (a renewal; the bounded queue must not be
+//	                        evictable by a heartbeat loop — mutation
+//	                        114-heartbeat-broadcasts is caught here)
+//	active      -> lapsed   one agent frame (the sweeper's, unchanged)
+func TestAgentFrameAnnouncesArrivalAndRevival(t *testing.T) {
+	s := presenceSweepingServer(t)
+
+	conn := dialListener(t, fanoutWSBase(t, s))
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	l := fanoutAttach(t, "listener", conn, s.Conductor.Snapshot())
+
+	// 1. The first heartbeat: never-seen -> active must be announced. Today
+	// (before the fix) this frame never arrives and l.next fails, which is the
+	// failing test this bead starts from.
+	if rec := postJSONTo(t, s, "/api/heartbeat", ""); rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/heartbeat = %d: %s", rec.Code, snapBody(rec))
+	}
+	ev := l.next(t, "the agent's first heartbeat")
+	if ev.Kind != EventAgent {
+		t.Fatalf("arrival frame kind = %q, want %q", ev.Kind, EventAgent)
+	}
+	if !ev.Snapshot.Agent.Active {
+		t.Error("the arrival frame reports the agent inactive: a badge that paints this stays NEVER while the server has an agent")
+	}
+	if ev.Snapshot.Agent.LastSeenMS == 0 {
+		t.Error("the arrival frame carries LastSeenMs 0: the heartbeat time is the fact that changed")
+	}
+
+	// 2. Renewals of the held lease stay silent. The sweeper is running at 10ms
+	// here, so this also proves no tick re-announces the arrival.
+	for i := 0; i < 3; i++ {
+		if rec := postJSONTo(t, s, "/api/heartbeat", ""); rec.Code != http.StatusOK {
+			t.Fatalf("POST /api/heartbeat #%d = %d: %s", i, rec.Code, snapBody(rec))
+		}
+	}
+	l.expectNone(t, "three renewals of a held lease")
+
+	// 3. The lapse is still announced, exactly once (the sweeper's own invariant,
+	// unchanged by this fix).
+	s.expireAgentLeaseForTest()
+	ev = l.next(t, "the lease expiry")
+	if ev.Kind != EventAgent {
+		t.Fatalf("expiry frame kind = %q, want %q", ev.Kind, EventAgent)
+	}
+	if ev.Snapshot.Agent.Active {
+		t.Error("the expiry frame reports the agent active: a listener would be told nothing changed")
+	}
+	l.expectNone(t, "the same expiry, re-announced")
+
+	// 4. THE FIX: a heartbeat after the lapse must announce the RETURN. Without
+	// it the badge stays LOST for the rest of the performance unless some
+	// unrelated frame happens along — the stale state uvj.7 forbids.
+	if rec := postJSONTo(t, s, "/api/heartbeat", ""); rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/heartbeat after lapse = %d: %s", rec.Code, snapBody(rec))
+	}
+	ev = l.next(t, "the agent's return after a lapsed lease")
+	if ev.Kind != EventAgent {
+		t.Fatalf("return frame kind = %q, want %q", ev.Kind, EventAgent)
+	}
+	if !ev.Snapshot.Agent.Active {
+		t.Error("the return frame reports the agent inactive: a badge that paints this stays LOST while the server has an agent")
+	}
+
+	// 5. And the revived lease renews silently again.
+	if rec := postJSONTo(t, s, "/api/heartbeat", ""); rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/heartbeat (renewal) = %d: %s", rec.Code, snapBody(rec))
+	}
+	l.expectNone(t, "a renewal after the return")
+}
+
 // TestAgentFrameFiresOnLeaseExpiry is the property that makes the indicator
 // honest: when the lease lapses, listeners are told, exactly once.
 //
@@ -181,7 +270,19 @@ func TestAgentFrameFiresOnLeaseExpiry(t *testing.T) {
 		t.Fatalf("POST /api/heartbeat = %d: %s", rec.Code, snapBody(rec))
 	}
 
-	// The agent is present; no expiry frame may arrive while the lease holds.
+	// The first heartbeat on a fresh server is a TRANSITION (never-seen ->
+	// active) and is announced as such (strudel-agent-uvj.7.6). Consume that
+	// arrival frame here; what this test is about is everything that follows.
+	arrival := l.next(t, "the arrival announcement")
+	if arrival.Kind != EventAgent {
+		t.Fatalf("arrival frame kind = %q, want %q", arrival.Kind, EventAgent)
+	}
+	if !arrival.Snapshot.Agent.Active {
+		t.Fatal("the arrival frame reports the agent inactive")
+	}
+
+	// The lease holds: further heartbeats are renewals and every sweeper tick
+	// sees a state the listeners already hold, so nothing more may arrive.
 	l.expectNone(t, "a heartbeat with a live lease")
 
 	// Expire the lease by rewinding the stored timestamp rather than sleeping
@@ -395,6 +496,15 @@ func TestAgentFrameFiresWhenTheLeaseDecaysWithTheTimestampUnchanged(t *testing.T
 		t.Fatal("the heartbeat recorded no timestamp")
 	}
 
+	// That heartbeat is a transition (never-seen -> active) and is announced
+	// (strudel-agent-uvj.7.6). Consume the arrival frame NOW, so the frame read
+	// at the end of this test is the expiry it is about — not the arrival
+	// queued ahead of it.
+	arrival := l.next(t, "the arrival announcement")
+	if !arrival.Snapshot.Agent.Active {
+		t.Fatal("the arrival frame reports the agent inactive")
+	}
+
 	// Let the sweeper tick several times while the lease is VALID, so a
 	// correct implementation records the heartbeat and a boolean-based one also
 	// gets a chance to look right.
@@ -442,12 +552,33 @@ func TestAgentFrameFiresForALeaseThatNeverSpansATick(t *testing.T) {
 	// heartbeat + expiry complete well inside one tick, so the sweeper can only
 	// pass this by reading the stored value rather than by having observed the
 	// lease while it was live.
+	//
+	// Two interleavings are possible and BOTH must end in the expiry frame:
+	//   - no tick lands between heartbeat and rewind (the common case): the
+	//     first tick reads an inactive lease whose timestamp is not yet
+	//     announced and reports the expiry directly;
+	//   - a tick does land in between: it announces the arrival (never ->
+	//     active), and the next tick announces the expiry (active -> lapsed).
+	//
+	// So frames are read until one reports the agent gone. The bound matters:
+	// at most one arrival can precede the expiry, so two extra reads can never
+	// be legitimate, and an implementation that never announces the expiry fails
+	// on the bound rather than hanging.
 	if rec := postJSONTo(t, s, "/api/heartbeat", ""); rec.Code != http.StatusOK {
 		t.Fatalf("POST /api/heartbeat = %d: %s", rec.Code, snapBody(rec))
 	}
 	s.expireAgentLeaseForTest()
 
 	ev := l.next(t, "an expiry the sweeper never saw coming")
+	for i := 0; ev.Snapshot.Agent.Active; i++ {
+		if i >= 2 {
+			t.Fatalf("read %d frames after take-and-drop and still no expiry: the lease lapsed without being announced", i+1)
+		}
+		if ev.Kind != EventAgent {
+			t.Fatalf("frame kind = %q, want %q", ev.Kind, EventAgent)
+		}
+		ev = l.next(t, "an expiry after a raced arrival frame")
+	}
 	if ev.Kind != EventAgent {
 		t.Fatalf("frame kind = %q, want %q", ev.Kind, EventAgent)
 	}

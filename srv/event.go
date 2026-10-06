@@ -94,18 +94,20 @@ const (
 	EventAnchor = "anchor"
 
 	// EventAgent is a change to whether an external agent is present
-	// (POST /api/heartbeat, or the lease lapsing). It is an EIGHTH kind for the
-	// same reason listener-count is a sixth: agent liveness is not a property of
-	// the performance — the code, the narration, the transport intent and the
-	// stored verdict are all untouched — but it IS something every listener must
-	// act on immediately, or the status indicator reports a state the server has
-	// already stopped believing.
+	// (a presence transition announced by the lease sweeper). It is an EIGHTH
+	// kind for the same reason listener-count is a sixth: agent liveness is not
+	// a property of the performance — the code, the narration, the transport
+	// intent and the stored verdict are all untouched — but it IS something
+	// every listener must act on immediately, or the status indicator reports a
+	// state the server has already stopped believing.
 	//
-	// It is sent on exactly ONE occasion: the lease going from held to lapsed.
-	// A heartbeat that renews an already-held lease broadcasts NOTHING, because
-	// every listener already holds the active flag it would be told. That is the
-	// same contract as an accepted-but-stale eval-result: an accepted write that
-	// changed nothing observable is understood and deliberately not published.
+	// It is sent for every presence TRANSITION, each exactly once: never-seen
+	// to active (the agent arrived), lapsed to active (it returned), and active
+	// to lapsed (the lease expired). A heartbeat that merely renews an
+	// already-announced held lease broadcasts NOTHING, because every listener
+	// already holds the active flag it would be told. That is the same contract
+	// as an accepted-but-stale eval-result: an accepted write that changed
+	// nothing observable is understood and deliberately not published.
 	// Re-announcing on every tick would also let a heartbeat loop alone evict a
 	// listener through the hub's bounded queue.
 	//

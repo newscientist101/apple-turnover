@@ -989,7 +989,7 @@ func TestAgentAPIDocDocumentsTheLoop(t *testing.T) {
 		{"that a client must not infer presence from its own clock", "must not infer presence from its own clock"},
 		{"that liveness is not a session", "liveness, not a session"},
 		// The frame rule, which is the reason a listener can rely on `agent`.
-		{"that the agent frame fires only on a lapse", "held** lease lapsing"},
+		{"that the agent frame fires on every presence transition", "never-seen to active (the agent arrived), lapsed to active (it returned), and active to lapsed (the lease decayed)"},
 		{"that a heartbeat broadcasts nothing", "A heartbeat broadcasts nothing"},
 		{"that presence never bumps the version", "agent-presence, and stored evaluation-result changes do not increment"},
 		// The DRIFT-visibility claim. This is the bead (strudel-agent-uvj.15) in

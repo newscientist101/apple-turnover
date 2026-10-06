@@ -809,8 +809,8 @@
   {
     "name": "111-expiry-announced-every-tick",
     "file": "srv/presence.go",
-    "old": "\t\t\tif presence.LastSeenMS == announcedMS {\n\t\t\t\tcontinue\n\t\t\t}\n\n\t\t\tannouncedMS = presence.LastSeenMS",
-    "new": "\t\t\t_ = announcedMS // deliberately: the already-announced guard is gone\n\t\t\tannouncedMS = presence.LastSeenMS",
+    "old": "\t\t\tannouncedActive = presence.Active\n\t\t\tannouncedMS = presence.LastSeenMS\n\t\t\ts.broadcast(EventAgent, s.Conductor.Snapshot())\n\t\t\ts.agentSweeps.Add(1)",
+    "new": "\t\t\ts.broadcast(EventAgent, s.Conductor.Snapshot()) // deliberately: presence state is never recorded, so every tick announces and listeners are evicted through the bounded queue",
     "run": "TestAgentFrameFiresOnLeaseExpiry"
   },
   {
@@ -1324,5 +1324,19 @@
     "old": "\tif supplied[\"epoch-ms\"] {\n\t\tplan.Req.EpochMS = epoch\n\t\treturn plan\n\t}",
     "new": "\tif supplied[\"epoch-ms\"] {\n\t\tplan.Req.EpochMS = serverNowMS // deliberately: the caller's epoch is overwritten by a guess, so the server never gets to judge it\n\t\treturn plan\n\t}",
     "run": "TestPlanAnchorNeverTouchesAnExplicitEpoch"
+  },
+  {
+    "name": "196-sweeper-never-announces-arrival",
+    "file": "srv/presence.go",
+    "old": "\t\t\tannounce := presence.Active != announcedActive ||\n\t\t\t\t(!presence.Active && presence.LastSeenMS != announcedMS)",
+    "new": "\t\t\tannounce := !presence.Active && presence.LastSeenMS != announcedMS // deliberately: only lapses are pushed, so the badge never leaves NEVER and never returns to LIVE",
+    "run": "TestAgentFrameAnnouncesArrivalAndRevival|TestAgentIndicatorFollowsARealExpiryEndToEnd"
+  },
+  {
+    "name": "197-sweeper-reannounces-held-lease-every-tick",
+    "file": "srv/presence.go",
+    "old": "\t\t\tannouncedActive = presence.Active\n\t\t\tannouncedMS = presence.LastSeenMS",
+    "new": "\t\t\t_ = announcedActive // deliberately: the memory is never recorded, so every tick announces again and a renewing lease spams the bounded subscriber queue",
+    "run": "TestAgentFrameAnnouncesArrivalAndRevival|TestAgentFrameFiresOnLeaseExpiry"
   }
 ]

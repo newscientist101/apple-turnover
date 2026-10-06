@@ -73,7 +73,7 @@ type Server struct {
 	agentSweepStopped chan struct{}
 
 	// agentSweepTicks counts sweeper iterations, and agentSweeps counts the
-	// expiries actually announced. They are separate claims: "the goroutine is
+	// presence transitions actually announced. They are separate claims: "the goroutine is
 	// running" is not "the goroutine broadcast", and a test that conflated them
 	// could pass on a sweeper that spins without ever saying anything. Only
 	// tests read these.

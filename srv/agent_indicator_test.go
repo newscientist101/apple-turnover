@@ -338,8 +338,17 @@ func TestAgentIndicatorFollowsARealExpiryEndToEnd(t *testing.T) {
 	if !activeSnap.Agent.Active {
 		t.Fatal("the server does not consider the agent present right after its heartbeat")
 	}
+	// That heartbeat is a transition and the sweeper announces it
+	// (strudel-agent-uvj.7.6): a listener must be told when the agent APPEARS,
+	// not only when it goes. Feed the REAL arrival frame to the client — this
+	// replaces a hand-built one, so the badge flipping to LIVE is now proven
+	// against the same wire path the badge's return half below uses.
+	arrival := l.next(t, "the real arrival announcement")
+	if arrival.Kind != EventAgent {
+		t.Fatalf("arrival frame kind = %q, want %q", arrival.Kind, EventAgent)
+	}
 	rt.run("window.strudelSession.handleFrame(" +
-		jsJSONString(t, map[string]any{"kind": "code", "snapshot": activeSnap}) +
+		jsJSONString(t, map[string]any{"kind": arrival.Kind, "snapshot": arrival.Snapshot}) +
 		", window.__sandbox, window.__live)")
 	if got := rt.eval("window.__labelText()").String(); !strings.Contains(got, "AGENT") || strings.Contains(got, "NEVER") {
 		t.Fatalf("badge after a heartbeat = %q, want the connected state", got)
@@ -360,6 +369,27 @@ func TestAgentIndicatorFollowsARealExpiryEndToEnd(t *testing.T) {
 	}
 	if cls := rt.eval("window.__indicatorClass()").String(); !strings.Contains(cls, "agent-absent") {
 		t.Errorf("indicator class after the expiry = %q, want agent-absent", cls)
+	}
+
+	// And the return half of strudel-agent-uvj.7.6: a heartbeat after the lapse
+	// must produce a frame that flips the badge back to LIVE. This is the user-
+	// visible defect found in live testing — the badge stayed LOST after the
+	// agent came back, correcting only when an unrelated frame arrived.
+	if rec := postJSONTo(t, s, "/api/heartbeat", ""); rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/heartbeat after lapse = %d: %s", rec.Code, snapBody(rec))
+	}
+	ret := l.next(t, "the real return announcement")
+	if ret.Kind != EventAgent {
+		t.Fatalf("return frame kind = %q, want %q", ret.Kind, EventAgent)
+	}
+	rt.run("window.strudelSession.handleFrame(" +
+		jsJSONString(t, map[string]any{"kind": ret.Kind, "snapshot": ret.Snapshot}) +
+		", window.__sandbox, window.__live)")
+	if got := rt.eval("window.__labelText()").String(); !strings.Contains(got, "LIVE") {
+		t.Errorf("badge after the return = %q, want the connected state: the indicator stayed LOST after the agent came back", got)
+	}
+	if cls := rt.eval("window.__indicatorClass()").String(); !strings.Contains(cls, "agent-connected") {
+		t.Errorf("indicator class after the return = %q, want agent-connected", cls)
 	}
 }
 

@@ -67,10 +67,13 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/play", methodNotAllowed(http.MethodPost))
 
 	// Agent liveness. Argument-free like hush/play, and deliberately silent on
-	// the listener socket: a heartbeat renews a lease every listener already
-	// believes is held, so there is nothing for them to be told. The ONE thing
-	// they must be told is that the lease lapsed, and that comes from the lease
-	// sweeper rather than from here (see Server.startAgentSweeper).
+	// the listener socket: the endpoint records the lease, and the sweeper
+	// announces whatever presence TRANSITION the recording produced (an agent
+	// arriving, returning, or expiring) on its next tick. A heartbeat that
+	// merely renews a lease every listener already believes is held changes
+	// nothing observable and broadcasts nothing — a heartbeat loop must not
+	// be able to evict a listener through the bounded subscriber queue. See
+	// Server.startAgentSweeper, which is the single announcer of `agent` frames.
 	mux.HandleFunc("POST /api/heartbeat", s.handleAPIHeartbeat)
 	mux.HandleFunc("/api/heartbeat", methodNotAllowed(http.MethodPost))
 

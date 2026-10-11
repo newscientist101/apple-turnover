@@ -8,6 +8,8 @@ The contract is checked against the route table, frame kinds, and a running serv
 
 There is one live performance, stored in memory by one `Conductor`. Nothing is persisted. Restarting the server starts an empty performance at version `0`, already playing.
 
+The content of the performance is Strudel pattern code, documented in `STRUDEL-API-REFERENCE.md` (the exhaustive per-symbol reference) and `STRUDEL-FUNCTIONS-GUIDE.md` (the narrative tutorial). One rule of the pattern language belongs in this contract as well, because a test-performance agent invented the alternative and wrapped every layer in it for twelve consecutive pushes (strudel-agent-uvj.20): **patterns play in parallel with `stack(...)`**, or `,` inside the mini-notation. There is no top-level `set()` that combines patterns. The `.set(...)` the guide shows in examples is a pattern method — chained onto one pattern to set control values (`n("0*4").set(x)`) — and a method is chained, never wrapped around other patterns. Before trusting a combining function you remember from elsewhere, look for it in `STRUDEL-API-REFERENCE.md`; `stack` is the one that combines, and the reference documents it.
+
 ## HTTP API
 
 Bodies are JSON. `/api` bodies are capped at 64 KiB. Oversized bodies are rejected before JSON parsing.

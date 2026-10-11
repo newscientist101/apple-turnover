@@ -1004,6 +1004,16 @@ func TestAgentAPIDocDocumentsTheLoop(t *testing.T) {
 		{"that unscheduled means alignment was not attempted", "claimed no bar position at all"},
 		{"that drift describes one browser and not the audience", "one reporting browser, not the audience"},
 		{"that re-anchoring is the documented recovery for an observed drift", "When to re-anchor"},
+		// The parallel-composition rule. During a live test performance the
+		// agent hallucinated a top-level set() and wrapped every layer in it for
+		// twelve consecutive pushes (strudel-agent-uvj.20): the browser reported
+		// the failure, and the closest thing to an origin in these docs was the
+		// guide's .set(x) example, a pattern method used without an entry in
+		// either file. The composition rule belongs in the contract itself,
+		// where the agent that reads only AGENT_API.md still finds it.
+		{"that parallel patterns are combined with stack", "patterns play in parallel with `stack(...)`"},
+		{"that there is no top-level set", "There is no top-level `set()`"},
+		{"that .set in the guides is a pattern method chained onto one pattern", "`n(\"0*4\").set(x)`"},
 	} {
 		if !docStates(doc, must.needle) {
 			t.Errorf("AGENT_API.md no longer states %s (looked for %q): this is the guidance an external agent codes its loop from", must.what, must.needle)

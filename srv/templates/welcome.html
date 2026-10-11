@@ -12,6 +12,7 @@
     <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/javascript/javascript.js"></script>
     <script src="https://unpkg.com/@strudel/web@1.3.0"></script>
+    <script>window.strudelInitPromise = window.initStrudel();</script>
     <script src="/static/session.js" defer></script>
     <script src="/static/editor.js" defer></script>
     <script src="/static/viz.js" defer></script>
@@ -53,104 +54,71 @@
         </section>
       </div>
     </main>
-    <script>
-      (function() {
-        let replInstance = null;
-        let isPlaying = false;
+     <script>
+       let replInstance = null;
+       window.strudelInitPromise.then(function(repl) {
+         replInstance = repl;
+         window.repl = repl;
+       });
 
-        const playBtn = document.getElementById('play-btn');
+       // Wait for DOM to be ready (script is deferred, but double-check)
+       document.addEventListener('DOMContentLoaded', function () {
+         var playBtn = document.getElementById('play-btn');
+         if (playBtn) {
+           playBtn.addEventListener('click', function () {
+             // Get current desired state from session.js and toggle
+             var current = window.strudelSession.getCurrentPlayingState();
+             window.strudelSession.requestPlayPause(!current);
+           });
+         }
+       });
 
-        function updateButtonUI(playing) {
-          isPlaying = playing;
-          if (playBtn) {
-            playBtn.textContent = isPlaying ? 'Pause' : 'Play';
-            if (isPlaying) {
-              playBtn.classList.add('playing');
-            } else {
-              playBtn.classList.remove('playing');
-            }
-          }
-        }
+       let samplesLoaded = false;
+       let samplesLoading = false;
+       const sampleToggleBtn = document.getElementById('sample-toggle-btn');
 
-        window.strudelInitPromise = window.initStrudel()
-          .then(function(repl) {
-            replInstance = repl;
-            window.repl = repl;
-            return repl;
-          })
-          .catch(function(err) {
-            console.error('Failed to initialize Strudel:', err);
-          });
+       if (sampleToggleBtn) {
+         sampleToggleBtn.addEventListener('click', function () {
+           if (samplesLoading) return;
 
-        if (playBtn) {
-          playBtn.addEventListener('click', function() {
-            if (!replInstance) return;
+           if (!samplesLoaded) {
+             samplesLoading = true;
+             sampleToggleBtn.textContent = 'Samples: Loading...';
+             sampleToggleBtn.classList.add('loading');
+             sampleToggleBtn.classList.remove('error');
 
-            if (isPlaying) {
-              try {
-                replInstance.stop();
-              } catch (e) {
-                console.warn('Error stopping REPL:', e);
-              }
-              updateButtonUI(false);
-            } else {
-              try {
-                replInstance.start();
-              } catch (e) {
-                console.warn('Error starting REPL:', e);
-              }
-              updateButtonUI(true);
-            }
-          });
-        }
+             const samplesFn = window.samples || (window.strudel && window.strudel.samples);
+             let loadPromise;
+             if (samplesFn) {
+               loadPromise = samplesFn('github:tidalcycles/dirt-samples');
+             } else if (replInstance && replInstance.evaluate) {
+               loadPromise = replInstance.evaluate('samples(\"github:tidalcycles/dirt-samples\")');
+             } else {
+               loadPromise = Promise.reject(new Error('Samples function unavailable'));
+             }
 
-        let samplesLoaded = false;
-        let samplesLoading = false;
-        const sampleToggleBtn = document.getElementById('sample-toggle-btn');
-
-        if (sampleToggleBtn) {
-          sampleToggleBtn.addEventListener('click', function() {
-            if (samplesLoading) return;
-
-            if (!samplesLoaded) {
-              samplesLoading = true;
-              sampleToggleBtn.textContent = 'Samples: Loading...';
-              sampleToggleBtn.classList.add('loading');
-              sampleToggleBtn.classList.remove('error');
-
-              const samplesFn = window.samples || (window.strudel && window.strudel.samples);
-              let loadPromise;
-              if (samplesFn) {
-                loadPromise = samplesFn('github:tidalcycles/dirt-samples');
-              } else if (replInstance && replInstance.evaluate) {
-                loadPromise = replInstance.evaluate('samples("github:tidalcycles/dirt-samples")');
-              } else {
-                loadPromise = Promise.reject(new Error('Samples function unavailable'));
-              }
-
-              loadPromise
-                .then(function() {
-                  samplesLoaded = true;
-                  samplesLoading = false;
-                  sampleToggleBtn.classList.remove('loading');
-                  sampleToggleBtn.classList.add('active');
-                  sampleToggleBtn.textContent = 'Samples: On';
-                })
-                .catch(function(err) {
-                  console.warn('Failed to load sample pack:', err);
-                  samplesLoading = false;
-                  sampleToggleBtn.classList.remove('loading');
-                  sampleToggleBtn.classList.add('error');
-                  sampleToggleBtn.textContent = 'Samples: Error';
-                });
-            } else {
-              samplesLoaded = false;
-              sampleToggleBtn.classList.remove('active', 'error');
-              sampleToggleBtn.textContent = 'Samples: Off';
-            }
-          });
-        }
-      })();
-    </script>
-  </body>
-</html>
+             loadPromise
+               .then(function () {
+                 samplesLoaded = true;
+                 samplesLoading = false;
+                 sampleToggleBtn.classList.remove('loading');
+                 sampleToggleBtn.classList.add('active');
+                 sampleToggleBtn.textContent = 'Samples: On';
+               })
+               .catch(function (err) {
+                 console.warn('Failed to load sample pack:', err);
+                 samplesLoading = false;
+                 sampleToggleBtn.classList.remove('loading');
+                 sampleToggleBtn.classList.add('error');
+                 sampleToggleBtn.textContent = 'Samples: Error';
+               });
+           } else {
+             samplesLoaded = false;
+             sampleToggleBtn.classList.remove('active', 'error');
+             sampleToggleBtn.textContent = 'Samples: Off';
+           }
+         });
+       }
+     </script>
+   </body>
+ </html>

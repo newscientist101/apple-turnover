@@ -48,6 +48,9 @@
   // reconnects replay the snapshot frame for the current version, and
   // listener-count frames carry snapshots too -- neither is new music.
   var lastVersion = -1;
+  var liveRepl = null;          // Stores the live repl instance
+  var desiredPlaying = false;   // Desired playing state (from transport frames or Play button)
+  var queuedPlaying = null;     // Queued state change when liveRepl is not ready (null = none)
   // Latest live Pattern committed via setPattern (for viz hooks).
   var currentPattern = null;
   // Handle for the commit scheduled at the next cycle boundary, so a NEWER
@@ -936,6 +939,14 @@ function reportAudienceSamples(force) {
       }
       return;
     }
+     // Transport frames: update desired playing state and update UI
+     if (frame.kind === "transport") {
+       if (snapshot && typeof snapshot.playing === "boolean") {
+         desiredPlaying = snapshot.playing;
+         setPlayingState(desiredPlaying);
+       }
+       return; // Transport frames do not trigger version updates
+     }
     if (frame.kind !== "code" && frame.kind !== "snapshot") {
       if (typeof snapshot.version === "number") {
         lastVersion = Math.max(lastVersion, snapshot.version);
@@ -988,6 +999,37 @@ function reportAudienceSamples(force) {
   // Boot: wait for initStrudel (live repl with audio), build the sandbox
   // repl beside it, then subscribe. Both repls come from the same strudel
   // bundle globals so they parse the same language.
+  function setPlayingState(isPlaying) {
+    if (liveRepl !== null) {
+      try {
+        if (isPlaying) {
+          liveRepl.start();
+        } else {
+          liveRepl.stop();
+        }
+      } catch (e) {
+        console.warn("[session] Error setting live repl playing state:", e);
+      }
+      // Update Play button UI immediately
+      var btn = document.getElementById('play-btn');
+      if (btn) {
+        btn.textContent = isPlaying ? 'Pause' : 'Play';
+        if (isPlaying) {
+          btn.classList.add('playing');
+        } else {
+          btn.classList.remove('playing');
+        }
+      }
+    } else {
+      // Queue state change if liveRepl not ready
+      queuedPlaying = isPlaying;
+    }
+  }
+
+  function requestPlayPause(isPlaying) {
+    desiredPlaying = isPlaying;
+    setPlayingState(isPlaying);
+  }
   function boot() {
     var ready = window.strudelInitPromise;
     if (!ready) {
@@ -1002,6 +1044,9 @@ function reportAudienceSamples(force) {
       }
       var sandbox = buildSandbox(strudel);
       window.strudelSandbox = sandbox;
+       liveRepl = live;
+       // Apply any queued playing state (from Play button or transport frame that arrived before boot completed)
+       setPlayingState(desiredPlaying);
       console.info("[session] sandbox repl ready; subscribing");
       startStatusTimer();
       connect(sandbox, live, 0);
@@ -1062,6 +1107,9 @@ function reportAudienceSamples(force) {
     // works when called directly.
     handleFrame: handleFrame,
     getConnectionState: function () { return connectionState; },
+     setPlayingState: setPlayingState,
+     requestPlayPause: requestPlayPause,
+     getCurrentPlayingState: function () { return desiredPlaying; },
     // Test/debug seam: startStatusTimer is normally called once from boot, but a
     // test needs to observe the interval actually ticking and actually stopping.
     startStatusTimer: startStatusTimer,

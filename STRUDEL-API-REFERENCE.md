@@ -154,6 +154,40 @@ anchor("<c4 g4 c5 g5>").chord("C").voicing()
 n("0 .. 7").anchor("<c4 g4 c5 g5>").scale("<C:major F:minor>")
 ```
 
+### appBoth
+
+`appBoth(pat_val: Pattern) -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.appBoth(...)`.
+
+When this method is called on a pattern of functions, it matches its haps
+with those in the given pattern of values.  A new pattern is returned, with
+each matching value applied to the corresponding function.
+
+In this `_appBoth` variant, where timespans of the function and value haps
+are not the same but do intersect, the resulting hap has a timespan of the
+intersection. This applies to both the part and the whole timespan.
+
+**Parameters**
+
+- `pat_val` (`Pattern`)
+
+### appLeft
+
+`appLeft(pat_val: Pattern) -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.appLeft(...)`.
+
+As with `appBoth`, but the `whole` timespan is not the intersection,
+but the timespan from the function of patterns that this method is called
+on. In practice, this means that the pattern structure, including onsets,
+are preserved from the pattern of functions (often referred to as the left
+hand or inner pattern).
+
+**Parameters**
+
+- `pat_val` (`Pattern`)
+
 ### apply
 
 `apply()`
@@ -165,6 +199,35 @@ Applies the given function to the pattern. Like layer, but with a single functio
 ```js
 "<c3 eb3 g3>".scale('C minor').apply(scaleTranspose("0,2,4")).note()
 ```
+
+### appRight
+
+`appRight(pat_val: Pattern) -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.appRight(...)`.
+
+As with `appLeft`, but `whole` timespans are instead taken from the
+pattern of values, i.e. structure is preserved from the right hand/outer
+pattern.
+
+**Parameters**
+
+- `pat_val` (`Pattern`)
+
+### appWhole
+
+`appWhole(whole_func: Function, func: Function) -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.appWhole(...)`.
+
+Assumes 'this' is a pattern of functions, and given a function to
+resolve wholes, applies a given pattern of values to that
+pattern of functions.
+
+**Parameters**
+
+- `whole_func` (`Function`)
+- `func` (`Function`)
 
 ### arp
 
@@ -227,6 +290,14 @@ Sets properties in a batch.
 ```js
 "{0@2 0.25 0 0.5 .3 .5}%8".as("begin").s("sax_vib").clip(1)
 ```
+
+### asNumber
+
+`asNumber()`
+
+Pattern method — call it on a pattern: `pattern.asNumber(...)`.
+
+Returns a new pattern with all values parsed as numerals.
 
 ### asym
 
@@ -1297,6 +1368,15 @@ Note that the decay is only audible if the sustain value is lower than 1.
 note("c3 e3 f3 g3").decay("<.1 .2 .3 .4>").sustain(0)
 ```
 
+### defragmentHaps
+
+`defragmentHaps()`
+
+Pattern method — call it on a pattern: `pattern.defragmentHaps(...)`.
+
+Combines adjacent haps with the same value and whole.  Only
+intended for use in tests.
+
 ### degrade
 
 `degrade() -> Pattern`
@@ -1492,6 +1572,15 @@ Diode-emulating distortion
 
 - `distortion` (`Number|Pattern`): amount of distortion to apply
 - `volume` (`Number|Pattern`): linear postgain of the distortion
+
+### discreteOnly
+
+`discreteOnly() -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.discreteOnly(...)`.
+
+Returns a new pattern, with 'continuous' haps (those without 'whole'
+timespans) removed from query results.
 
 ### distort
 
@@ -2206,6 +2295,46 @@ Filters haps using the given function
 s("hh!7 oh").filter(hap => hap.value.s === 'hh')
 ```
 
+### filterHaps
+
+`filterHaps(hap_test: Function) -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.filterHaps(...)`.
+
+Returns a new Pattern, which only returns haps that meet the given test.
+
+**Parameters**
+
+- `hap_test` (`Function`): a function which returns false for haps to be removed from the pattern
+
+**Examples**
+
+```js
+s("bd*8").velocity(rand).filterHaps((h) => (h.whole.begin % 1) < h.value.velocity)
+```
+
+### filterValues
+
+`filterValues(value_test: Function) -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.filterValues(...)`.
+
+As with `filterHaps`, but the function is applied to values
+inside haps.
+
+**Parameters**
+
+- `value_test` (`Function`)
+
+**Examples**
+
+```js
+const drums = s("bd sd bd sd")
+kick: drums.filterValues((v) => v.s === 'bd').duck(2)
+snare: drums.filterValues((v) => v.s === 'sd')
+bass: s("saw!4").note("G#1").lpf(80).lpenv(4).orbit(2)
+```
+
 ### filterWhen
 
 `filterWhen(test: Function)`
@@ -2221,6 +2350,29 @@ Filters haps by their begin time
 ```js
 oneCycle: s("bd*4").filterWhen((t) => t < 1)
 ```
+
+### firstCycle
+
+`firstCycle(with_context: Boolean)`
+
+Pattern method — call it on a pattern: `pattern.firstCycle(...)`.
+
+Queries the pattern for the first cycle, returning Haps. Mainly of use when
+debugging a pattern.
+
+**Parameters**
+
+- `with_context` (`Boolean`): set to true, otherwise the context field will be stripped from the resulting haps.
+
+**Returns** — [Hap]
+
+### firstCycleValues
+
+`firstCycleValues`
+
+Read it from a pattern: `pattern.firstCycleValues` (an accessor, not a method — do not call it).
+
+Accessor for a list of values returned by querying the first cycle.
 
 ### firstOf
 
@@ -2508,6 +2660,13 @@ freq("220 110 440 110").s("superzow").osc()
 ```js
 freq("110".mul.out(".5 1.5 .6 [2 3]")).s("superzow").osc()
 ```
+
+### fromBipolar
+
+`fromBipolar() -> Pattern`
+
+Assumes a numerical pattern, containing bipolar values in the range -1 .. 1
+Returns a new pattern with values scaled to the unipolar range 0 .. 1
 
 ### ftype
 
@@ -3289,6 +3448,38 @@ n("<0 1 <2 3 2 4>>*16")
     .add(x => x.delay(0.4).mul(0.3))
     .out()
   }).fxr(1).room(0.3)
+```
+
+### keep
+
+`keep(pat: Pattern) -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.keep(...)`.
+
+When called on a pattern `a`, with a input pattern `b` (`a.keep(b)`),
+combines `a` and `b` such that anything defined in `a`,
+and anything defined in `b` that is *not* defined in `a`
+will be in the resulting pattern
+
+The structure is maintained from `a`,
+because the default pattern alignment is `in`,
+see the section on `Pattern Alignment`
+in the technical manual in the docs
+
+This is the inverse of `set`
+
+See examples below
+
+**Parameters**
+
+- `pat` (`Pattern`)
+
+**Examples**
+
+```js
+// notes, already defined, will stay "c a f e",
+// while "s", not defined, will be set to "piano"
+note("c a f e").keep(note("e f a c").s("piano"))
 ```
 
 ### keyDown
@@ -4181,6 +4372,16 @@ Shorthand for `.sometimesBy(0.75, fn)`
 s("hh*8").often(x=>x.speed("0.5"))
 ```
 
+### onsetsOnly
+
+`onsetsOnly() -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.onsetsOnly(...)`.
+
+Returns a new pattern, with all haps without onsets filtered out. A hap
+with an onset is one with a `whole` timespan that begins at the same time
+as its `part` timespan.
+
 ### onTriggerTime
 
 `onTriggerTime() -> Pattern`
@@ -4899,6 +5100,20 @@ MIDI program number: Sends a MIDI program change message.
 note("c4").progNum(10).midichan(1).midi()
 ```
 
+### pure
+
+`pure(...)`
+
+Requires arguments: at least 1.
+
+A discrete value that repeats once per cycle.
+
+**Examples**
+
+```js
+pure('e4') // "e4"
+```
+
 ### pw
 
 `pw(pulsewidth: Number|Pattern)`
@@ -4953,6 +5168,28 @@ Controls the lfo sweep for the pulsewidth of the pulse oscillator
 
 ```js
 n(run(8)).scale("D:pentatonic").s("pulse").pw("0.5").pwrate("<5 .1 25>").pwsweep("<0.3 .8>")
+```
+
+### queryArc
+
+`queryArc(begin: Fraction|Number, end: Fraction|Number) -> Hap[]`
+
+Pattern method — call it on a pattern: `pattern.queryArc(...)`.
+
+Query haps inside the given time span.
+
+**Parameters**
+
+- `begin` (`Fraction|Number`): from time
+- `end` (`Fraction|Number`): to time
+
+**Examples**
+
+```js
+const pattern = sequence('a', ['b', 'c'])
+const haps = pattern.queryArc(0, 1)
+console.log(haps)
+silence
 ```
 
 ### rand
@@ -5071,6 +5308,14 @@ ratio("1, 5:4, 3:2").mul(110)
 .freq().s("piano")
 ```
 
+### ref
+
+`ref(...)`
+
+Requires arguments: at least 1.
+
+exposes a custom value at query time. basically allows mutating state without evaluation
+
 ### register
 
 `register(name: String|String[], func: Function, patternify: Boolean)`
@@ -5109,6 +5354,17 @@ Amplitude envelope release time: The time it takes after the offset to go from s
 ```js
 note("c3 e3 g3 c4").release("<0 .1 .4 .6 1>/2")
 ```
+
+### removeUndefineds
+
+`removeUndefineds(...)`
+
+Pattern method — call it on a pattern: `pattern.removeUndefineds(...)`.
+
+Requires arguments: at least 1.
+
+Returns a new pattern, with haps containing undefined values removed from
+query results.
 
 ### repeatCycles
 
@@ -5555,6 +5811,50 @@ Requires arguments: at least 1.
 
 Takes a list of patterns, and returns a pattern of lists.
 
+### set
+
+`set(pat: Pattern) -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.set(...)`.
+
+When called on a pattern `a`, with a input pattern `b` (`a.set(b)`),
+combines `a` and `b` such that anything defined in `b`
+and anything defined in `a` that is *not* defined in `b`
+will be in the resulting pattern.
+
+The structure is maintained from `a`,
+because the default pattern alignment is `in`,
+see the section on `Pattern Alignment`
+in the technical manual in the docs
+
+This is the inverse of `keep`
+
+See examples below
+
+**Parameters**
+
+- `pat` (`Pattern`)
+
+**Examples**
+
+```js
+// because input pattern has `s` set,
+// it overrides the "sine" declared earlier
+note("c a f e").s("sine").set(s("triangle"))
+```
+
+### setContext
+
+`setContext(context: *) -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.setContext(...)`.
+
+Returns a new pattern with the context field set to every hap set to the given value.
+
+**Parameters**
+
+- `context` (`*`)
+
 ### setcpm
 
 `setcpm(cpm: Number)`
@@ -5611,6 +5911,14 @@ second option in optional array syntax (ex: ".9:.5") applies a postgain to the o
 ```js
 s("bd sd [~ bd] sd,hh*8").shape("<0 .2 .4 .6 .8>")
 ```
+
+### showFirstCycle
+
+`showFirstCycle`
+
+Read it from a pattern: `pattern.showFirstCycle` (an accessor, not a method — do not call it).
+
+More human-readable version of the `firstCycleValues` accessor.
 
 ### shrink
 
@@ -5850,6 +6158,15 @@ Similar to `someCyclesBy`
 s("hh*8").sometimesBy(.4, x=>x.speed("0.5"))
 ```
 
+### sortHapsByPart
+
+`sortHapsByPart() -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.sortHapsByPart(...)`.
+
+Returns a new pattern, which returns haps sorted in temporal order. Mainly
+of use when comparing two patterns for equality, in tests.
+
 ### source
 
 `source(getSource: Function)`
@@ -5895,6 +6212,16 @@ samples('github:tidalcycles/dirt-samples')
 s("breaks165")
 .splice(8,  "0 1 [2 3 0]@2 3 0@2 7")
 ```
+
+### splitQueries
+
+`splitQueries() -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.splitQueries(...)`.
+
+Returns a new pattern, with queries split at cycle boundaries. This makes
+some calculations easier to express, as all haps are then constrained to
+happen within a cycle.
 
 ### spread
 
@@ -6041,6 +6368,14 @@ Cuts each sample into the given number of parts, triggering progressive portions
 ```js
 s("numbers:0 numbers:1 numbers:2").striate(6).slow(3)
 ```
+
+### stripContext
+
+`stripContext() -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.stripContext(...)`.
+
+Returns a new pattern with the context field of every hap set to an empty object.
 
 ### struct
 
@@ -6265,6 +6600,14 @@ A signal representing the cycle time.
 `timecat()`
 
 Aliases for `stepcat`
+
+### toBipolar
+
+`toBipolar() -> Pattern`
+
+Assumes a numerical pattern, containing unipolar values in the range 0 ..
+
+1. Returns a new pattern with values scaled to the bipolar range -1 .. 1
 
 ### tour
 
@@ -6848,6 +7191,69 @@ Key name reference (https://developer.mozilla.org/en-US/docs/Web/API/UI_Events/K
 s("bd(5,8)").whenKey("Control:j", x => x.segment(16).color("red")).whenKey("Control:i", x => x.fast(2).color("blue"))
 ```
 
+### withContext
+
+`withContext(func: Function) -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.withContext(...)`.
+
+Returns a new pattern with the given function applied to the context field of every hap.
+
+**Parameters**
+
+- `func` (`Function`)
+
+### withHap
+
+`withHap(func: Function) -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.withHap(...)`.
+
+As with `withHaps`, but applies the function to every hap, rather than every list of haps.
+
+**Parameters**
+
+- `func` (`Function`)
+
+### withHaps
+
+`withHaps(func: Function) -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.withHaps(...)`.
+
+Returns a new pattern with the given function applied to the list of haps returned by every query.
+
+**Parameters**
+
+- `func` (`Function`)
+
+### withHapSpan
+
+`withHapSpan(func: Function) -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.withHapSpan(...)`.
+
+Similar to `withQuerySpan`, but the function is applied to the timespans
+of all haps returned by pattern queries (both `part` timespans, and where
+present, `whole` timespans).
+
+**Parameters**
+
+- `func` (`Function`)
+
+### withHapTime
+
+`withHapTime(func: Function) -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.withHapTime(...)`.
+
+As with `withHapSpan`, but the function is applied to both the
+begin and end time of the hap timespans.
+
+**Parameters**
+
+- `func` (`Function`): the function to apply
+
 ### within
 
 `within(start: Number, end: Number, func: Function)`
@@ -6859,6 +7265,46 @@ Use within to apply a function to only a part of a pattern.
 - `start` (`Number`): start within cycle (0 - 1)
 - `end` (`Number`): end within cycle (0 - 1). Must be > start
 - `func` (`Function`): function to be applied to the sub-pattern
+
+### withLoc
+
+`withLoc(start: Number, end: Number) -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.withLoc(...)`.
+
+Returns a new pattern with the given location information added to the
+context of every hap.
+
+**Parameters**
+
+- `start` (`Number`): start offset
+- `end` (`Number`): end offset
+
+### withQuerySpan
+
+`withQuerySpan(func: Function) -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.withQuerySpan(...)`.
+
+Returns a new pattern, where the given function is applied to the query
+timespan before passing it to the original pattern.
+
+**Parameters**
+
+- `func` (`Function`): the function to apply
+
+### withQueryTime
+
+`withQueryTime(func: Function) -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.withQueryTime(...)`.
+
+As with `withQuerySpan`, but the function is applied to both the
+begin and end time of the query timespan.
+
+**Parameters**
+
+- `func` (`Function`): the function to apply
 
 ### withSeed
 
@@ -6891,6 +7337,20 @@ each hap. It has the alias `fmap`.
 ```js
 "0 1 2".withValue(v => v + 10).log()
 ```
+
+### worklet
+
+`worklet(src: String, inputs: Number|Pattern) -> Pattern`
+
+Pattern method — call it on a pattern: `pattern.worklet(...)`.
+
+Creates a worklet effect. Typically derived by writing K(...) in the REPL which will parse
+Kabelsalat code.
+
+**Parameters**
+
+- `src` (`String`): Source code of the worklet update function
+- `inputs` (`Number|Pattern`): Worklet inputs
 
 ### wt
 

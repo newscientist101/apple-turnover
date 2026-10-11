@@ -289,7 +289,7 @@ The named sounds, when any are unresolved, are listed in `stats.samples.missing`
 |---|---|
 | `samples` | `null` until some listener has reported. **Absent is not zero.** |
 | `reporting` | How many connected listeners have reported at least once |
-| `loaded` | How many of those reported `loaded:true` |
+| `loaded` | How many of those reported `loaded:true`. **Non-empty registry, not "has a pack":** see below |
 | `listeners[].id` | The opaque connection id, echoing what that listener was told |
 | `listeners[].loaded` | Tri-state, per listener: `true`, `false`, or **absent** for a browser that could not check |
 | `listeners[].count` | Sounds in that listener's registry at report time |
@@ -303,6 +303,8 @@ Read the cases like this:
 - `listeners[].loaded` **absent** — that listener had no registry to check. It is neither a pass nor a failure, and it is not counted in `loaded`.
 
 `loaded` and `reporting` are counts derived from the enumerated `listeners`, not independent claims: with identity, the audience can be listed, so the counts are arithmetic rather than invention. Prefer reading `listeners` when you want to act — the counts are a convenience for "can anyone hear this at all?".
+
+**`loaded` means the registry is not empty, not that a pack is loaded.** The reporting browser sends `loaded` as "my sound registry holds at least one name", and `initStrudel()` registers the bundle's built-in synths at boot, so a page nobody has pressed **Samples** on reports `loaded:true` with a small `count` — a stock page reports `count:19`. Sounds the built-in synths cover resolve correctly; the `dirt-samples` names the pack provides (`bd`, `cp`, `hh`, …) do not, and a verdict naming one carries `samplesResolved:false`. So a `loaded:true` listener can still be unable to hear your pattern: read `loaded` beside the sounds the pattern names, and read `listeners[].count` as what distinguishes a stock page from one with a pack. This is the same discipline `samplesResolved` follows — a positive signal scoped to what was actually checked.
 
 **A listener that disconnects is forgotten.** Its record leaves the summary when its `/ws` connection ends, so a tab that closed while holding a pack cannot keep answering for the audience. Once the last listener has gone, `samples` returns to `null` rather than reporting an audience of zero — "nobody has reported" and "the audience checked and has no samples" are different facts.
 

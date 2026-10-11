@@ -19,7 +19,9 @@ Browser modules:
 
 The page also has local **Play/Pause** and **Samples** controls. Play/Pause calls the browser REPL directly and does not change the server's `playing` intent.
 
-**Samples** loads `github:tidalcycles/dirt-samples` into that one browser and is likewise page-local: nothing is shared, and pressing it in one tab leaves every other tab without samples. Each browser reports what it could resolve, so a verdict carries `samplesResolved` — see `AGENT_API.md` for the tri-state. That verdict describes the **reporting** browser, not the audience: with several listeners it is whichever reported last. For the audience question — can *anybody* hear this? — each listener also reports its own registry to `POST /api/samples`, and `GET /api/state` returns the whole audience under `samples`, one entry per listener. Three things worth knowing before you rely on it: the verdict is still scoped to one browser, `samples` is `null` until somebody reports rather than zero, and turning Samples "off" unloads nothing — it only relabels the button, so the pack stays resolvable.
+A listener that connects to a server already reporting `"playing":true` **starts silent.** Observed: a fresh page connecting to such a server commits the pattern — the version advances, the verdict comes back `ok:true`, the code view fills in — while the browser REPL stays stopped and the button reads `Play`. Audio begins on a **transport transition** instead: `POST /api/play`, or a local Play click, after which the REPL reports started and the button reads `Pause`. The client states the reason (the commit is made with autostart disabled, so a listening tab is never force-started), and `playing` is documented as transport intent rather than per-browser audio state. It is worth knowing because a push to a `playing:true` server looks like a success in every field an agent can read while the room stays quiet.
+
+**Samples** loads `github:tidalcycles/dirt-samples` into that one browser and is likewise page-local: nothing is shared, and pressing it in one tab leaves every other tab without samples. Each browser reports what it could resolve, so a verdict carries `samplesResolved` — see `AGENT_API.md` for the tri-state. That verdict describes the **reporting** browser, not the audience: with several listeners it is whichever reported last. For the audience question — can *anybody* hear this? — each listener also reports its own registry to `POST /api/samples`, and `GET /api/state` returns the whole audience under `samples`, one entry per listener. Four things worth knowing before you rely on it: the verdict is still scoped to one browser, `samples` is `null` until somebody reports rather than zero, turning Samples "off" unloads nothing — it only relabels the button, so the pack stays resolvable — and `loaded` means "this listener's registry holds *something*", not "this listener has this pack". A page that has never pressed Samples already reports `loaded:true` with a small count, because the bundle registers its built-in synths at boot, so read `loaded` next to the sounds your pattern actually names rather than on its own.
 
 ## Requirements
 
@@ -97,8 +99,10 @@ A successful `POST /api/code` only means the document was stored. It does not me
 
 ```bash
 echo 's("bd*2, ~ cp")' | bin/agentcli push --dry-run
-dry-run: ok, nothing published (dry-run 1, 8 haps)
+dry-run: ok, nothing published (dry-run 1, 3 haps)
 ```
+
+The `3 haps` above is a real reading, not an illustration: it is what one connected browser reported for that pattern. The hap count comes from the browser that evaluated it, so a different browser or a different Strudel bundle can report a different number — read the line as the evaluator's answer, not as a property of the pattern.
 
 `--dry-run` evaluates the document in a connected browser and reports the verdict **without publishing it** — the version, the history and the stored verdict are all left alone, so a broken pattern never becomes the current document. It needs a connected browser just as much as a push does; with none, it fails immediately rather than hanging.
 
@@ -112,11 +116,12 @@ agentcli push --dry-run -f candidate.js && agentcli push -f candidate.js
 
 - **No server-side audio.** The server stores documents and relays state.
 - **Browser-only evaluation.** Invalid Strudel can be accepted by the server and fail only when a browser evaluates it.
+- **Audible output rests on ONE human observation, and no automated check can replace it.** A human on a machine with real audio hardware heard `note("<c2 c3 g2 c4>")` at commit `25e14fe`. Nothing in this repository can observe sound: the test sandbox has no audio device, and the Go process never evaluates JavaScript. So no test asserts that audio works, and a green suite is not evidence that it does. `ok:true` means the pattern parsed, evaluated and was committed — not that anything was heard; a browser whose audio has not been started reports exactly the same `ok:true` in complete silence.
 - **Bar-aligned, not sample-accurate.** The shared anchor plus next-cycle commit aligns listeners to bars. Different machines can still differ within a bar.
 - **Residual drift is visible to the agent, not just to a human.** The browser reports where each commit landed to `POST /api/sync-result`, and an agent reads it from `lastSync` on `GET /api/state` (or `agentcli state`). Without a usable anchor it reports `unscheduled` rather than inventing a bar position, and `lastSync` is `null` — not zero — until some listener has actually committed. It is the newest report from **one** browser, not the spread across listeners.
 - **Re-anchoring is recovery.** `POST /api/anchor` replaces the shared timeline.
 - **No persistence.** Restarting the server resets the performance to version 0 with an empty history.
-- **Network required at page load.** The pinned browser dependencies are not vendored.
+- **Network required at page load, and again to load the sample pack.** The pinned browser dependencies are not vendored. Observed with the CDN URLs failing: the shell still renders and `editor.js` still falls back to the plain textarea, but the Strudel bundle never loads, so there is no evaluator — the page never subscribes to `/ws` (it sits in `reconnecting`) and no verdict can ever reach the server. Pressing **Samples** is a second, on-demand network dependency: it fetches `github:tidalcycles/dirt-samples` from GitHub when pressed.
 
 ## Agent CLI
 
@@ -272,6 +277,8 @@ srv/                server package
   hub.go            listener fan-out
   ws.go             WebSocket listener endpoint
   event.go          listener frame encoding and broadcast
+  presence.go       agent liveness lease and the presence sweeper
+  dryrun.go         dry-run request registry
   static/           browser modules
   templates/        HTML shell
 scripts/            mutation-testing tools

@@ -23,6 +23,8 @@ srv/conductor.go    in-memory performance state
 srv/hub.go          listener fan-out
 srv/ws.go           WebSocket listener endpoint
 srv/event.go        listener frame encoding and broadcast
+srv/presence.go     agent liveness lease and the presence sweeper
+srv/dryrun.go       dry-run request registry
 srv/static/         browser modules
 srv/templates/      HTML shell
 scripts/mutations.json      the mutation table (JSON: anchors may hold any byte)
@@ -152,7 +154,7 @@ Every listener event has this shape:
 
 - `snapshot` is the actual snapshot value, not a second bespoke representation.
 - All frame construction goes through one encoder.
-- The event vocabulary is `snapshot`, `code`, `message`, `transport`, `eval-result`, `listener-count`, `anchor`, `agent`, `dry-run`.
+- The event vocabulary is `snapshot`, `code`, `message`, `transport`, `eval-result`, `listener-count`, `anchor`, `agent`, `dry-run`, `sync`, `samples`, `listener`. The list is a claim about `event.go`, so it is checked against the DECLARED kinds rather than kept by hand: `TestAgentAPIDocCoversEveryEventKind` parses them out of `event.go`. This line previously named nine of the twelve while reading as exhaustive, which is the failure mode this whole section is about.
 - **AT MOST ONE OPTIONAL MEMBER, PER KIND.** `dry-run` frames carry a fourth field, `dryRun` (`{id, code}`), because that frame asks a listener to evaluate a candidate that was **not** published, and the snapshot cannot say so: it is performance state, and the candidate is deliberately not state. `listener` frames carry `listener` (`{id}`), because identity is a fact about the *recipient* and a snapshot describes the performance. Every kind omits both fields entirely — `omitempty` on a nil pointer emits nothing, so the frames a client already knew stay byte-identical. A second bespoke frame *shape* would be worse than this, because it would break the single decode path; a new field on the existing envelope does not. The rule is per-KIND rather than "one member in the whole protocol" so that a second need can be met by its own kind without ever giving a frame two optional members — see [Listener identity](#listener-identity-and-audience-state).
 - Event names describe listener-visible changes, not endpoint names; therefore play and hush both use `transport`.
 - A frame is sent for a **transition**, not for an accepted write that changed nothing observable. A heartbeat that merely renews a held lease is accepted and silent; a heartbeat that establishes or revives presence is announced by the lease sweeper on its next tick, as is every lease lapse — each transition exactly once.
@@ -270,6 +272,7 @@ wait for the answer.
 - Serve the actual browser modules that the page references.
 - The browser is the only evaluator and audio producer.
 - `editor.js` may fall back to the plain textarea if CodeMirror is unavailable; that does not imply audio can work offline.
+- **A listener starts stopped, and follows `playing` only on a transport transition.** `playing` is transport intent, not a per-browser audio command, so a connect-time `snapshot` must not start audio: the client boots `desiredPlaying=false`, `setPattern` is called with autostart disabled, and only a `transport` frame (or a local Play click) calls `setPlayingState`. Observed in a served page against a server reporting `"playing":true`: the version advanced and the verdict came back `ok:true` while the REPL stayed stopped, and `POST /api/play` then started it. Wiring the catch-up snapshot into `setPlayingState` would force every tab to make noise on connect, so that is a deliberate change to user-facing behaviour rather than a tidy-up.
 - The visualizer is pattern-driven only: it paints hap lanes and a playhead
   from `currentPattern.queryArc()`, with no audio-context dependency. A
   waveform branch was removed because the pinned bundle exposes no reachable,
@@ -284,9 +287,13 @@ wait for the answer.
   re-inspecting the hap is the defect, so `colourFor` takes the resolved kind.
 - **Lane colour is per-lane, and it is a HASH OF THE LANE KEY.** `colourFor(key,
   kind)` picks from a per-family palette by `hashKey(key) % palette.length`, never
-  by lane index: `laneKeys.sort()` runs every frame, so an index-based colour
-  reassigns itself whenever the lane count or ordering changes and the display
-  flickers between pushes (strudel-agent-uvj.9).
+  by lane index. `laneKeys.sort()` runs every frame (viz.js), so an index-based
+  colour would reassign itself whenever the lane count or ordering changed; the
+  flicker that would cause is **inferred from the code, not observed** — nobody
+  has watched that alternative render, because it is the implementation this one
+  replaced. The hash is what makes colour a function of the lane rather than of
+  its position, and `TestVisualizationPerLanePalette` asserts stability across
+  re-renders and sort-order changes (strudel-agent-uvj.9).
 - **The three family palettes are DISJOINT, and that is load-bearing.** It is
   what lets a lane's family be asserted by *membership* — "the colour painted is
   one of the note palette's entries". Hue cannot do this job: the `other` family

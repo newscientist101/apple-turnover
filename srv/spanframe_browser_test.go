@@ -5,7 +5,7 @@ package srv
 // strudel-agent-pnn.4 proved on the served page that the highlight lights the
 // WRONG characters: for s("bd sd hh cp") the live haps carry locations
 // [[1,3],[4,6],[7,9],[10,12]] while the document-true spans are
-// [[3,5],[6,8],[9,11],[12,15]] — a constant string-literal quote offset. The
+// [[3,5],[6,8],[9,11],[12,14]] — a constant string-literal quote offset. The
 // mechanism (per-frame activeSpans, the markText actuator, clear-on-empty) is
 // correct; the spans sit in the wrong coordinate frame because buildSandbox
 // evaluates WITHOUT the bundle's transpiler, and only the transpiled

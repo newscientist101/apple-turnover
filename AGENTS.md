@@ -325,9 +325,10 @@ unqualified success.
   `toLowerCase().replace(/\s+/g, "_")` before storing. A resolver that normalised
   differently would disagree with the audio the user hears, which is the one thing
   it must never do.
-- **The registry is the source of truth, not the Samples button.** `welcome.html`'s
-  off branch flips a label and unregisters nothing, so a flag-driven resolver would
-  keep reporting a loaded pack after the user turned it off.
+- **The registry is the source of truth, not the Samples pill.** `welcome.html`
+  has no unload control (the old toggle's off branch flipped a label and
+  unregistered nothing), so a flag-driven resolver would keep reporting a loaded
+  pack the pill could not remove.
 - **ONE resolver feeds both paths.** The eval-result and dry-run reports are two
   ways an agent asks the same question; a resolver that answered on one and stayed
   silent on the other would give an agent two answers to one question.
@@ -403,11 +404,21 @@ because listeners will need it for things beyond samples.
   asserts on the body that would have been POSTed, never on what `describeSamples`
   returned — the `uvj.15` lesson, and it is why the report is exercised through the
   real `handleFrame` seam.
-- **THE RESOLVER IS THE REGISTRY, NEVER THE Samples BUTTON.** `welcome.html`'s
-  "off" branch flips a label and unregisters nothing, so the client polls
-  `soundMap.get()` on the status tick and reports only on a real change. The
-  server ignores an unchanged report regardless, so the frame rule holds even if a
-  client polls carelessly.
+- **THE RESOLVER IS THE REGISTRY, NEVER THE Samples PILL.** `welcome.html`
+  auto-loads the pack once at startup and offers no unload control, so the
+  client polls `soundMap.get()` on the status tick and reports only on a real
+  change. The server ignores an unchanged report regardless, so the frame rule
+  holds even if a client polls carelessly.
+- **THE LOADER IS welcome.html AND IT IS PROVED ON THE SERVED BYTES.**
+  `loadSamplePack()` in the inline script is the only load path, invoked once
+  from the merged `strudelInitPromise.then` handler; `session.js` stays
+  poll-and-observe and is untouched. Behaviour is proved by
+  `srv/samples_autoload_browser_test.go`, which executes the served `/`
+  template bytes in goja — never a Go translation. Element ids
+  `samples-status` / `samples-error` / `samples-retry` are the contract: the
+  pill is read-only (`Samples: Loading…` → `On` / `Error`), the error element
+  is empty while loading and carries the pinned failure text after failure,
+  and retry is hidden until failure.
 
 ## Standing limitations
 

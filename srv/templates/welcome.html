@@ -37,7 +37,9 @@
         </div>
         <div class="sync-status" id="sync-status" aria-live="polite"></div>
         <button id="play-btn" class="play-btn" aria-label="Play/Pause Audio">Play</button>
-        <button id="sample-toggle-btn" class="sample-toggle-btn" aria-label="Toggle Sample Pack">Samples: Off</button>
+        <span id="samples-status" class="samples-status" role="status" aria-live="polite">Samples: Loading…</span>
+        <p id="samples-error" class="samples-error" role="alert"></p>
+        <button id="samples-retry" class="samples-retry" hidden>Retry</button>
       </section>
 
       <!-- Main Workspace Split: Canvas (Left) and Code Editor (Right) -->
@@ -55,11 +57,101 @@
       </div>
     </main>
      <script>
+       // Automatic sample loading (strudel-agent-8f0): the dirt-samples pack
+       // is fetched once at startup, not on a button click. The old
+       // #sample-toggle-btn toggle is gone on purpose — its off branch only
+       // relabelled the button while the pack stayed in the registry, so no
+       // control may imply the pack can be unloaded. The only remaining
+       // control is #samples-retry, a recovery path shown only after failure.
        let replInstance = null;
-       window.strudelInitPromise.then(function(repl) {
-         replInstance = repl;
-         window.repl = repl;
-       });
+       let samplesLoaded = false;
+       let samplesLoading = false;
+
+       function samplesMessage(err) {
+         return (err && err.message) || String(err);
+       }
+
+       // The single visible failure sink: every rejection path funnels
+       // through here, so a failed load is always rendered in the page and
+       // never only a console.warn. Loading vs failed is unambiguous: loading
+       // leaves #samples-error empty, failure writes it.
+       function showSamplesFailure(msg) {
+         var statusEl = document.getElementById('samples-status');
+         var errorEl = document.getElementById('samples-error');
+         var retryEl = document.getElementById('samples-retry');
+         if (statusEl) { statusEl.textContent = 'Samples: Error'; }
+         if (errorEl) { errorEl.textContent = msg; }
+         if (retryEl) { retryEl.hidden = false; }
+       }
+
+       function showSamplesSuccess() {
+         var statusEl = document.getElementById('samples-status');
+         var errorEl = document.getElementById('samples-error');
+         var retryEl = document.getElementById('samples-retry');
+         samplesLoaded = true;
+         samplesLoading = false;
+         if (statusEl) { statusEl.textContent = 'Samples: On'; }
+         if (errorEl) { errorEl.textContent = ''; }
+         if (retryEl) { retryEl.hidden = true; }
+       }
+
+       // Exactly one automatic attempt; further attempts happen only via
+       // explicit #samples-retry clicks. The guard drops concurrent and
+       // duplicate invocations, so no double-load.
+       function loadSamplePack() {
+         if (samplesLoading || samplesLoaded) return;
+         samplesLoading = true;
+         var statusEl = document.getElementById('samples-status');
+         if (statusEl) { statusEl.textContent = 'Samples: Loading…'; }
+         const samplesFn = window.samples || (window.strudel && window.strudel.samples);
+         let loadPromise;
+         if (samplesFn) {
+           loadPromise = samplesFn('github:tidalcycles/dirt-samples');
+         } else if (replInstance && replInstance.evaluate) {
+           loadPromise = replInstance.evaluate('samples("github:tidalcycles/dirt-samples")');
+         } else {
+           loadPromise = Promise.reject(new Error('Samples function unavailable'));
+         }
+         loadPromise
+           .then(function () {
+             showSamplesSuccess();
+           })
+           .catch(function (err) {
+             console.warn('Failed to load sample pack:', err);
+             samplesLoading = false;
+             showSamplesFailure('Could not load the sample pack github:tidalcycles/dirt-samples: ' + samplesMessage(err) + '. Sound stays synth-only; patterns naming dirt samples will report samplesResolved:false.');
+           });
+       }
+
+       // Single merged init handler: assigning replInstance and starting the
+       // auto-load in the same .then removes the registration-order fragility
+       // that caused the pre-init click race. A missing bundle (script tag
+       // failed, so the promise is undefined) or a rejected init fails
+       // loudly with a bundle-specific message; the page never sits on
+       // Loading forever and never throws.
+       if (window.strudelInitPromise && window.strudelInitPromise.then) {
+         window.strudelInitPromise.then(function(repl) {
+           replInstance = repl;
+           window.repl = repl;
+           loadSamplePack();
+         }, function (err) {
+           samplesLoading = false;
+           showSamplesFailure('Could not start Strudel, so samples were not loaded: ' + samplesMessage(err) + '. Sound and verdicts are unavailable until the bundle loads.');
+         });
+       } else {
+         showSamplesFailure('Could not start Strudel, so samples were not loaded: initialisation did not run. Sound and verdicts are unavailable until the bundle loads.');
+       }
+
+       // The retry control is wired immediately: this script sits at the
+       // end of <body>, so #samples-retry already exists. (The null guard
+       // stays for safety.) Retry calls the same guarded loadSamplePack, so
+       // it is a no-op while loading or after success.
+       var samplesRetryBtn = document.getElementById('samples-retry');
+       if (samplesRetryBtn) {
+         samplesRetryBtn.addEventListener('click', function () {
+           loadSamplePack();
+         });
+       }
 
        // Wait for DOM to be ready (script is deferred, but double-check)
        document.addEventListener('DOMContentLoaded', function () {
@@ -72,53 +164,6 @@
            });
          }
        });
-
-       let samplesLoaded = false;
-       let samplesLoading = false;
-       const sampleToggleBtn = document.getElementById('sample-toggle-btn');
-
-       if (sampleToggleBtn) {
-         sampleToggleBtn.addEventListener('click', function () {
-           if (samplesLoading) return;
-
-           if (!samplesLoaded) {
-             samplesLoading = true;
-             sampleToggleBtn.textContent = 'Samples: Loading...';
-             sampleToggleBtn.classList.add('loading');
-             sampleToggleBtn.classList.remove('error');
-
-             const samplesFn = window.samples || (window.strudel && window.strudel.samples);
-             let loadPromise;
-             if (samplesFn) {
-               loadPromise = samplesFn('github:tidalcycles/dirt-samples');
-             } else if (replInstance && replInstance.evaluate) {
-               loadPromise = replInstance.evaluate('samples(\"github:tidalcycles/dirt-samples\")');
-             } else {
-               loadPromise = Promise.reject(new Error('Samples function unavailable'));
-             }
-
-             loadPromise
-               .then(function () {
-                 samplesLoaded = true;
-                 samplesLoading = false;
-                 sampleToggleBtn.classList.remove('loading');
-                 sampleToggleBtn.classList.add('active');
-                 sampleToggleBtn.textContent = 'Samples: On';
-               })
-               .catch(function (err) {
-                 console.warn('Failed to load sample pack:', err);
-                 samplesLoading = false;
-                 sampleToggleBtn.classList.remove('loading');
-                 sampleToggleBtn.classList.add('error');
-                 sampleToggleBtn.textContent = 'Samples: Error';
-               });
-           } else {
-             samplesLoaded = false;
-             sampleToggleBtn.classList.remove('active', 'error');
-             sampleToggleBtn.textContent = 'Samples: Off';
-           }
-         });
-       }
      </script>
    </body>
  </html>

@@ -108,21 +108,33 @@ func TestPerformanceUIShellStructure(t *testing.T) {
 		}
 	}
 
-	// Jules session 7393488358784355191 added the sample-pack toggle: it must
-	// default to OFF (synth-only, no automatic fetch), reference the
-	// dirt-samples pack, and degrade without breaking playback state.
-	// Assert the rendered shell carries the toggle and its default state.
-	sampleToggleMarkers := []string{
-		`id="sample-toggle-btn"`,
-		`Samples: Off`,
+	// strudel-agent-8f0 replaced the sample-pack toggle with automatic
+	// loading: the shell must carry the read-only status pill (starting at
+	// Loading, because the fetch begins at startup), the empty-by-default
+	// error element, the hidden-until-failure retry control, and the
+	// dirt-samples pack reference, and must degrade without breaking
+	// playback state. Assert the rendered shell carries that structure.
+	sampleAutoloadMarkers := []string{
+		`id="samples-status"`,
+		`id="samples-error"`,
+		`id="samples-retry"`,
+		`Samples: Loading`,
 		`github:tidalcycles/dirt-samples`,
 	}
-	for _, want := range sampleToggleMarkers {
+	for _, want := range sampleAutoloadMarkers {
 		if !strings.Contains(body, want) {
-			t.Errorf("sample pack toggle is missing expected marker %q", want)
+			t.Errorf("automatic sample loading shell is missing expected marker %q", want)
 		}
 	}
+	if strings.Contains(body, `id="sample-toggle-btn"`) {
+		t.Error("served shell still carries the removed sample toggle: its off branch unloaded nothing")
+	}
+	if strings.Contains(body, "Samples: Off") {
+		t.Error(`served shell still claims "Samples: Off": no control may imply the pack can be unloaded`)
+	}
 
-	// Synth must remain the default path: no automatic samples() call at
-	// load. The only samples( reference must live inside the click handler.
+	// The pack reference must live in the startup-invoked loadSamplePack
+	// function, not in a click handler: loading is automatic now, and the
+	// only click in this area is the failure-only retry calling the same
+	// guarded function.
 }

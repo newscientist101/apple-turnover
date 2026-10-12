@@ -802,7 +802,7 @@
   {
     "name": "109-never-seen-counts-as-active",
     "file": "srv/conductor.go",
-    "old": "\tif lastSeenMS == 0 {\n\t\t// Never seen. This branch is only reachable for a clock within AgentTTL\n\t\t// of the epoch \u2014 real time is ~1.7e12 ms, so without it the arithmetic\n\t\t// below would still yield inactive, and a mutation deleting this line\n\t\t// survives every other test. It is kept because the marker is RESERVED\n\t\t// (see AgentPresence) and a server whose clock is wrong must not report\n\t\t// an agent that has never existed as present.\n\t\treturn p\n\t}",
+    "old": "\tif lastSeenMS == 0 {\n\t\t// Never seen. This branch is only reachable for a clock within AgentTTL\n\t\t// of the epoch — real time is ~1.7e12 ms, so without it the arithmetic\n\t\t// below would still yield inactive, and a mutation deleting this line\n\t\t// survives every other test. It is kept because the marker is RESERVED\n\t\t// (see AgentPresence) and a server whose clock is wrong must not report\n\t\t// an agent that has never existed as present.\n\t\treturn p\n\t}",
     "new": "\t// deliberately: the never-seen marker is treated as an ordinary old heartbeat",
     "run": "TestAgentPresenceNeverSeenIsInactiveEvenOnAClockNearTheEpoch|TestAgentFrameDoesNotFireWithoutAnAgent"
   },
@@ -1338,5 +1338,47 @@
     "old": "\t\t\tannouncedActive = presence.Active\n\t\t\tannouncedMS = presence.LastSeenMS",
     "new": "\t\t\t_ = announcedActive // deliberately: the memory is never recorded, so every tick announces again and a renewing lease spams the bounded subscriber queue",
     "run": "TestAgentFrameAnnouncesArrivalAndRevival|TestAgentFrameFiresOnLeaseExpiry"
+  },
+  {
+    "name": "198-autoload-shows-success-on-error",
+    "file": "srv/templates/welcome.html",
+    "old": "showSamplesFailure('Could not load the sample pack github:tidalcycles/dirt-samples: ' + samplesMessage(err) + '. Sound stays synth-only; patterns naming dirt samples will report samplesResolved:false.');",
+    "new": "showSamplesSuccess(); // deliberately: the failure renders as success, so the error element stays empty and the pill reads On over a pack that never loaded",
+    "run": "TestAutoLoadFailureRendersTheErrorElement|TestAutoLoadNeverSwallowsAFailure"
+  },
+  {
+    "name": "199-autoload-only-on-click",
+    "file": "srv/templates/welcome.html",
+    "old": "window.repl = repl;\n           loadSamplePack();",
+    "new": "window.repl = repl; // deliberately: the automatic trigger is gone, so the pack loads only if retry is clicked",
+    "run": "TestAutoLoadIsAttemptedOnceOnStartup|TestAutoLoadSuccessUpdatesSampleState"
+  },
+  {
+    "name": "200-autoload-loads-repeatedly",
+    "file": "srv/templates/welcome.html",
+    "old": "if (samplesLoading || samplesLoaded) return;",
+    "new": "if (false) { return; } // deliberately: the once-guard never fires, so every retry and init callback loads again",
+    "run": "TestAutoLoadDoesNotDoubleLoad"
+  },
+  {
+    "name": "201-autoload-hides-error-silently",
+    "file": "srv/templates/welcome.html",
+    "old": "if (errorEl) { errorEl.textContent = msg; }",
+    "new": "if (errorEl) { /* deliberately: the error element is never written, so the failure is console-only again */ }",
+    "run": "TestAutoLoadFailureRendersTheErrorElement|TestAutoLoadNeverSwallowsAFailure|TestAutoLoadMissingBundleFailsLoudly|TestAutoLoadMissingLoaderFailsLoudly"
+  },
+  {
+    "name": "202-autoload-reports-loaded-early",
+    "file": "srv/templates/welcome.html",
+    "old": "samplesLoading = true;\n         var statusEl = document.getElementById('samples-status');\n         if (statusEl) { statusEl.textContent = 'Samples: Loading…'; }",
+    "new": "samplesLoading = true;\n         var statusEl = document.getElementById('samples-status');\n         if (statusEl) { statusEl.textContent = 'Samples: On'; } // deliberately: loaded is reported before the promise resolves, so a pending pack reads as present",
+    "run": "TestAutoLoadDoesNotDoubleLoad|TestAutoLoadFailureRendersTheErrorElement"
+  },
+  {
+    "name": "203-autoload-drops-repl-fallback",
+    "file": "srv/templates/welcome.html",
+    "old": "} else if (replInstance && replInstance.evaluate) {",
+    "new": "} else if (false) { // deliberately: the repl fallback is skipped, so a repl-only browser reports the loader absent",
+    "run": "TestAutoLoadMissingLoaderFailsLoudly"
   }
 ]

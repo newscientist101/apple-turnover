@@ -108,22 +108,24 @@ func TestPerformanceUIShellStructure(t *testing.T) {
 		}
 	}
 
-	// strudel-agent-8f0 replaced the sample-pack toggle with automatic
-	// loading: the shell must carry the read-only status pill (starting at
-	// Loading, because the fetch begins at startup), the empty-by-default
-	// error element, the hidden-until-failure retry control, and the
-	// dirt-samples pack reference, and must degrade without breaking
-	// playback state. Assert the rendered shell carries that structure.
+	// strudel-agent-3q0 removed the read-only Samples status pill: the shell
+	// must carry the empty-by-default error element, the hidden-until-failure
+	// retry control, and the dirt-samples pack reference, and must degrade
+	// without breaking playback state. Assert the rendered shell carries that
+	// structure.
 	sampleAutoloadMarkers := []string{
-		`id="samples-status"`,
 		`id="samples-error"`,
 		`id="samples-retry"`,
-		`Samples: Loading`,
 		`github:tidalcycles/dirt-samples`,
 	}
 	for _, want := range sampleAutoloadMarkers {
 		if !strings.Contains(body, want) {
 			t.Errorf("automatic sample loading shell is missing expected marker %q", want)
+		}
+	}
+	for _, gone := range []string{`samples-status`, `Samples: `} {
+		if strings.Contains(body, gone) {
+			t.Errorf("served shell still contains %q: the Samples pill is removed, failure lives in #samples-error", gone)
 		}
 	}
 	if strings.Contains(body, `id="sample-toggle-btn"`) {

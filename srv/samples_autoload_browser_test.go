@@ -6,8 +6,11 @@ package srv
 // #sample-toggle-btn, and a failed load was visible only as a button label
 // plus a console.warn. The design (strudel-agent-8f0.2) replaces the toggle
 // with an automatic load: a single named loadSamplePack() invoked exactly
-// once when window.strudelInitPromise settles, a read-only status pill, a
-// visible error element, and a retry button that appears only after failure.
+// once when window.strudelInitPromise settles, a visible error element, and
+// a retry button that appears only after failure. Success is silent: there
+// is no status pill (strudel-agent-3q0 removed span#samples-status), so the
+// error element staying empty with retry hidden is both the loading and the
+// loaded presentation.
 //
 // These tests drive the SERVED / template bytes in goja — the inline script
 // extracted from the real GET / body — never a Go reimplementation. That is
@@ -91,8 +94,8 @@ func servedWelcomeInlineScript(t *testing.T) string {
 }
 
 // autoloadPrelude is the host surface the inline loader needs to run
-// headless: a fake document serving stubs for the status/error/retry
-// elements, a controllable strudelInitPromise, injectable loader fakes, and
+// headless: a fake document serving stubs for the error/retry elements
+// (no status pill exists), a controllable strudelInitPromise, injectable loader fakes, and
 // a recording console.warn. There is NO network and NO click: the point of
 // the feature is that no click is needed.
 const autoloadPrelude = `
@@ -115,7 +118,6 @@ function __makeEl(id) {
   };
   return el;
 }
-__els["samples-status"] = __makeEl("samples-status");
 __els["samples-error"] = __makeEl("samples-error");
 __els["samples-retry"] = __makeEl("samples-retry");
 __els["samples-retry"].hidden = true;
@@ -169,7 +171,6 @@ window.strudelInitPromise = new Promise(function (res, rej) {
 });
 // Observation helpers: what would a viewer (or an assistive technology)
 // actually see.
-window.__statusText = function () { return __els["samples-status"].textContent; };
 window.__errorText = function () { return __els["samples-error"].textContent; };
 window.__retryHidden = function () { return !!__els["samples-retry"].hidden; };
 window.__clickRetry = function () { __els["samples-retry"].__click(); };
@@ -217,11 +218,6 @@ func (r *autoloadRuntime) settle() {
 	}
 }
 
-func (r *autoloadRuntime) statusText() string {
-	r.t.Helper()
-	return r.eval(`window.__statusText()`).String()
-}
-
 func (r *autoloadRuntime) errorText() string {
 	r.t.Helper()
 	return r.eval(`window.__errorText()`).String()
@@ -257,16 +253,13 @@ func TestAutoLoadIsAttemptedOnceOnStartup(t *testing.T) {
 	}
 }
 
-// TestAutoLoadSuccessUpdatesSampleState pins the success sink: the promise
-// resolving flips the pill to On, clears any error, and keeps retry hidden —
-// and settling further never issues a second load.
+// TestAutoLoadSuccessUpdatesSampleState pins the success sink: success is
+// SILENT (no status pill), so the promise resolving leaves the error empty
+// and keeps retry hidden — and settling further never issues a second load.
 func TestAutoLoadSuccessUpdatesSampleState(t *testing.T) {
 	rt := newAutoloadRuntime(t, true)
 	rt.run(`window.__resolveInit(window.__replStub)`)
 	rt.settle()
-	if got := rt.statusText(); got != "Samples: On" {
-		t.Errorf("status after successful load = %q, want %q", got, "Samples: On")
-	}
 	if got := rt.errorText(); got != "" {
 		t.Errorf("error after successful load = %q, want empty", got)
 	}
@@ -280,8 +273,8 @@ func TestAutoLoadSuccessUpdatesSampleState(t *testing.T) {
 }
 
 // TestAutoLoadFailureRendersTheErrorElement pins the failure sink: a
-// rejected load must write the exact error text into the alert element, flip
-// the pill to Error, keep the console.warn secondary cue, and reveal retry.
+// rejected load must write the exact error text into the alert element, keep
+// the console.warn secondary cue, and reveal retry. There is no pill to flip.
 func TestAutoLoadFailureRendersTheErrorElement(t *testing.T) {
 	rt := newAutoloadRuntime(t, true)
 	rt.run(`window.__loaderMode = "reject"`)
@@ -290,9 +283,6 @@ func TestAutoLoadFailureRendersTheErrorElement(t *testing.T) {
 	want := autoloadFailureFor("boom")
 	if got := rt.errorText(); got != want {
 		t.Errorf("error element = %q, want %q", got, want)
-	}
-	if got := rt.statusText(); got != "Samples: Error" {
-		t.Errorf("status after failed load = %q, want %q", got, "Samples: Error")
 	}
 	if warns := rt.warns(); !strings.Contains(warns, "Failed to load sample pack:") {
 		t.Errorf("console.warn was not called with the pack failure; warns = %q", warns)
@@ -334,14 +324,15 @@ func TestAutoLoadDoesNotDoubleLoad(t *testing.T) {
 	if got := rt.sampleCallCount(); got != 1 {
 		t.Fatalf("loader calls after init resolve = %d, want 1", got)
 	}
-	// While the first attempt is still in flight the pill must read Loading,
-	// not On: reporting loaded before the promise resolves is the defect
-	// mutation autoload-reports-loaded-early reintroduces.
-	if got := rt.statusText(); got != "Samples: Loading\u2026" {
-		t.Errorf("status while load pending = %q, want %q", got, "Samples: Loading\u2026")
-	}
+	// While the first attempt is still in flight the error must stay empty
+	// with retry hidden: in-flight is not failure, and there is no pill to
+	// read Loading from — the defect mutation autoload-reports-loaded-early
+	// reintroduces is claiming success before the promise resolves.
 	if got := rt.errorText(); got != "" {
 		t.Errorf("error while load pending = %q, want empty (pending is not failure)", got)
+	}
+	if !rt.retryHidden() {
+		t.Error("retry is visible while the load is still in flight; it must stay hidden until a failure")
 	}
 	rt.run(`window.__clickRetry()`)
 	rt.settle()
@@ -379,11 +370,8 @@ func TestAutoLoadDoesNotDoubleLoad(t *testing.T) {
 	if got := rt2.sampleCallCount(); got != 3 {
 		t.Errorf("loader calls after second retry click = %d, want 3", got)
 	}
-	if got := rt2.statusText(); got != "Samples: On" {
-		t.Errorf("status after retry success = %q, want %q", got, "Samples: On")
-	}
 	if got := rt2.errorText(); got != "" {
-		t.Errorf("error after retry success = %q, want empty", got)
+		t.Errorf("error after retry success = %q, want empty (success is silent)", got)
 	}
 	if !rt2.retryHidden() {
 		t.Error("retry still visible after retry success; recovery must hide it again")
@@ -408,11 +396,11 @@ func TestAutoLoadMissingBundleFailsLoudly(t *testing.T) {
 		if !strings.HasPrefix(got, autoloadBundlePrefix) || !strings.HasSuffix(got, autoloadBundleSuffix) {
 			t.Errorf("error element = %q, want the bundle-specific message", got)
 		}
-		if got := rt.statusText(); got != "Samples: Error" {
-			t.Errorf("status with missing bundle = %q, want %q", got, "Samples: Error")
-		}
 		if got := rt.sampleCallCount(); got != 0 {
 			t.Errorf("loader calls with missing bundle = %d, want 0", got)
+		}
+		if rt.retryHidden() {
+			t.Error("retry stayed hidden after a missing-bundle failure; the user would be stranded with no recourse short of reload")
 		}
 	})
 	t.Run("rejected promise", func(t *testing.T) {
@@ -443,8 +431,8 @@ func TestAutoLoadMissingLoaderFailsLoudly(t *testing.T) {
 		if got := rt.errorText(); got != want {
 			t.Errorf("error element = %q, want %q", got, want)
 		}
-		if got := rt.statusText(); got != "Samples: Error" {
-			t.Errorf("status with no loader = %q, want %q", got, "Samples: Error")
+		if rt.retryHidden() {
+			t.Error("retry stayed hidden after a no-loader failure; the user would be stranded with no recourse short of reload")
 		}
 	})
 	t.Run("repl evaluate fallback", func(t *testing.T) {
@@ -455,8 +443,11 @@ func TestAutoLoadMissingLoaderFailsLoudly(t *testing.T) {
 		if got := rt.eval(`window.__evalCalls.length`).ToInteger(); got != 1 {
 			t.Fatalf("repl.evaluate calls = %d, want 1: the repl fallback must still load", got)
 		}
-		if got := rt.statusText(); got != "Samples: On" {
-			t.Errorf("status via repl fallback = %q, want %q", got, "Samples: On")
+		if got := rt.errorText(); got != "" {
+			t.Errorf("error via repl fallback = %q, want empty (success is silent)", got)
+		}
+		if !rt.retryHidden() {
+			t.Error("retry is visible after a repl-fallback success; it must stay hidden until a failure")
 		}
 	})
 	t.Run("strudel.samples fallback", func(t *testing.T) {
@@ -467,16 +458,21 @@ func TestAutoLoadMissingLoaderFailsLoudly(t *testing.T) {
 		if got := rt.sampleCallCount(); got != 1 {
 			t.Fatalf("strudel.samples calls = %d, want 1", got)
 		}
-		if got := rt.statusText(); got != "Samples: On" {
-			t.Errorf("status via strudel.samples = %q, want %q", got, "Samples: On")
+		if got := rt.errorText(); got != "" {
+			t.Errorf("error via strudel.samples = %q, want empty (success is silent)", got)
+		}
+		if !rt.retryHidden() {
+			t.Error("retry is visible after a strudel.samples success; it must stay hidden until a failure")
 		}
 	})
 }
 
-// TestAutoLoadToggleIsGone pins the button fate: the dishonest toggle (its
-// off branch unloaded nothing) is gone entirely, replaced by the read-only
-// pill, the alert element, and the recovery retry — in the served markup and
-// in the served stylesheet, which must not keep orphaned toggle rules.
+// TestAutoLoadToggleIsGone pins the pill fate (strudel-agent-3q0): the
+// read-only Samples pill is gone entirely — no markup, no JS read/write, no
+// CSS rule, none of its Loading/On/Error/Off strings in the served bytes.
+// What remains is the alert element and the recovery retry — in the served
+// markup and in the served stylesheet, which must not keep orphaned pill or
+// toggle rules.
 func TestAutoLoadToggleIsGone(t *testing.T) {
 	page := servedWelcomePage(t)
 	if strings.Contains(page, "sample-toggle-btn") {
@@ -485,13 +481,18 @@ func TestAutoLoadToggleIsGone(t *testing.T) {
 	if strings.Contains(page, "Samples: Off") {
 		t.Error(`served / still contains "Samples: Off": no control may imply the pack can be unloaded`)
 	}
-	for _, id := range []string{"samples-status", "samples-error", "samples-retry"} {
+	if strings.Contains(page, "samples-status") {
+		t.Error("served / still contains samples-status: the pill must be removed entirely, including its id")
+	}
+	for _, pillText := range []string{"Samples: Loading", "Samples: On", "Samples: Error", "Samples: "} {
+		if strings.Contains(page, pillText) {
+			t.Errorf("served / still contains pill text %q: success is silent and failure lives in #samples-error", pillText)
+		}
+	}
+	for _, id := range []string{"samples-error", "samples-retry"} {
 		if !strings.Contains(page, `id="`+id+`"`) {
 			t.Errorf("served / has no element with id %q", id)
 		}
-	}
-	if !strings.Contains(page, "Samples: Loading\u2026") {
-		t.Error("served / does not start the pill at Samples: Loading\u2026: auto-load starts at startup, not Off")
 	}
 
 	s := New()
@@ -504,7 +505,10 @@ func TestAutoLoadToggleIsGone(t *testing.T) {
 	if strings.Contains(css, "sample-toggle-btn") {
 		t.Error("style.css still carries .sample-toggle-btn rules orphaned by the toggle's removal")
 	}
-	for _, sel := range []string{".samples-status", ".samples-error", ".samples-retry"} {
+	if strings.Contains(css, ".samples-status") {
+		t.Error("style.css still carries .samples-status rules orphaned by the pill's removal")
+	}
+	for _, sel := range []string{".samples-error", ".samples-retry"} {
 		if !strings.Contains(css, sel) {
 			t.Errorf("style.css has no %s rule: the new element would render unstyled", sel)
 		}

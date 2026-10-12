@@ -36,8 +36,7 @@
           System initialized. Awaiting agent input...
         </div>
         <div class="sync-status" id="sync-status" aria-live="polite"></div>
-        <button id="play-btn" class="play-btn" aria-label="Play/Pause Audio">Play</button>
-        <span id="samples-status" class="samples-status" role="status" aria-live="polite">Samples: Loading…</span>
+        <button id="play-btn" class="play-btn playing" aria-label="Mute/Unmute Audio">Mute</button>
         <p id="samples-error" class="samples-error" role="alert"></p>
         <button id="samples-retry" class="samples-retry" hidden>Retry</button>
       </section>
@@ -57,12 +56,14 @@
       </div>
     </main>
      <script>
-       // Automatic sample loading (strudel-agent-8f0): the dirt-samples pack
-       // is fetched once at startup, not on a button click. The old
-       // #sample-toggle-btn toggle is gone on purpose — its off branch only
-       // relabelled the button while the pack stayed in the registry, so no
-       // control may imply the pack can be unloaded. The only remaining
-       // control is #samples-retry, a recovery path shown only after failure.
+       // Automatic sample loading (strudel-agent-8f0, pill removed in
+       // strudel-agent-3q0): the dirt-samples pack is fetched once at
+       // startup, not on a button click. The old #sample-toggle-btn toggle
+       // is gone on purpose — its off branch only relabelled the button
+       // while the pack stayed in the registry, so no control may imply the
+       // pack can be unloaded. The only remaining control is #samples-retry,
+       // a recovery path shown only after failure. Success is silent: with
+       // no status pill, a loaded pack changes nothing visible.
        let replInstance = null;
        let samplesLoaded = false;
        let samplesLoading = false;
@@ -71,26 +72,24 @@
          return (err && err.message) || String(err);
        }
 
-       // The single visible failure sink: every rejection path funnels
-       // through here, so a failed load is always rendered in the page and
-       // never only a console.warn. Loading vs failed is unambiguous: loading
-       // leaves #samples-error empty, failure writes it.
+       // The single visible sink is #samples-error: every rejection path
+       // funnels through here, so a failed load is always rendered in the
+       // page and never only a console.warn. Loading, in-flight, and
+       // success are indistinguishable in the page (error empty, retry
+       // hidden); the in-flight state lives only in the
+       // samplesLoading/samplesLoaded flags.
        function showSamplesFailure(msg) {
-         var statusEl = document.getElementById('samples-status');
          var errorEl = document.getElementById('samples-error');
          var retryEl = document.getElementById('samples-retry');
-         if (statusEl) { statusEl.textContent = 'Samples: Error'; }
          if (errorEl) { errorEl.textContent = msg; }
          if (retryEl) { retryEl.hidden = false; }
        }
 
        function showSamplesSuccess() {
-         var statusEl = document.getElementById('samples-status');
          var errorEl = document.getElementById('samples-error');
          var retryEl = document.getElementById('samples-retry');
          samplesLoaded = true;
          samplesLoading = false;
-         if (statusEl) { statusEl.textContent = 'Samples: On'; }
          if (errorEl) { errorEl.textContent = ''; }
          if (retryEl) { retryEl.hidden = true; }
        }
@@ -101,8 +100,6 @@
        function loadSamplePack() {
          if (samplesLoading || samplesLoaded) return;
          samplesLoading = true;
-         var statusEl = document.getElementById('samples-status');
-         if (statusEl) { statusEl.textContent = 'Samples: Loading…'; }
          const samplesFn = window.samples || (window.strudel && window.strudel.samples);
          let loadPromise;
          if (samplesFn) {
@@ -127,8 +124,8 @@
        // auto-load in the same .then removes the registration-order fragility
        // that caused the pre-init click race. A missing bundle (script tag
        // failed, so the promise is undefined) or a rejected init fails
-       // loudly with a bundle-specific message; the page never sits on
-       // Loading forever and never throws.
+       // loudly with a bundle-specific message in #samples-error; the page
+       // never throws.
        if (window.strudelInitPromise && window.strudelInitPromise.then) {
          window.strudelInitPromise.then(function(repl) {
            replInstance = repl;
@@ -153,14 +150,13 @@
          });
        }
 
-       // Wait for DOM to be ready (script is deferred, but double-check)
+       // Mute is LOCAL to this browser (strudel-agent-3q0): the click only
+       // toggles this listener's mute gate, never the shared transport.
        document.addEventListener('DOMContentLoaded', function () {
          var playBtn = document.getElementById('play-btn');
          if (playBtn) {
            playBtn.addEventListener('click', function () {
-             // Get current desired state from session.js and toggle
-             var current = window.strudelSession.getCurrentPlayingState();
-             window.strudelSession.requestPlayPause(!current);
+             window.strudelSession.toggleMute();
            });
          }
        });

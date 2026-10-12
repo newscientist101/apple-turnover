@@ -272,7 +272,7 @@ wait for the answer.
 - Serve the actual browser modules that the page references.
 - The browser is the only evaluator and audio producer.
 - `editor.js` may fall back to the plain textarea if CodeMirror is unavailable; that does not imply audio can work offline.
-- **A listener starts stopped, and follows `playing` only on a transport transition.** `playing` is transport intent, not a per-browser audio command, so a connect-time `snapshot` must not start audio: the client boots `desiredPlaying=false`, `setPattern` is called with autostart disabled, and only a `transport` frame (or a local Play click) calls `setPlayingState`. Observed in a served page against a server reporting `"playing":true`: the version advanced and the verdict came back `ok:true` while the REPL stayed stopped, and `POST /api/play` then started it. Wiring the catch-up snapshot into `setPlayingState` would force every tab to make noise on connect, so that is a deliberate change to user-facing behaviour rather than a tidy-up.
+- **A listener boots playing; mute is local and sticky.** The client boots `desiredPlaying=true` and starts the live repl as soon as it is ready, so a fresh tab is audible without a click. `playing` remains shared transport intent, not a per-browser audio command: `snapshot`/`code` frames never drive audio, `setPattern` commits with autostart disabled so new code never force-starts a muted listener, and a `transport` frame records `desiredPlaying` and re-applies effective audio (`desiredPlaying && !localMuted`) without ever clearing `localMuted`. The Mute button toggles per-browser `localMuted` only: it drives `liveRepl.stop()/start()` directly, never writes `desiredPlaying`, and never fetches `/api/hush` or `/api/play`.
 - The visualizer is pattern-driven only: it paints hap lanes and a playhead
   from `currentPattern.queryArc()`, with no audio-context dependency. A
   waveform branch was removed because the pinned bundle exposes no reachable,
@@ -327,10 +327,10 @@ unqualified success.
   `toLowerCase().replace(/\s+/g, "_")` before storing. A resolver that normalised
   differently would disagree with the audio the user hears, which is the one thing
   it must never do.
-- **The registry is the source of truth, not the Samples pill.** `welcome.html`
+- **The registry is the source of truth, not the page label.** `welcome.html`
   has no unload control (the old toggle's off branch flipped a label and
   unregistered nothing), so a flag-driven resolver would keep reporting a loaded
-  pack the pill could not remove.
+  pack no page label could remove.
 - **ONE resolver feeds both paths.** The eval-result and dry-run reports are two
   ways an agent asks the same question; a resolver that answered on one and stayed
   silent on the other would give an agent two answers to one question.
@@ -406,7 +406,7 @@ because listeners will need it for things beyond samples.
   asserts on the body that would have been POSTed, never on what `describeSamples`
   returned — the `uvj.15` lesson, and it is why the report is exercised through the
   real `handleFrame` seam.
-- **THE RESOLVER IS THE REGISTRY, NEVER THE Samples PILL.** `welcome.html`
+- **THE RESOLVER IS THE REGISTRY, NEVER THE PAGE LABEL.** `welcome.html`
   auto-loads the pack once at startup and offers no unload control, so the
   client polls `soundMap.get()` on the status tick and reports only on a real
   change. The server ignores an unchanged report regardless, so the frame rule
@@ -417,10 +417,12 @@ because listeners will need it for things beyond samples.
   poll-and-observe and is untouched. Behaviour is proved by
   `srv/samples_autoload_browser_test.go`, which executes the served `/`
   template bytes in goja — never a Go translation. Element ids
-  `samples-status` / `samples-error` / `samples-retry` are the contract: the
-  pill is read-only (`Samples: Loading…` → `On` / `Error`), the error element
-  is empty while loading and carries the pinned failure text after failure,
-  and retry is hidden until failure.
+  `samples-error` / `samples-retry` are the contract (there is no status
+  pill): success is silent, the error element is empty while loading and
+  carries the pinned failure text after failure, and retry is hidden until
+  failure. Mute behaviour alongside it is proved by
+  `srv/session_mute_browser_test.go`, which executes the served
+  `session.js` bytes in goja.
 
 ## Standing limitations
 

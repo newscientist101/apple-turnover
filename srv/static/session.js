@@ -50,8 +50,12 @@
   // listener-count frames carry snapshots too -- neither is new music.
   var lastVersion = -1;
   var liveRepl = null;          // Stores the live repl instance
-  var desiredPlaying = false;   // Desired playing state (from transport frames or Play button)
-  var queuedPlaying = null;     // Queued state change when liveRepl is not ready (null = none)
+  var desiredPlaying = true;    // Boot intent is playing (strudel-agent-3q0):
+                                // fresh tabs are audible without a click;
+                                // transport frames update it afterwards.
+  var localMuted = false;       // Per-browser mute gate (strudel-agent-3q0):
+                                // toggled only by the Mute button, never by
+                                // transport frames, never written to the wire.
   // Latest live Pattern committed via setPattern (for viz hooks).
   var currentPattern = null;
   // Handle for the commit scheduled at the next cycle boundary, so a NEWER
@@ -668,9 +672,9 @@
 
     pendingCommit = scheduleCommit(function () {
       pendingCommit = null;
-      // setPattern(pattern, false) hot-swaps audio without a gap; false means
-      // "do not autostart", so a listener that has not clicked play yet is not
-      // force-started.
+      // setPattern(pattern, false) hot-swaps audio without a gap; false
+      // means "do not autostart", so a code commit never force-starts a
+      // locally-muted listener (a no-op for sounding ones).
       return live.setPattern(pattern, false);
     }, anchor, version, stats, pattern);
 
@@ -959,11 +963,13 @@ function reportAudienceSamples(force) {
       }
       return;
     }
-     // Transport frames: update desired playing state and update UI
+     // Transport frames record the shared intent and re-apply effective
+     // audio; they never clear the local mute gate, so a muted listener
+     // stays muted across any number of transport frames (no remote unmute).
      if (frame.kind === "transport") {
        if (snapshot && typeof snapshot.playing === "boolean") {
          desiredPlaying = snapshot.playing;
-         setPlayingState(desiredPlaying);
+         refreshAudio();
        }
        return; // Transport frames do not trigger version updates
      }
@@ -1016,13 +1022,17 @@ function reportAudienceSamples(force) {
     };
   }
 
-  // Boot: wait for initStrudel (live repl with audio), build the sandbox
-  // repl beside it, then subscribe. Both repls come from the same strudel
-  // bundle globals so they parse the same language.
-  function setPlayingState(isPlaying) {
+  // Local mute (strudel-agent-3q0): the single audio sink. Effective audio
+  // is shared intent AND NOT locally muted. The button label is a pure
+  // function of the mute gate (Mute/Unmute), while the .playing class
+  // tracks effective audibility. With no live repl yet there is nothing to
+  // drive and nothing is queued: boot applies the state directly once the
+  // repl is ready.
+  function refreshAudio() {
+    var sounding = desiredPlaying && !localMuted;
     if (liveRepl !== null) {
       try {
-        if (isPlaying) {
+        if (sounding) {
           liveRepl.start();
         } else {
           liveRepl.stop();
@@ -1030,25 +1040,32 @@ function reportAudienceSamples(force) {
       } catch (e) {
         console.warn("[session] Error setting live repl playing state:", e);
       }
-      // Update Play button UI immediately
-      var btn = document.getElementById('play-btn');
-      if (btn) {
-        btn.textContent = isPlaying ? 'Pause' : 'Play';
-        if (isPlaying) {
-          btn.classList.add('playing');
-        } else {
-          btn.classList.remove('playing');
-        }
+    }
+    // Update Mute button UI immediately
+    var btn = document.getElementById('play-btn');
+    if (btn) {
+      btn.textContent = localMuted ? 'Unmute' : 'Mute';
+      if (btn.classList && typeof btn.classList.toggle === 'function') {
+        btn.classList.toggle('playing', sounding);
+      } else if (sounding) {
+        btn.classList.add('playing');
+      } else {
+        btn.classList.remove('playing');
       }
-    } else {
-      // Queue state change if liveRepl not ready
-      queuedPlaying = isPlaying;
     }
   }
 
-  function requestPlayPause(isPlaying) {
-    desiredPlaying = isPlaying;
-    setPlayingState(isPlaying);
+  function setMutedState(muted) {
+    localMuted = !!muted;
+    refreshAudio();
+  }
+
+  function getMutedState() {
+    return localMuted;
+  }
+
+  function toggleMute() {
+    setMutedState(!localMuted);
   }
   function boot() {
     var ready = window.strudelInitPromise;
@@ -1065,8 +1082,9 @@ function reportAudienceSamples(force) {
       var sandbox = buildSandbox(strudel);
       window.strudelSandbox = sandbox;
        liveRepl = live;
-       // Apply any queued playing state (from Play button or transport frame that arrived before boot completed)
-       setPlayingState(desiredPlaying);
+       // Boot into playing mode: with desiredPlaying=true and localMuted=false
+       // the applicator starts the repl and labels the button Mute.
+       setMutedState(false);
       console.info("[session] sandbox repl ready; subscribing");
       startStatusTimer();
       connect(sandbox, live, 0);
@@ -1127,9 +1145,9 @@ function reportAudienceSamples(force) {
     // works when called directly.
     handleFrame: handleFrame,
     getConnectionState: function () { return connectionState; },
-     setPlayingState: setPlayingState,
-     requestPlayPause: requestPlayPause,
-     getCurrentPlayingState: function () { return desiredPlaying; },
+     setMutedState: setMutedState,
+     getMutedState: getMutedState,
+     toggleMute: toggleMute,
     // Test/debug seam: startStatusTimer is normally called once from boot, but a
     // test needs to observe the interval actually ticking and actually stopping.
     startStatusTimer: startStatusTimer,

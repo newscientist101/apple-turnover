@@ -1343,7 +1343,7 @@
     "name": "198-autoload-shows-success-on-error",
     "file": "srv/templates/welcome.html",
     "old": "showSamplesFailure('Could not load the sample pack github:tidalcycles/dirt-samples: ' + samplesMessage(err) + '. Sound stays synth-only; patterns naming dirt samples will report samplesResolved:false.');",
-    "new": "showSamplesSuccess(); // deliberately: the failure renders as success, so the error element stays empty and the pill reads On over a pack that never loaded",
+    "new": "showSamplesSuccess(); // deliberately: the failure renders as success, so the error element stays empty over a pack that never loaded",
     "run": "TestAutoLoadFailureRendersTheErrorElement|TestAutoLoadNeverSwallowsAFailure"
   },
   {
@@ -1370,8 +1370,8 @@
   {
     "name": "202-autoload-reports-loaded-early",
     "file": "srv/templates/welcome.html",
-    "old": "samplesLoading = true;\n         var statusEl = document.getElementById('samples-status');\n         if (statusEl) { statusEl.textContent = 'Samples: Loading\u2026'; }",
-    "new": "samplesLoading = true;\n         var statusEl = document.getElementById('samples-status');\n         if (statusEl) { statusEl.textContent = 'Samples: On'; } // deliberately: loaded is reported before the promise resolves, so a pending pack reads as present",
+    "old": "samplesLoading = true;",
+    "new": "samplesLoading = true; showSamplesSuccess(); // deliberately: success is claimed before the promise resolves, so a retry mid-load is swallowed by the once-guard",
     "run": "TestAutoLoadDoesNotDoubleLoad|TestAutoLoadFailureRendersTheErrorElement"
   },
   {
@@ -1450,5 +1450,47 @@
     "old": "      console.warn(\"[session] strudel.transpiler unavailable: sandbox evaluates without it, so hap locations are mini-relative, not document spans\");",
     "new": "      void opts; // deliberately: no warning, so a raw-path sandbox passes silently for a transpiled one",
     "run": "TestSandboxBuildWithoutTranspilerWarns"
+  },
+  {
+    "name": "214-autoplay-boots-stopped",
+    "file": "srv/static/session.js",
+    "old": "var desiredPlaying = true;",
+    "new": "var desiredPlaying = false; // deliberately: fresh tabs boot silent again",
+    "run": "TestBootStartsPlayingWithMuteLabel"
+  },
+  {
+    "name": "215-mute-posts-transport",
+    "file": "srv/templates/welcome.html",
+    "old": "window.strudelSession.toggleMute();",
+    "new": "fetch(\"/api/hush\", {method: \"POST\"}); // deliberately: mute leaks into shared transport",
+    "run": "TestPlayButtonClickCallsToggleMuteOnly|TestMuteButtonNeverTouchesTransportEndpoints"
+  },
+  {
+    "name": "216-transport-clears-local-mute",
+    "file": "srv/static/session.js",
+    "old": "desiredPlaying = snapshot.playing;\n         refreshAudio();",
+    "new": "desiredPlaying = snapshot.playing;\n         localMuted = false; // deliberately: every transport frame unmutes the listener\n         refreshAudio();",
+    "run": "TestTransportFrameNeverClearsLocalMute"
+  },
+  {
+    "name": "217-failure-strands-user-no-retry",
+    "file": "srv/templates/welcome.html",
+    "old": "if (retryEl) { retryEl.hidden = false; }",
+    "new": "if (retryEl) { retryEl.hidden = true; // deliberately: failure leaves no recourse }",
+    "run": "TestAutoLoadFailureRendersTheErrorElement"
+  },
+  {
+    "name": "218-snapshot-drives-audio",
+    "file": "srv/static/session.js",
+    "old": "    applyVersion(snapshot, sandbox, live);",
+    "new": "    applyVersion(snapshot, sandbox, live);\n    refreshAudio(); // deliberately: catch-up snapshot force-starts audio",
+    "run": "TestSnapshotFramesNeverDriveAudio"
+  },
+  {
+    "name": "219-unmute-ignores-shared-intent",
+    "file": "srv/static/session.js",
+    "old": "var sounding = desiredPlaying && !localMuted;",
+    "new": "var sounding = !localMuted; // deliberately: unmute starts audio even when shared intent is stopped",
+    "run": "TestUnmuteIntoHushedServerStaysSilent"
   }
 ]

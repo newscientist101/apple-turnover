@@ -64,6 +64,8 @@ func TestSessionClientValidateThenCommit(t *testing.T) {
 		"queryArc",
 		"/api/eval-result",
 		`"/ws"`,
+		"toggleMute",
+		"localMuted",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("session.js is missing load-bearing marker %q", want)

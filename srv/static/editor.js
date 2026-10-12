@@ -22,6 +22,10 @@
   var readOnly = true;
   var errorLine = null;
   var flashTimer = null;
+  // Handles of the currently outlined sounding-token marks (CodeMirror
+  // TextMarkers). Recomputed from scratch every viz frame; no cross-frame
+  // state survives beyond this list.
+  var activeMarks = [];
 
   function findTextarea() {
     if (textarea) {
@@ -75,6 +79,11 @@
     if (typeof code !== 'string') {
       return;
     }
+    // Dynamic outlines belong to the old document: drop them even when the
+    // text is unchanged (setValue drops marks with the document, but the
+    // equal-text and textarea paths never reach it, and a mid-frame
+    // staleness must resolve to "dark, re-mark next frame").
+    clearActiveMarks();
     if (cm) {
       if (cm.hasFocus && cm.hasFocus()) {
         return;
@@ -88,6 +97,66 @@
     if (el && typeof document !== 'undefined' &&
         document.activeElement !== el && el.value !== code) {
       el.value = code;
+    }
+  }
+
+  // clearActiveMarks drops every sounding-token outline. Called by
+  // setActiveSpans, by setCode, and by viz when there is no pattern.
+  function clearActiveMarks() {
+    for (var i = 0; i < activeMarks.length; i++) {
+      try {
+        if (activeMarks[i] && typeof activeMarks[i].clear === 'function') {
+          activeMarks[i].clear();
+        }
+      } catch (err) {
+        // A stale handle must never break the next version update.
+      }
+    }
+    activeMarks = [];
+  }
+
+  // setActiveSpans replaces all dynamic outlines with exactly the given
+  // spans: absolute character offsets [{start, end}] into the evaluated
+  // code, as collected from hap.context.locations by viz.js. Invalid spans
+  // (non-numbers, end <= start, entirely out of range) are skipped;
+  // partially out-of-range spans clamp to the document length. A dumb
+  // actuator by design: dedup lives in the caller, and the error-line path
+  // (addLineClass) stays untouched so the two highlights cannot share a
+  // handle. A no-op when CodeMirror is absent: the plain textarea shows no
+  // highlight but keeps working.
+  function setActiveSpans(spans) {
+    clearActiveMarks();
+    if (!cm) {
+      return;
+    }
+    if (!spans || typeof spans.length !== 'number') {
+      return;
+    }
+    try {
+      var docLen = cm.getValue().length;
+      for (var i = 0; i < spans.length; i++) {
+        var span = spans[i];
+        if (!span || typeof span.start !== 'number' || typeof span.end !== 'number') {
+          continue;
+        }
+        if (isNaN(span.start) || isNaN(span.end)) {
+          continue;
+        }
+        var start = Math.max(0, Math.min(docLen, Math.floor(span.start)));
+        var end = Math.max(0, Math.min(docLen, Math.ceil(span.end)));
+        if (end <= start) {
+          continue;
+        }
+        try {
+          activeMarks.push(cm.markText(cm.posFromIndex(start), cm.posFromIndex(end), {
+            className: 'editor-active-token',
+          }));
+        } catch (err) {
+          // One bad range must not take down the frame loop.
+        }
+      }
+    } catch (err) {
+      // The rAF loop must never throw.
     }
   }
 
@@ -229,6 +298,8 @@
     flashUpdate: flashUpdate,
     markError: markError,
     clearError: clearError,
+    setActiveSpans: setActiveSpans,
+    clearActiveMarks: clearActiveMarks,
     setReadOnly: setReadOnly,
     isReadOnly: isReadOnly,
     version: version,

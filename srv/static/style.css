@@ -326,6 +326,16 @@ html, body {
   animation: editor-flash 0.6s ease-out;
 }
 
+/* Sounding-token outline: every mini-notation token sounding at the current
+   instant is outlined in the read-only code view and cleared the instant it
+   stops. Placed by editor.js setActiveSpans from viz.js activeSpans, on the
+   SAME anchor-derived cycle as the lanes and playhead. Distinct from the
+   error red above by design; the textarea fallback shows no highlight. */
+.editor-region .editor-active-token {
+  outline: solid 2px #ffd60a;
+  background: rgba(255, 214, 10, 0.12);
+}
+
 /* Failing-region highlight: whole-view tint for the textarea fallback, line
    background when CodeMirror owns the view. */
 .editor-region .editor-error-line {

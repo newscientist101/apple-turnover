@@ -1380,5 +1380,61 @@
     "old": "} else if (replInstance && replInstance.evaluate) {",
     "new": "} else if (false) { // deliberately: the repl fallback is skipped, so a repl-only browser reports the loader absent",
     "run": "TestAutoLoadMissingLoaderFailsLoudly"
+  },
+  {
+    "name": "204-highlight-marks-every-window-hap",
+    "file": "srv/static/viz.js",
+    "old": "      if (!hapIsActive(hap, now)) continue;",
+    "new": "      void now; // deliberately: the isActive filter is gone, so every window hap lights",
+    "run": "TestHighlightOnlyTheActiveTokenMarks|TestHighlightMarkClearsWhenHapEnds|TestHighlightActiveSpansHelperPure"
+  },
+  {
+    "name": "205-highlight-never-clears-marks",
+    "file": "srv/static/editor.js",
+    "old": "  function setActiveSpans(spans) {\n    clearActiveMarks();",
+    "new": "  function setActiveSpans(spans) {\n    void spans; activeMarks = activeMarks; // deliberately: append-only, stale outlines never clear",
+    "run": "TestHighlightMarkClearsWhenHapEnds|TestHighlightNoPatternClears|TestHighlightVersionChangeClears"
+  },
+  {
+    "name": "206-highlight-ignores-locations",
+    "file": "srv/static/viz.js",
+    "old": "      var locs = hap.context && hap.context.locations;",
+    "new": "      var locs = [{ start: 0, end: 10 }]; // deliberately: every active hap marks a fixed window instead of its token",
+    "run": "TestHighlightActiveHapMarksItsToken|TestHighlightLocationlessHapSkipped"
+  },
+  {
+    "name": "207-highlight-marks-locationless-whole-doc",
+    "file": "srv/static/viz.js",
+    "old": "      if (!locs || typeof locs.length !== 'number') continue;",
+    "new": "      if (!locs || typeof locs.length !== 'number') { out.push({ start: 0, end: 10 }); continue; } // deliberately: location-less haps mark a synthetic range",
+    "run": "TestHighlightLocationlessHapSkipped"
+  },
+  {
+    "name": "208-highlight-wrong-css-class",
+    "file": "srv/static/editor.js",
+    "old": "            className: 'editor-active-token',",
+    "new": "            className: 'editor-active', // deliberately: the outline carries a class the stylesheet never defines",
+    "run": "TestHighlightActiveHapMarksItsToken"
+  },
+  {
+    "name": "209-highlight-no-feature-detect",
+    "file": "srv/static/viz.js",
+    "old": "    var ed = (typeof window !== 'undefined' && window.strudelEditor) || null;\n    if (ed && typeof ed.setActiveSpans === 'function') {",
+    "new": "    var ed = (typeof window !== 'undefined' && window.strudelEditor) || null;\n    if (ed) { // deliberately: unconditional call, so an older editor.js without the actuator throws",
+    "run": "TestHighlightOlderEditorWithoutAccessor"
+  },
+  {
+    "name": "210-highlight-drops-isactive-for-whole",
+    "file": "srv/static/viz.js",
+    "old": "    if (hap && typeof hap.isActive === 'function') {",
+    "new": "    if (false) { // deliberately: isActive is never consulted, so haps whose window differs from their sounding time mislight",
+    "run": "TestHighlightActiveSpansHelperPure"
+  },
+  {
+    "name": "211-highlight-stale-code-version-marks",
+    "file": "srv/static/editor.js",
+    "old": "    // equal-text and textarea paths never reach it, and a mid-frame\n    // staleness must resolve to \"dark, re-mark next frame\").\n    clearActiveMarks();",
+    "new": "    // deliberately: setCode no longer clears, so a replaced document keeps its stale outlines",
+    "run": "TestHighlightVersionChangeClears"
   }
 ]

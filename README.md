@@ -14,10 +14,12 @@ Browser modules:
 |---|---|
 | `srv/static/session.js` | WebSocket subscription, validate-then-commit, evaluation verdicts, sync status |
 | `srv/static/editor.js` | CodeMirror editor over the page textarea |
-| `srv/static/viz.js` | Pattern visualization |
+| `srv/static/viz.js` | Pattern visualization plus the sounding-token outline |
 | `srv/static/sync.js` | Bar-aligned scheduling and drift reporting |
 
 The page also has a local **Play/Pause** control plus an automatic sample load. Play/Pause calls the browser REPL directly and does not change the server's `playing` intent.
+
+During a performance the code view outlines, in yellow, every mini-notation token that is sounding at the current instant, and clears the outline the instant the token stops sounding. The outline follows the shared-grid playhead (same clock, same haps), so every listener sees the same token lit for the same bar. Only mini-notation tokens light up — a plain-JS structure never does — and between sounds the view goes dark. If the CodeMirror CDN fails to load, the plain-text view keeps working with no highlight.
 
 A listener that connects to a server already reporting `"playing":true` **starts silent.** Observed: a fresh page connecting to such a server commits the pattern — the version advances, the verdict comes back `ok:true`, the code view fills in — while the browser REPL stays stopped and the button reads `Play`. Audio begins on a **transport transition** instead: `POST /api/play`, or a local Play click, after which the REPL reports started and the button reads `Pause`. The client states the reason (the commit is made with autostart disabled, so a listening tab is never force-started), and `playing` is documented as transport intent rather than per-browser audio state. It is worth knowing because a push to a `playing:true` server looks like a success in every field an agent can read while the room stays quiet.
 

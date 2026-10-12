@@ -107,6 +107,52 @@
     return palette[idx];
   }
 
+  // A hap is sounding at cycle t iff its own isActive says so; haps without
+  // that method fall back to the half-open whole window (whole, else part,
+  // via getHapTime), so at a token boundary the outgoing hap is already
+  // dark while the incoming one lights.
+  function hapIsActive(hap, t) {
+    if (hap && typeof hap.isActive === 'function') {
+      try {
+        return !!hap.isActive(t);
+      } catch (e) {
+        return false;
+      }
+    }
+    var b = getHapTime(hap, 'begin');
+    var e = getHapTime(hap, 'end');
+    return b <= t && t < e;
+  }
+
+  // activeSpans is the pure highlight derivation: from the SAME haps array
+  // the frame already queried, collect every sounding hap's
+  // context.locations spans, deduped by "start:end" with the earliest
+  // whole.begin winning (the same rule as upstream @strudel/codemirror's
+  // `ne` field). Haps without locations are not elements: skipped silently.
+  function activeSpans(haps, now) {
+    var seen = {};
+    var out = [];
+    for (var i = 0; i < (haps || []).length; i++) {
+      var hap = haps[i];
+      if (!hap) continue;
+      if (!hapIsActive(hap, now)) continue;
+      var locs = hap.context && hap.context.locations;
+      if (!locs || typeof locs.length !== 'number') continue;
+      for (var j = 0; j < locs.length; j++) {
+        var loc = locs[j];
+        if (!loc || typeof loc.start !== 'number' || typeof loc.end !== 'number') continue;
+        // Dedup by "start:end": every holder of the same span carries the
+        // identical {start,end}, so the first (earliest whole.begin, as the
+        // window query returns haps in time order) wins.
+        var key = loc.start + ':' + loc.end;
+        if (seen[key]) continue;
+        seen[key] = true;
+        out.push({ start: loc.start, end: loc.end });
+      }
+    }
+    return out;
+  }
+
   function draw() {
     var canvas = document.getElementById('canvas');
     if (!canvas) {
@@ -204,6 +250,18 @@
       laneKinds['other'] = 'other';
     }
 
+    // Outline the sounding tokens in the read-only code view, from the SAME
+    // currentCycle and SAME haps array as the lanes above — highlight,
+    // lanes and playhead can never disagree. An empty active set clears all
+    // marks. Feature-detected: an older editor.js has no actuator, and
+    // skipping the call (rather than throwing into the drawing loop below)
+    // is what keeps its lanes drawing. The rAF loop's own try/catch is the
+    // backstop, as for draw().
+    var ed = (typeof window !== 'undefined' && window.strudelEditor) || null;
+    if (ed && typeof ed.setActiveSpans === 'function') {
+      ed.setActiveSpans(activeSpans(haps, currentCycle));
+    }
+
     laneKeys.sort();
 
     var numLanes = laneKeys.length;
@@ -277,6 +335,9 @@
     setPattern: setPattern,
     onSnapshot: onSnapshot,
     colourFor: colourFor,
+    // activeSpans is exposed so the highlight derivation is unit-testable
+    // through the served module without stepping a frame.
+    activeSpans: activeSpans,
     // PALETTES is exposed so a test can grade every entry of every family,
     // not only the lanes a given pattern happens to produce. A palette entry
     // that drifts into another family's hue is otherwise invisible until some

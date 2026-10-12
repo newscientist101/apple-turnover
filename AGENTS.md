@@ -303,6 +303,7 @@ wait for the answer.
   the resolver, and a hue-banded version of the identity test let mutation
   `130-viz-lane-colour-decoupled-from-lane` survive. Assert membership, and keep
   the disjointness test that makes it sound.
+- **The sounding-token highlight runs on the anchor-derived cycle, never `scheduler.now()`.** Every viz frame derives the active spans from the SAME `currentCycle` and SAME `haps` array as the lanes and playhead (`activeSpans` in viz.js → `setActiveSpans` in editor.js), so the three can never disagree across listeners. `editor.js` owns the only CodeMirror mark touchpoint; marks are recomputed per frame and carry no cross-frame state; the textarea path is a documented no-op; and the feature adds no browser dependency and no wire frame kind (AGENT_API.md untouched).
 
 ### Sample resolution
 

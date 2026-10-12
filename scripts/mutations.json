@@ -1463,7 +1463,7 @@
     "file": "srv/templates/welcome.html",
     "old": "window.strudelSession.toggleMute();",
     "new": "fetch(\"/api/hush\", {method: \"POST\"}); // deliberately: mute leaks into shared transport",
-    "run": "TestPlayButtonClickCallsToggleMuteOnly|TestMuteButtonNeverTouchesTransportEndpoints"
+    "run": "TestPlayButtonClickCallsToggleMuteOnly"
   },
   {
     "name": "216-transport-clears-local-mute",
@@ -1476,7 +1476,7 @@
     "name": "217-failure-strands-user-no-retry",
     "file": "srv/templates/welcome.html",
     "old": "if (retryEl) { retryEl.hidden = false; }",
-    "new": "if (retryEl) { retryEl.hidden = true; // deliberately: failure leaves no recourse }",
+    "new": "if (retryEl) { retryEl.hidden = true; }",
     "run": "TestAutoLoadFailureRendersTheErrorElement"
   },
   {

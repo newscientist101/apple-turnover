@@ -22,6 +22,8 @@ package srv
 import (
 	"strings"
 	"testing"
+
+	"github.com/dop251/goja"
 )
 
 // mutePrelude extends the session harness with the collaborators the mute
@@ -353,9 +355,23 @@ func TestUnmuteIntoHushedServerStaysSilent(t *testing.T) {
 
 // TestPlayButtonClickCallsToggleMuteOnly drives the SERVED welcome.html
 // inline script with a stub strudelSession: DOMContentLoaded registration
-// followed by a click must call toggleMute exactly once and nothing else.
+// followed by a click must call toggleMute exactly once and record no
+// transport fetch. The recording fetch stub is installed BEFORE the served
+// script runs, so a click handler that POSTs to a transport endpoint fails
+// here on the recorded path — never on a ReferenceError from a missing
+// fetch in this harness.
 func TestPlayButtonClickCallsToggleMuteOnly(t *testing.T) {
-	vm := newAutoloadRuntime(t, true).vm
+	vm := goja.New()
+	runJS(t, vm, autoloadPrelude, "the autoload prelude")
+	runJS(t, vm, `
+  window.__fetches = [];
+  var fetch = function (path, init) {
+    window.__fetches.push(String(path));
+    return Promise.resolve({ ok: true });
+  };
+  window.__fetchPaths = function () { return window.__fetches.join(","); };
+`, "the recording fetch stub")
+	runJS(t, vm, servedWelcomeInlineScript(t), "the served inline loader")
 	runJS(t, vm, `
 	  window.__toggleMuteCalls = 0;
 	  window.strudelSession = {
@@ -383,8 +399,8 @@ func TestPlayButtonClickCallsToggleMuteOnly(t *testing.T) {
 	if got := runJS(t, vm, `window.__toggleMuteCalls`, "reading toggleMute calls").ToInteger(); got != 1 {
 		t.Errorf("toggleMute calls after one play click = %d, want exactly 1", got)
 	}
-	if got := runJS(t, vm, `window.__fetchPaths ? window.__fetchPaths() : "n/a"`, "reading fetches").String(); got != "n/a" {
-		t.Errorf("unexpected fetch recorder in the inline-script harness: %q", got)
+	if got := runJS(t, vm, `window.__fetchPaths()`, "reading recorded fetches").String(); got != "" {
+		t.Errorf("play click fetched %q, want no requests: the Mute button must never POST /api/hush or /api/play", got)
 	}
 	script := servedWelcomeInlineScript(t)
 	if !strings.Contains(script, "window.strudelSession.toggleMute();") {

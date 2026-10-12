@@ -802,7 +802,7 @@
   {
     "name": "109-never-seen-counts-as-active",
     "file": "srv/conductor.go",
-    "old": "\tif lastSeenMS == 0 {\n\t\t// Never seen. This branch is only reachable for a clock within AgentTTL\n\t\t// of the epoch — real time is ~1.7e12 ms, so without it the arithmetic\n\t\t// below would still yield inactive, and a mutation deleting this line\n\t\t// survives every other test. It is kept because the marker is RESERVED\n\t\t// (see AgentPresence) and a server whose clock is wrong must not report\n\t\t// an agent that has never existed as present.\n\t\treturn p\n\t}",
+    "old": "\tif lastSeenMS == 0 {\n\t\t// Never seen. This branch is only reachable for a clock within AgentTTL\n\t\t// of the epoch \u2014 real time is ~1.7e12 ms, so without it the arithmetic\n\t\t// below would still yield inactive, and a mutation deleting this line\n\t\t// survives every other test. It is kept because the marker is RESERVED\n\t\t// (see AgentPresence) and a server whose clock is wrong must not report\n\t\t// an agent that has never existed as present.\n\t\treturn p\n\t}",
     "new": "\t// deliberately: the never-seen marker is treated as an ordinary old heartbeat",
     "run": "TestAgentPresenceNeverSeenIsInactiveEvenOnAClockNearTheEpoch|TestAgentFrameDoesNotFireWithoutAnAgent"
   },
@@ -1370,7 +1370,7 @@
   {
     "name": "202-autoload-reports-loaded-early",
     "file": "srv/templates/welcome.html",
-    "old": "samplesLoading = true;\n         var statusEl = document.getElementById('samples-status');\n         if (statusEl) { statusEl.textContent = 'Samples: Loading…'; }",
+    "old": "samplesLoading = true;\n         var statusEl = document.getElementById('samples-status');\n         if (statusEl) { statusEl.textContent = 'Samples: Loading\u2026'; }",
     "new": "samplesLoading = true;\n         var statusEl = document.getElementById('samples-status');\n         if (statusEl) { statusEl.textContent = 'Samples: On'; } // deliberately: loaded is reported before the promise resolves, so a pending pack reads as present",
     "run": "TestAutoLoadDoesNotDoubleLoad|TestAutoLoadFailureRendersTheErrorElement"
   },
@@ -1436,5 +1436,19 @@
     "old": "    // equal-text and textarea paths never reach it, and a mid-frame\n    // staleness must resolve to \"dark, re-mark next frame\").\n    clearActiveMarks();",
     "new": "    // deliberately: setCode no longer clears, so a replaced document keeps its stale outlines",
     "run": "TestHighlightVersionChangeClears"
+  },
+  {
+    "name": "212-spanframe-sandbox-drops-transpiler",
+    "file": "srv/static/session.js",
+    "old": "    if (strudel && typeof strudel.transpiler === \"function\") {\n      opts.transpiler = strudel.transpiler;",
+    "new": "    if (false) { // deliberately: the sandbox never takes the transpiler, so it evaluates raw and every hap location is mini-relative",
+    "run": "TestSandboxBuildPassesTranspiler|TestCommittedPatternCarriesDocumentTrueSpans|TestActiveMarkLandsOnDocumentSpan"
+  },
+  {
+    "name": "213-spanframe-sandbox-silent-without-transpiler",
+    "file": "srv/static/session.js",
+    "old": "      console.warn(\"[session] strudel.transpiler unavailable: sandbox evaluates without it, so hap locations are mini-relative, not document spans\");",
+    "new": "      void opts; // deliberately: no warning, so a raw-path sandbox passes silently for a transpiled one",
+    "run": "TestSandboxBuildWithoutTranspilerWarns"
   }
 ]

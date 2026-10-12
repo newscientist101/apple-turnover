@@ -5,7 +5,8 @@
 // and on each new code version:
 //
 //  1. validates in a SEPARATE sandbox repl built with
-//     strudel.repl({getTime:()=>0, defaultOutput:async()=>{}}) whose
+//     strudel.repl({getTime:()=>0, defaultOutput:async()=>{},
+//     transpiler:strudel.transpiler}) whose evaluate() returns the Pattern on
 //     evaluate() returns the Pattern on success and sets state.evalError for
 //     BOTH syntax and runtime errors;
 //  2. only on success commits to the live repl via
@@ -280,11 +281,30 @@
   // evaluate() returns the Pattern on success and sets state.evalError for
   // BOTH syntax and runtime errors -- that split is what makes
   // validate-then-commit possible.
+  //
+  // transpiler:strudel.transpiler is the load-bearing option (issue
+  // strudel-agent-pnn.5). In the pinned @strudel/web@1.3.0 bundle only the
+  // transpiled evaluation path reports document-relative hap locations and
+  // populates state.miniLocations; the raw path reports offsets relative to
+  // the extracted mini string (for s("bd sd hh cp") haps carry [[1,3],...]
+  // while the document spans are [[3,5],...]). The sandbox-validated pattern
+  // is hot-swapped straight into the live repl, so a raw-path pattern would
+  // hand viz.js sandbox-relative offsets to mark against the document.
+  // Passing the same transpiler the live repl was built with keeps the two on
+  // one coordinate frame. A bundle shape without a transpiler still builds --
+  // boot must not crash -- but warns, so a raw-path sandbox can never pass
+  // silently for a transpiled one again.
   function buildSandbox(strudel) {
-    return strudel.repl({
+    var opts = {
       getTime: function () { return 0; },
       defaultOutput: async function () {},
-    });
+    };
+    if (strudel && typeof strudel.transpiler === "function") {
+      opts.transpiler = strudel.transpiler;
+    } else {
+      console.warn("[session] strudel.transpiler unavailable: sandbox evaluates without it, so hap locations are mini-relative, not document spans");
+    }
+    return strudel.repl(opts);
   }
 
   // Gather per-event stats from queryArc: how many haps the validated

@@ -802,7 +802,7 @@
   {
     "name": "109-never-seen-counts-as-active",
     "file": "srv/conductor.go",
-    "old": "\tif lastSeenMS == 0 {\n\t\t// Never seen. This branch is only reachable for a clock within AgentTTL\n\t\t// of the epoch — real time is ~1.7e12 ms, so without it the arithmetic\n\t\t// below would still yield inactive, and a mutation deleting this line\n\t\t// survives every other test. It is kept because the marker is RESERVED\n\t\t// (see AgentPresence) and a server whose clock is wrong must not report\n\t\t// an agent that has never existed as present.\n\t\treturn p\n\t}",
+    "old": "\tif lastSeenMS == 0 {\n\t\t// Never seen. This branch is only reachable for a clock within AgentTTL\n\t\t// of the epoch \u2014 real time is ~1.7e12 ms, so without it the arithmetic\n\t\t// below would still yield inactive, and a mutation deleting this line\n\t\t// survives every other test. It is kept because the marker is RESERVED\n\t\t// (see AgentPresence) and a server whose clock is wrong must not report\n\t\t// an agent that has never existed as present.\n\t\treturn p\n\t}",
     "new": "\t// deliberately: the never-seen marker is treated as an ordinary old heartbeat",
     "run": "TestAgentPresenceNeverSeenIsInactiveEvenOnAClockNearTheEpoch|TestAgentFrameDoesNotFireWithoutAnAgent"
   },
@@ -1548,5 +1548,12 @@
     "old": "    var unlock = function () {\n      var ctx = audioContextOf();\n      if (ctx && ctx.state === \"suspended\" && typeof ctx.resume === \"function\") {\n        var p = ctx.resume();",
     "new": "    var unlock = function () {\n      return; // deliberately: the first gesture never resumes the blocked context\n      var ctx = audioContextOf();\n      if (ctx && ctx.state === \"suspended\" && typeof ctx.resume === \"function\") {\n        var p = ctx.resume();",
     "run": "TestFirstGestureUnlocksBlockedAudioContext"
+  },
+  {
+    "name": "228-empty-document-posts-version-0-verdict",
+    "file": "srv/static/session.js",
+    "old": "      // evaluated, and the server rightly refuses a verdict for it with 400.\n      return undefined;",
+    "new": "      // evaluated, and the server rightly refuses a verdict for it with 400.\n      return postEvalResult(version, true, \"\", { haps: 0 }); // deliberately: the empty document reports a verdict for a version that does not exist",
+    "run": "TestEmptyDocumentReportsNoVerdict"
   }
 ]

@@ -632,9 +632,11 @@
     showMessage(snapshot);
 
     if (!code || !code.trim()) {
-      // Empty document: nothing to validate, nothing to commit. The live
-      // pattern keeps playing untouched.
-      return postEvalResult(version, true, "", { haps: 0 });
+      // Empty document: nothing to validate, nothing to commit, and nothing
+      // to report. The live pattern keeps playing untouched, and no verdict
+      // is POSTed: there is no version 0 (versions start at 1), nothing was
+      // evaluated, and the server rightly refuses a verdict for it with 400.
+      return undefined;
     }
 
     // (1) Validate in the sandbox repl. autostart=false keeps the sandbox

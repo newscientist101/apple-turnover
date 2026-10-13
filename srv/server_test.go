@@ -140,3 +140,24 @@ func TestPerformanceUIShellStructure(t *testing.T) {
 	// only click in this area is the failure-only retry calling the same
 	// guarded function.
 }
+
+// TestRootDeclaresInlineFavicon proves the served shell tells the browser not
+// to fetch /favicon.ico (strudel-agent-dbo.1.3): without an icon link every
+// page load fires a favicon request the server answers 404, which shows as a
+// red console line in DevTools.
+func TestRootDeclaresInlineFavicon(t *testing.T) {
+	server := New()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	server.HandleRoot(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, `<link rel="icon" href="data:,">`) {
+		t.Error("served page has no inline favicon link: browsers will request /favicon.ico and log a 404 console error")
+	}
+}

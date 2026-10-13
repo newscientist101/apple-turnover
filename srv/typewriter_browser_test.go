@@ -8,8 +8,8 @@ package srv
 // displayed document EXACTLY equal to the new version's code. The mechanics
 // are fixed by the design leaf strudel-agent-3f2.2 and implemented in the
 // served editor.js: single prefix/suffix edit region (UTF-16 offsets),
-// pacing via the fake-clock setTimeout chain (STEP_MS=117, DEL_CHUNK=1,
-// INS_CHUNK=1, TOTAL_BUDGET_MS=3510, MAX_STEPS=30), instant clamp for big
+// pacing via the fake-clock setTimeout chain (STEP_MS=80, DEL_CHUNK=1,
+// INS_CHUNK=1, TOTAL_BUDGET_MS=2400, MAX_STEPS=30), instant clamp for big
 // diffs, churn retarget single-flight, textarea instant no-op, and a
 // visible caret (cursorBlinkRate 0 at init plus a marker class on the CM
 // wrapper while animating, so the cursor tracks the edit without
@@ -193,7 +193,7 @@ func twSetDoc(rt *syncRuntime, doc string) {
 	rt.run("window.__twEdits = []; window.__twCursorLog = []; window.__twScrollLog = [];")
 }
 
-// twConverge advances the fake clock one STEP_MS (117ms) at a time until
+// twConverge advances the fake clock one STEP_MS (80ms) at a time until
 // no animation timer remains, failing fast if the design budget is
 // exceeded. It returns the number of advances used.
 func twConverge(rt *syncRuntime, maxAdvances int) int {
@@ -206,7 +206,7 @@ func twConverge(rt *syncRuntime, maxAdvances int) int {
 		if used >= maxAdvances {
 			rt.t.Fatalf("animation did not converge after %d advances: the pacing has no bound", used)
 		}
-		rt.run("window.__advance(117)")
+		rt.run("window.__advance(80)")
 		used++
 	}
 }
@@ -221,7 +221,7 @@ func twPendingTimers(rt *syncRuntime) int64 {
 // time: the animation must land exactly on the new code within the
 // design's MAX_STEPS=30 budget, leave zero timers outstanding, move the
 // caret to the edit frontier, and scroll the frontier into view. The
-// 3-char insert types one char per 117ms tick (DEL_CHUNK=INS_CHUNK=1), so
+// 3-char insert types one char per 80ms tick (DEL_CHUNK=INS_CHUNK=1), so
 // the visible steps are slow enough to read as human edits.
 func TestTypewriterBoundedAnimation(t *testing.T) {
 	rt := newTypewriterRuntime(t)
@@ -270,7 +270,7 @@ func TestTypewriterBoundedAnimation(t *testing.T) {
 		if n := twPendingTimers(rt2); n != 1 {
 			t.Fatalf("before tick %d: __pendingTimers() = %d, want exactly 1: at most one animation timer may be outstanding", i, n)
 		}
-		rt2.run("window.__advance(117)")
+		rt2.run("window.__advance(80)")
 	}
 	if n := twPendingTimers(rt2); n != 0 {
 		t.Fatalf("__pendingTimers() = %d after 11 ticks, want 0: the 6-del/5-ins script needs ceil(6/1)+ceil(5/1)=11 ticks", n)
@@ -435,7 +435,7 @@ func TestTypewriterCursorVisible(t *testing.T) {
 		t.Errorf("wrapper marker class mid-animation = %s, want true: the animating caret rule must apply while stepping", got)
 	}
 	// The caret trail: one setCursor per tick, riding the frontier.
-	rt.run("window.__advance(117)")
+	rt.run("window.__advance(80)")
 	if got := rt.eval("window.__twCursorLog.length").ToInteger(); got == 0 {
 		t.Fatalf("no setCursor call after one tick: the caret never moved to the edit site")
 	}
@@ -494,7 +494,7 @@ func TestTypewriterSupersede(t *testing.T) {
 	first := `s("bd ` + strings.Repeat("h", 21) + `")`
 	b, _ := json.Marshal(first)
 	rt.run("window.strudelEditor.setCode(" + string(b) + ");")
-	rt.run(`window.__advance(117); window.__advance(117);`)
+	rt.run(`window.__advance(80); window.__advance(80);`)
 	if got := twDoc(rt); got == first {
 		t.Fatalf("first animation already converged after 2 advances: the supersede would race nothing")
 	}
@@ -609,7 +609,7 @@ func TestTypewriterHighlightSuppressed(t *testing.T) {
 		t.Errorf("live marks after empty setActiveSpans = %+v, want none: an empty active set must clear all marks", marks)
 	}
 	// A span set arriving after convergence applies immediately: the
-	// window only lasts while animating (<=3510ms by the pacing budget).
+	// window only lasts while animating (<=2400ms by the pacing budget).
 	rt.run(`window.strudelEditor.setActiveSpans([{ start: 3, end: 5 }]);`)
 	if marks := liveHighlightMarks(rt); len(marks) != 1 {
 		t.Errorf("live marks after post-convergence setActiveSpans = %+v, want exactly 1: suppression must end at convergence", marks)

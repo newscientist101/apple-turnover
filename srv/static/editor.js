@@ -33,11 +33,11 @@
   // the edit site, old text is deleted and new text is inserted in bounded
   // steps, ending with the displayed document EXACTLY equal to the new
   // version's code. Normative constants (tests pin them):
-  // STEP_MS=117, DEL_CHUNK=1 char/tick (delete phase first), INS_CHUNK=1
-  // char/tick, TOTAL_BUDGET_MS=3510, MAX_STEPS=30 (=3510/117). A typical
-  // 1-3 character change therefore takes ~117-351ms per visible step,
+  // STEP_MS=80, DEL_CHUNK=1 char/tick (delete phase first), INS_CHUNK=1
+  // char/tick, TOTAL_BUDGET_MS=2400, MAX_STEPS=30 (=2400/80). A typical
+  // 1-3 character change therefore takes ~80-240ms per visible step,
   // slow enough to read; very large changes still jump.
-  var TYPEWRITER_STEP_MS = 117;
+  var TYPEWRITER_STEP_MS = 80;
   var TYPEWRITER_DEL_CHUNK = 1;
   var TYPEWRITER_INS_CHUNK = 1;
   var TYPEWRITER_MAX_STEPS = 30;
@@ -49,7 +49,7 @@
   // (a) SUPPRESS/FREEZE). While the displayed document is mid-edit it is
   // NOT the committed document, so no span can be document-true yet.
   // typewriterAnimating is true from animation start to convergence (at
-  // most the TOTAL_BUDGET 3510ms pacing window); pendingSpans holds at
+  // most the TOTAL_BUDGET 2400ms pacing window); pendingSpans holds at
   // most ONE buffered span set (newer overwrites, never appends),
   // re-applied document-true against the final document at convergence.
   var typewriterAnimating = false;

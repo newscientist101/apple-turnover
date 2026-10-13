@@ -1594,7 +1594,7 @@
   {
     "name": "234-typewriter-pacing-collapsed-back",
     "file": "srv/static/editor.js",
-    "old": "  var TYPEWRITER_STEP_MS = 162;\n  var TYPEWRITER_DEL_CHUNK = 1;\n  var TYPEWRITER_INS_CHUNK = 1;",
+    "old": "  var TYPEWRITER_STEP_MS = 146;\n  var TYPEWRITER_DEL_CHUNK = 1;\n  var TYPEWRITER_INS_CHUNK = 1;",
     "new": "  var TYPEWRITER_STEP_MS = 30; // deliberately: the edit is far too fast to read again\n  var TYPEWRITER_DEL_CHUNK = 8; // deliberately: deletes jump 8 chars per tick again\n  var TYPEWRITER_INS_CHUNK = 4; // deliberately: inserts jump 4 chars per tick again",
     "run": "TestTypewriterBoundedAnimation"
   },

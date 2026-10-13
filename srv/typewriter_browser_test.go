@@ -8,9 +8,12 @@ package srv
 // displayed document EXACTLY equal to the new version's code. The mechanics
 // are fixed by the design leaf strudel-agent-3f2.2 and implemented in the
 // served editor.js: single prefix/suffix edit region (UTF-16 offsets),
-// pacing via the fake-clock setTimeout chain (STEP_MS=30, DEL_CHUNK=8,
-// INS_CHUNK=4, TOTAL_BUDGET_MS=1500, MAX_STEPS=50), instant clamp for big
-// diffs, churn retarget single-flight, textarea instant no-op.
+// pacing via the fake-clock setTimeout chain (STEP_MS=180, DEL_CHUNK=1,
+// INS_CHUNK=1, TOTAL_BUDGET_MS=5400, MAX_STEPS=30), instant clamp for big
+// diffs, churn retarget single-flight, textarea instant no-op, and a
+// visible caret (cursorBlinkRate 0 at init plus a marker class on the CM
+// wrapper while animating, so the cursor tracks the edit without
+// stealing focus).
 //
 // These tests EXECUTE the served session.js + editor.js in goja against the
 // fake clock and a fake CodeMirror 5 (which records replaceRange/setValue
@@ -40,6 +43,28 @@ window.__cmChangeHandlers = [];
 window.__twCursorLog = [];
 window.__twScrollLog = [];
 window.__twSetValueCalls = 0;
+// Option recording (issue strudel-agent-3f2.6): init must request a steady
+// caret via setOption('cursorBlinkRate', 0) when supported.
+window.__twSetOptionLog = [];
+// Wrapper class recording (issue strudel-agent-3f2.6): the fake wrapper
+// element persists per instance and records every classList mutation, so
+// the cursor-visibility test can pin the animating marker class across
+// start and convergence.
+window.__twWrapperClassLog = [];
+window.__twWrapper = {
+  __classes: {},
+  classList: {
+    add: function (cls) {
+      window.__twWrapper.__classes[cls] = true;
+      window.__twWrapperClassLog.push({ op: "add", cls: String(cls) });
+    },
+    remove: function (cls) {
+      delete window.__twWrapper.__classes[cls];
+      window.__twWrapperClassLog.push({ op: "remove", cls: String(cls) });
+    },
+    contains: function (cls) { return !!window.__twWrapper.__classes[cls]; },
+  },
+};
 // Mark recording (issue strudel-agent-3f2.4): the same record shape as
 // highlightEditorPrelude, so liveHighlightMarks works on this harness too.
 // highlightEditorPrelude already defined window.__liveMarks; this fake only
@@ -111,8 +136,8 @@ window.CodeMirror = {
       lineCount: function () { return 1; },
       addLineClass: function (line, where, cls) { window.__twClampedLine = line; },
       removeLineClass: function () {},
-      getWrapperElement: function () { return null; },
-      setOption: function () {},
+      getWrapperElement: function () { return window.__twWrapper; },
+      setOption: function (name, value) { window.__twSetOptionLog.push({ name: String(name), value: value }); },
       on: function (ev, h) { if (ev === "changes") { window.__cmChangeHandlers.push(h); } },
     };
     window.__cm = cm;
@@ -168,9 +193,9 @@ func twSetDoc(rt *syncRuntime, doc string) {
 	rt.run("window.__twEdits = []; window.__twCursorLog = []; window.__twScrollLog = [];")
 }
 
-// twConverge advances the fake clock STEP_MS at a time until no animation
-// timer remains, failing fast if the design budget is exceeded. It returns
-// the number of advances used.
+// twConverge advances the fake clock one STEP_MS (180ms) at a time until
+// no animation timer remains, failing fast if the design budget is
+// exceeded. It returns the number of advances used.
 func twConverge(rt *syncRuntime, maxAdvances int) int {
 	rt.t.Helper()
 	used := 0
@@ -181,7 +206,7 @@ func twConverge(rt *syncRuntime, maxAdvances int) int {
 		if used >= maxAdvances {
 			rt.t.Fatalf("animation did not converge after %d advances: the pacing has no bound", used)
 		}
-		rt.run("window.__advance(30)")
+		rt.run("window.__advance(180)")
 		used++
 	}
 }
@@ -194,8 +219,10 @@ func twPendingTimers(rt *syncRuntime) int64 {
 
 // TestTypewriterBoundedAnimation drives s(bd)->s(bd cp) one STEP_MS at a
 // time: the animation must land exactly on the new code within the
-// design's MAX_STEPS=50 budget, leave zero timers outstanding, move the
-// caret to the edit frontier, and scroll the frontier into view.
+// design's MAX_STEPS=30 budget, leave zero timers outstanding, move the
+// caret to the edit frontier, and scroll the frontier into view. The
+// 3-char insert types one char per 180ms tick (DEL_CHUNK=INS_CHUNK=1), so
+// the visible steps are slow enough to read as human edits.
 func TestTypewriterBoundedAnimation(t *testing.T) {
 	rt := newTypewriterRuntime(t)
 	twSetDoc(rt, `s("bd")`)
@@ -203,9 +230,9 @@ func TestTypewriterBoundedAnimation(t *testing.T) {
 	if got := twDoc(rt); got == `s("bd cp")` {
 		t.Fatalf("setCode landed instantly: the edit was not simulated as a bounded animation")
 	}
-	used := twConverge(rt, 60)
-	if used > 50 {
-		t.Errorf("converged in %d advances, want <= 50 (MAX_STEPS): the pacing budget is violated", used)
+	used := twConverge(rt, 40)
+	if used > 30 {
+		t.Errorf("converged in %d advances, want <= 30 (MAX_STEPS): the pacing budget is violated", used)
 	}
 	if got := twDoc(rt); got != `s("bd cp")` {
 		t.Errorf("final document = %q, want %q: the animation must end exactly on the new code", got, `s("bd cp")`)
@@ -225,26 +252,28 @@ func TestTypewriterBoundedAnimation(t *testing.T) {
 	}
 
 	// Phase ordering on a two-phase diff: the delete region drains first
-	// (up to DEL_CHUNK=8 chars/tick, tiled contiguously from the region
-	// end), then the insert types (up to INS_CHUNK=4 chars/tick) at the
-	// cursor — each tick collapsing to exactly one 'changes' event.
+	// (one char/tick, tiled contiguously from the region end), then the
+	// insert types (one char/tick) at the cursor — each tick collapsing
+	// to exactly one 'changes' event. A 6-delete/5-insert script needs
+	// ceil(6/1)+ceil(5/1)=11 ticks, which also proves the old 8/4 chunk
+	// sizes are gone: the first delete tick removes exactly one char.
 	rt2 := newTypewriterRuntime(t)
-	oldDoc := `s("` + strings.Repeat("d", 20) + `")`
-	newDoc := `s("` + strings.Repeat("i", 9) + `")`
+	oldDoc := `s("` + strings.Repeat("d", 6) + `")`
+	newDoc := `s("` + strings.Repeat("i", 5) + `")`
 	twSetDoc(rt2, oldDoc)
 	b, _ := json.Marshal(newDoc)
 	rt2.run("window.strudelEditor.setCode(" + string(b) + ");")
 	if got := twDoc(rt2); got == newDoc {
 		t.Fatalf("two-phase setCode landed instantly: the edit was not simulated")
 	}
-	for i := 0; i < 6; i++ {
+	for i := 0; i < 11; i++ {
 		if n := twPendingTimers(rt2); n != 1 {
 			t.Fatalf("before tick %d: __pendingTimers() = %d, want exactly 1: at most one animation timer may be outstanding", i, n)
 		}
-		rt2.run("window.__advance(30)")
+		rt2.run("window.__advance(180)")
 	}
 	if n := twPendingTimers(rt2); n != 0 {
-		t.Fatalf("__pendingTimers() = %d after 6 ticks, want 0: the 20-del/9-ins script needs ceil(20/8)+ceil(9/4)=6 ticks", n)
+		t.Fatalf("__pendingTimers() = %d after 11 ticks, want 0: the 6-del/5-ins script needs ceil(6/1)+ceil(5/1)=11 ticks", n)
 	}
 	if got := twDoc(rt2); got != newDoc {
 		t.Fatalf("final document = %q, want %q", got, newDoc)
@@ -261,15 +290,17 @@ func TestTypewriterBoundedAnimation(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &edits); err != nil {
 		t.Fatalf("decoding edit log %s: %v", raw, err)
 	}
-	// Region [3,23): prefix s(" is 3 chars, suffix ") is 2.
+	// Region [3,9): prefix s(" is 3 chars, suffix ") is 2.
 	want := []struct {
 		Text string
 		Del  int
 		From int
 		To   int
 	}{
-		{"", 8, 15, 23}, {"", 8, 7, 15}, {"", 4, 3, 7},
-		{"iiii", 0, 3, 3}, {"iiii", 0, 7, 7}, {"i", 0, 11, 11},
+		{"", 1, 8, 9}, {"", 1, 7, 8}, {"", 1, 6, 7},
+		{"", 1, 5, 6}, {"", 1, 4, 5}, {"", 1, 3, 4},
+		{"i", 0, 3, 3}, {"i", 0, 4, 4}, {"i", 0, 5, 5},
+		{"i", 0, 6, 6}, {"i", 0, 7, 7},
 	}
 	if len(edits) != len(want) {
 		t.Fatalf("edit log has %d entries, want %d (one replaceRange per tick): %s", len(edits), len(want), raw)
@@ -279,27 +310,28 @@ func TestTypewriterBoundedAnimation(t *testing.T) {
 			t.Errorf("tick %d edit = %+v, want text=%q del=%d [%d,%d): deletes tile from the region end first, then inserts type at the cursor", i, edits[i], w.Text, w.Del, w.From, w.To)
 		}
 	}
-	if got := rt2.eval("window.__cmChanges").ToInteger(); got != 6 {
-		t.Errorf("__cmChanges = %d, want 6: each tick's operation() must collapse to exactly one changes-event", got)
+	if got := rt2.eval("window.__cmChanges").ToInteger(); got != 11 {
+		t.Errorf("__cmChanges = %d, want 11: each tick's operation() must collapse to exactly one changes-event", got)
 	}
-	if got := rt2.eval("JSON.stringify(window.__twCursorLog)").String(); got != "[15,7,3,7,11,12]" {
-		t.Errorf("caret log = %s, want [15,7,3,7,11,12]: the cursor parks at the shrinking delete edge, then rides the typed edge", got)
+	if got := rt2.eval("JSON.stringify(window.__twCursorLog)").String(); got != "[8,7,6,5,4,3,4,5,6,7,8]" {
+		t.Errorf("caret log = %s, want [8,7,6,5,4,3,4,5,6,7,8]: the cursor parks at the shrinking delete edge, then rides the typed edge", got)
 	}
-	if got := rt2.eval("JSON.stringify(window.__twScrollLog)").String(); got != "[15,7,3,7,11,12]" {
+	if got := rt2.eval("JSON.stringify(window.__twScrollLog)").String(); got != "[8,7,6,5,4,3,4,5,6,7,8]" {
 		t.Errorf("scroll log = %s, want the caret trail: every tick scrolls the frontier into view", got)
 	}
 }
 
 // TestTypewriterExactFinalState pins the derivation edges: empty->code,
 // code->empty, the identical no-op (synchronous, zero timers), unicode
-// offsets in UTF-16 code units, and the 64 KiB clamp path (instant setValue
-// + zero animation timers).
+// offsets in UTF-16 code units, the 64 KiB clamp path (instant setValue +
+// zero animation timers), and the clamp boundary (an estimate-35 diff
+// jumps instantly while an estimate-30 diff still animates).
 func TestTypewriterExactFinalState(t *testing.T) {
 	t.Run("empty-to-code", func(t *testing.T) {
 		rt := newTypewriterRuntime(t)
 		twSetDoc(rt, "")
 		rt.run(`window.strudelEditor.setCode('s("bd")');`)
-		twConverge(rt, 60)
+		twConverge(rt, 40)
 		if got := twDoc(rt); got != `s("bd")` {
 			t.Errorf("final document = %q, want %q", got, `s("bd")`)
 		}
@@ -308,7 +340,7 @@ func TestTypewriterExactFinalState(t *testing.T) {
 		rt := newTypewriterRuntime(t)
 		twSetDoc(rt, `s("bd")`)
 		rt.run(`window.strudelEditor.setCode('');`)
-		twConverge(rt, 60)
+		twConverge(rt, 40)
 		if got := twDoc(rt); got != "" {
 			t.Errorf("final document = %q, want empty", got)
 		}
@@ -333,7 +365,7 @@ func TestTypewriterExactFinalState(t *testing.T) {
 		target := "s(\"bd \U0001F920 cp\")"
 		b, _ := json.Marshal(target)
 		rt.run("window.strudelEditor.setCode(" + string(b) + ");")
-		twConverge(rt, 60)
+		twConverge(rt, 40)
 		if got := twDoc(rt); got != target {
 			t.Errorf("final document = %q, want the unicode target byte-exactly: offsets are UTF-16 code units", got)
 		}
@@ -354,6 +386,98 @@ func TestTypewriterExactFinalState(t *testing.T) {
 			t.Error("setValue was never called on the clamp path: big diffs must jump via instant setValue")
 		}
 	})
+	t.Run("clamp-boundary", func(t *testing.T) {
+		rt := newTypewriterRuntime(t)
+		// 20 deletes + 21 inserts: ceil(20/1)+ceil(21/1)=41 steps, which
+		// exceeds MAX_STEPS=30 and must clamp to the instant setValue
+		// path with zero animation timers.
+		twSetDoc(rt, `s("`+strings.Repeat("d", 20)+`")`)
+		big := `s("` + strings.Repeat("i", 15) + ` extra")`
+		b, _ := json.Marshal(big)
+		rt.run("window.__twSetValueCalls = 0; window.strudelEditor.setCode(" + string(b) + ");")
+		if got := twDoc(rt); got != big {
+			t.Errorf("clamp-boundary document = %q, want the jump target: an estimate-41 diff must land instantly", got)
+		}
+		if n := twPendingTimers(rt); n != 0 {
+			t.Errorf("__pendingTimers() = %d on the clamp boundary, want 0: the clamp path armed an animation timer", n)
+		}
+		if got := rt.eval("window.__twSetValueCalls").ToInteger(); got == 0 {
+			t.Error("setValue was never called on the clamp boundary: over-budget diffs must jump via instant setValue")
+		}
+	})
+}
+
+// TestTypewriterCursorVisible proves the caret is VISIBLE while the edit
+// animates, without stealing focus (a focus steal would trip setCode's
+// hasFocus guard on the next frame). It pins three legs of the
+// strudel-agent-3f2.6 mechanism: init calls setOption('cursorBlinkRate',
+// 0) when supported (steady caret per the 3f2.1 live finding); every tick
+// calls setCursor at the frontier (the per-tick caret trail); and the
+// 'strudel-animating' marker class is added to the CM wrapper at
+// animation start and removed at convergence on the stepped landing path.
+func TestTypewriterCursorVisible(t *testing.T) {
+	rt := newTypewriterRuntime(t)
+	// Init (via the served editor.js boot at load) must have requested
+	// a steady caret through the supported setOption seam.
+	blink := rt.eval(`JSON.stringify(window.__twSetOptionLog.filter(function (e) {
+	  return e.name === 'cursorBlinkRate';
+	}))`).String()
+	if !strings.Contains(blink, "0") {
+		t.Errorf("setOption log = %s, want a cursorBlinkRate 0 entry: init must steady the caret when supported", rt.eval("JSON.stringify(window.__twSetOptionLog)").String())
+	}
+	twSetDoc(rt, `s("bd")`)
+	rt.run(`window.strudelEditor.setCode('s("bd cp")');`)
+	if got := twDoc(rt); got == `s("bd cp")` {
+		t.Fatalf("setCode landed instantly: the animation never started, so caret visibility races nothing")
+	}
+	// The marker class must be present mid-animation.
+	if got := rt.eval("window.__twWrapper.classList.contains('strudel-animating')").String(); got != "true" {
+		t.Errorf("wrapper marker class mid-animation = %s, want true: the animating caret rule must apply while stepping", got)
+	}
+	// The caret trail: one setCursor per tick, riding the frontier.
+	rt.run("window.__advance(180)")
+	if got := rt.eval("window.__twCursorLog.length").ToInteger(); got == 0 {
+		t.Fatalf("no setCursor call after one tick: the caret never moved to the edit site")
+	}
+	used := twConverge(rt, 40)
+	if used > 30 {
+		t.Errorf("converged in %d advances, want <= 30 (MAX_STEPS)", used)
+	}
+	if got := twDoc(rt); got != `s("bd cp")` {
+		t.Errorf("final document = %q, want %q", got, `s("bd cp")`)
+	}
+	// The marker class must be gone after the stepped landing.
+	if got := rt.eval("window.__twWrapper.classList.contains('strudel-animating')").String(); got != "false" {
+		t.Errorf("wrapper marker class after convergence = %s, want false: typewriterFinish must remove it on every landing path", got)
+	}
+	// The add/remove pairing: exactly one add (at animation start) and a
+	// trailing remove (the convergence landing). The log opens with one
+	// more remove: setCode unconditionally clears the abandoned script's
+	// marker before deriving the new script, so a superseded animation
+	// can never leak its class — the no-op remove on a fresh start is
+	// that same discipline, not an imbalance.
+	log := rt.eval("JSON.stringify(window.__twWrapperClassLog)").String()
+	adds := strings.Count(log, `"op":"add","cls":"strudel-animating"`)
+	if adds != 1 {
+		t.Errorf("wrapper class log = %s, want exactly one add of strudel-animating: the marker must be added once at animation start", log)
+	}
+	if !strings.HasSuffix(log[:len(log)-1], `"op":"remove","cls":"strudel-animating"}`) {
+		t.Errorf("wrapper class log = %s, want a trailing remove of strudel-animating: the marker must be removed at convergence", log)
+	}
+	// Focus was never stolen: the fake CM reports unfocused throughout,
+	// so the next setCode's hasFocus guard still passes.
+	if got := rt.eval("window.__cm.hasFocus()").String(); got != "false" {
+		t.Errorf("cm.hasFocus() = %s, want false: the animation must not steal focus", got)
+	}
+	// The served stylesheet must carry the caret rule the marker
+	// references — a marker class with no rule is an invisible feature
+	// (the same served-bytes discipline as TestHighlightStyleRuleServed).
+	css := servedStyleCSS(t)
+	for _, want := range []string{"strudel-animating", ".CodeMirror-cursor"} {
+		if !strings.Contains(css, want) {
+			t.Errorf("style.css carries no %q under the animating marker: the cursor would stay hidden mid-edit", want)
+		}
+	}
 }
 
 // TestTypewriterSupersede drives two versions into the animation window:
@@ -363,14 +487,14 @@ func TestTypewriterExactFinalState(t *testing.T) {
 func TestTypewriterSupersede(t *testing.T) {
 	rt := newTypewriterRuntime(t)
 	twSetDoc(rt, `s("bd")`)
-	// The first version needs 5 ticks (20 inserts at INS_CHUNK=4), so it
+	// The first version needs 21 ticks (21 inserts at INS_CHUNK=1), so it
 	// is provably still in flight when the second version lands: a
 	// supersede of an already-converged script would prove nothing about
 	// cancellation (and let the no-cancel mutation survive).
-	first := `s("bd ` + strings.Repeat("h", 20) + `")`
+	first := `s("bd ` + strings.Repeat("h", 21) + `")`
 	b, _ := json.Marshal(first)
 	rt.run("window.strudelEditor.setCode(" + string(b) + ");")
-	rt.run(`window.__advance(30); window.__advance(30);`)
+	rt.run(`window.__advance(180); window.__advance(180);`)
 	if got := twDoc(rt); got == first {
 		t.Fatalf("first animation already converged after 2 advances: the supersede would race nothing")
 	}
@@ -381,9 +505,9 @@ func TestTypewriterSupersede(t *testing.T) {
 	if n := twPendingTimers(rt); n > 1 {
 		t.Fatalf("__pendingTimers() = %d after supersede, want <= 1: the stale script was not cancelled", n)
 	}
-	used := twConverge(rt, 60)
-	if used > 50 {
-		t.Errorf("converged in %d advances after the last setCode, want <= 50: retarget must restart within budget", used)
+	used := twConverge(rt, 40)
+	if used > 30 {
+		t.Errorf("converged in %d advances after the last setCode, want <= 30: retarget must restart within budget", used)
 	}
 	if got := twDoc(rt); got != `s("bd cp")` {
 		t.Errorf("final document = %q, want the LATEST code %q: the stale animation won", got, `s("bd cp")`)
@@ -424,7 +548,7 @@ window.strudelSession.handleFrame(JSON.stringify({
 	if got := rt.eval(`window.__fetchLog.filter(function (f) { return f.path === "/api/eval-result"; })[0].at`).ToInteger(); got != 1000 {
 		t.Errorf("verdict recorded at fake-clock %d, want 1000 (frame arrival): the verdict waited for the animation", got)
 	}
-	twConverge(rt, 60)
+	twConverge(rt, 40)
 	if got := twDoc(rt); got != `s("bd cp")` {
 		t.Errorf("final document = %q after convergence, want the version code: the view must still land", got)
 	}
@@ -467,7 +591,7 @@ func TestTypewriterHighlightSuppressed(t *testing.T) {
 	// Convergence re-applies the LATEST buffered set document-true
 	// against the final document: exactly the [3,5) the spanframe tests
 	// pin, never the overwritten [6,8).
-	twConverge(rt, 60)
+	twConverge(rt, 40)
 	if got := twDoc(rt); got != target {
 		t.Fatalf("final document = %q, want %q: the animation must land before marks are asserted", got, target)
 	}

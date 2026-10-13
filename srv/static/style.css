@@ -302,6 +302,18 @@ html, body {
   border-left: 1px solid var(--accent-magenta);
 }
 
+/* Visible caret while the typewriter animation runs (issue
+   strudel-agent-3f2.6): editor.js adds the strudel-animating marker class
+   to the CodeMirror wrapper at animation start and removes it at
+   convergence. These rules keep the cursor visible WITHOUT stealing focus
+   and WITHOUT changing the unfocused/read-only behavior outside the
+   marker. */
+.editor-region .strudel-animating .CodeMirror-cursors,
+.editor-region .strudel-animating .CodeMirror-cursor {
+  visibility: visible !important;
+  opacity: 1 !important;
+}
+
 /* Subtle landed-version flash: a one-shot background pulse, restarted per
    version by editor.js (class remove + reflow + re-add). */
 @keyframes editor-flash {

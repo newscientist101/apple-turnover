@@ -33,12 +33,14 @@
   // the edit site, old text is deleted and new text is inserted in bounded
   // steps, ending with the displayed document EXACTLY equal to the new
   // version's code. Normative constants (tests pin them):
-  // STEP_MS=30, DEL_CHUNK=8 chars/tick (delete phase first), INS_CHUNK=4
-  // chars/tick, TOTAL_BUDGET_MS=1500, MAX_STEPS=50 (=1500/30).
-  var TYPEWRITER_STEP_MS = 30;
-  var TYPEWRITER_DEL_CHUNK = 8;
-  var TYPEWRITER_INS_CHUNK = 4;
-  var TYPEWRITER_MAX_STEPS = 50;
+  // STEP_MS=180, DEL_CHUNK=1 char/tick (delete phase first), INS_CHUNK=1
+  // char/tick, TOTAL_BUDGET_MS=5400, MAX_STEPS=30 (=5400/180). A typical
+  // 1-3 character change therefore takes ~180-540ms per visible step,
+  // slow enough to read; very large changes still jump.
+  var TYPEWRITER_STEP_MS = 180;
+  var TYPEWRITER_DEL_CHUNK = 1;
+  var TYPEWRITER_INS_CHUNK = 1;
+  var TYPEWRITER_MAX_STEPS = 30;
   // At most ONE animation script is pending: a newer setCode cancels the
   // in-flight setTimeout and re-derives from the live buffer (churn
   // RETARGET, single-flight). The handle is the only cross-tick state.
@@ -47,7 +49,7 @@
   // (a) SUPPRESS/FREEZE). While the displayed document is mid-edit it is
   // NOT the committed document, so no span can be document-true yet.
   // typewriterAnimating is true from animation start to convergence (at
-  // most the TOTAL_BUDGET 1500ms pacing window); pendingSpans holds at
+  // most the TOTAL_BUDGET 5400ms pacing window); pendingSpans holds at
   // most ONE buffered span set (newer overwrites, never appends),
   // re-applied document-true against the final document at convergence.
   var typewriterAnimating = false;
@@ -81,6 +83,19 @@
           readOnly: readOnly,
           viewportMargin: Infinity,
         });
+        // Steady caret (issue strudel-agent-3f2.6; the 3f2.1 live finding
+        // is that the fake caret is visible only when focused, and
+        // blinkRate 0 makes it steady). Requested once at init when the
+        // instance supports setOption; focusing the editor is NOT an
+        // option (it would trip setCode's hasFocus guard on the next
+        // frame), so the caret is steadied without stealing focus.
+        if (cm && typeof cm.setOption === 'function') {
+          try {
+            cm.setOption('cursorBlinkRate', 0);
+          } catch (err) {
+            // Caret steadiness is cosmetic best-effort, never load-bearing.
+          }
+        }
       } catch (err) {
         cm = null;
       }
@@ -150,6 +165,37 @@
         Math.ceil(insLen / TYPEWRITER_INS_CHUNK);
   }
 
+  // typewriterMarker toggles the 'strudel-animating' class on the
+  // CodeMirror wrapper while an animation runs (issue strudel-agent-3f2.6).
+  // The stylesheet keeps .CodeMirror-cursor visible under that marker, so
+  // the caret tracks the edit WITHOUT stealing focus (a focus steal would
+  // trip setCode's hasFocus guard on the next frame). Feature-detected via
+  // getWrapperElement: no wrapper, no classList, no marker — and never
+  // throws, so a hostile host cannot break the animation.
+  function typewriterMarker(on) {
+    if (!cm || typeof cm.getWrapperElement !== 'function') {
+      return;
+    }
+    var root = null;
+    try {
+      root = cm.getWrapperElement();
+    } catch (err) {
+      return;
+    }
+    if (!root || !root.classList) {
+      return;
+    }
+    try {
+      if (on) {
+        root.classList.add('strudel-animating');
+      } else {
+        root.classList.remove('strudel-animating');
+      }
+    } catch (err) {
+      // The marker is cosmetic; it must never break the animation.
+    }
+  }
+
   // typewriterFinish lands the script exactly and disarms. Every path
   // through the animation — stepped convergence, instant clamp, supersede
   // landing — funnels here so the end state is provably exact. Landing
@@ -159,6 +205,11 @@
   // not exist yet).
   function typewriterFinish(target) {
     typewriterTimer = null;
+    // The marker leaves on EVERY landing path: stepped convergence, the
+    // instant clamp, and the drift-guard landing all funnel here. (The
+    // supersede reset in setCode removes it too, for the abandoned script
+    // that never lands.)
+    typewriterMarker(false);
     if (cm.getValue() !== target) {
       cm.setValue(target);
     }
@@ -171,9 +222,9 @@
   }
 
   // typewriterStep runs one tick of the in-flight script: delete phase
-  // first (shrink the delete region by up to DEL_CHUNK chars from its
-  // END, cursor parked at the frontier), then insertion phase (up to
-  // INS_CHUNK chars at the cursor). Each tick is wrapped in
+  // first (shrink the delete region by one char from its END, cursor
+  // parked at the frontier), then insertion phase (one char at the
+  // cursor). Each tick is wrapped in
   // cm.operation() (one changes-event + one layout pass per tick) and
   // followed by setCursor(frontier) + scrollIntoView(frontier).
   function typewriterStep(script) {
@@ -229,7 +280,7 @@
 
   // typewriterAnimate arms the bounded animation for one script, or
   // clamps to the instant path when the estimate exceeds MAX_STEPS.
-  // CLAMP (big changes jump): est > 50 -> instant cm.setValue(N) +
+  // CLAMP (big changes jump): est > 30 -> instant cm.setValue(N) +
   // flashUpdate exactly as today, zero animation timers.
   function typewriterAnimate(script) {
     if (typewriterEstimate(script.delLeft, script.insert.length) > TYPEWRITER_MAX_STEPS) {
@@ -237,6 +288,7 @@
       return;
     }
     typewriterAnimating = true;
+    typewriterMarker(true);
     typewriterTimer = setTimeout(function () { typewriterStep(script); }, TYPEWRITER_STEP_MS);
   }
 
@@ -260,6 +312,10 @@
     // instant path, which converges synchronously below) starts clean.
     typewriterAnimating = false;
     pendingSpans = null;
+    // The abandoned script's marker class leaves with the script (it
+    // never lands, so typewriterFinish never runs for it); the new
+    // animation below re-adds the marker if it animates.
+    typewriterMarker(false);
     if (cm) {
       if (cm.hasFocus && cm.hasFocus()) {
         return;

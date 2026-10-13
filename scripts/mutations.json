@@ -1590,5 +1590,19 @@
     "old": "    if (typewriterAnimating) {\n      clearActiveMarks();\n      if (spans && typeof spans.length === 'number' && spans.length > 0) {",
     "new": "    if (false) { // deliberately: marks are placed mid-animation again, onto text that does not exist yet\n      clearActiveMarks();\n      if (spans && typeof spans.length === 'number' && spans.length > 0) {",
     "run": "TestTypewriterHighlightSuppressed"
+  },
+  {
+    "name": "234-typewriter-pacing-collapsed-back",
+    "file": "srv/static/editor.js",
+    "old": "  var TYPEWRITER_STEP_MS = 180;\n  var TYPEWRITER_DEL_CHUNK = 1;\n  var TYPEWRITER_INS_CHUNK = 1;",
+    "new": "  var TYPEWRITER_STEP_MS = 30; // deliberately: the edit is far too fast to read again\n  var TYPEWRITER_DEL_CHUNK = 8; // deliberately: deletes jump 8 chars per tick again\n  var TYPEWRITER_INS_CHUNK = 4; // deliberately: inserts jump 4 chars per tick again",
+    "run": "TestTypewriterBoundedAnimation"
+  },
+  {
+    "name": "235-typewriter-cursor-marker-removed",
+    "file": "srv/static/editor.js",
+    "old": "      if (on) {\n        root.classList.add('strudel-animating');\n      } else {",
+    "new": "      if (on) {\n        void root; // deliberately: the animating marker class is never added, so the caret stays hidden\n      } else {",
+    "run": "TestTypewriterCursorVisible"
   }
 ]

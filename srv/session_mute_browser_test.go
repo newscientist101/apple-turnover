@@ -155,6 +155,16 @@ func driveFrame(t *testing.T, rt *syncRuntime, frame string) {
 	rt.settle()
 }
 
+// driveFrameTo drives a frame at the stub live repl that boot resolved with,
+// which is the repl whose start/stop calls the mute tests count. Most tests
+// use driveFrame (the harness's generic live repl); the boot-retry tests use
+// this one because they replace __liveStub with a pattern-gated stub.
+func driveFrameTo(t *testing.T, rt *syncRuntime, frame string) {
+	t.Helper()
+	rt.run(`window.strudelSession.handleFrame(` + frame + `, window.__sandbox, window.__liveStub);`)
+	rt.settle()
+}
+
 func transportFrame(playing bool) string {
 	if playing {
 		return `JSON.stringify({ kind: "transport", snapshot: { playing: true } })`
@@ -350,6 +360,118 @@ func TestUnmuteIntoHushedServerStaysSilent(t *testing.T) {
 	}
 	if mutePlaying(t, rt) {
 		t.Error("button carries the playing class while shared intent is stopped: the class tracks effective audibility")
+	}
+}
+
+// TestBootRetriesStartUntilPatternLands pins the strudel-agent-3q0.6 boot
+// ordering: on a fresh page the boot start fires before the first code
+// commit lands, so the live repl has no pattern yet and its start() is
+// silently ineffective (the pinned bundle's scheduler throws "no pattern
+// set" when nothing was ever committed). The client must therefore retry
+// the pending boot start when the first commit lands, so the tab becomes
+// audible without a click. The stub models the real ordering: start()
+// before any setPattern is ignored, setPattern records a pattern, and a
+// later start() takes effect. Mute stays local throughout: the retry only
+// re-applies effective audio (desiredPlaying && !localMuted).
+func TestBootRetriesStartUntilPatternLands(t *testing.T) {
+	rt := newMuteRuntime(t)
+	rt.run(`window.__warns = [];
+	window.__liveStarts = 0;
+	window.__liveStops = 0;
+	window.__liveHasPattern = false;
+	window.__liveStub = {
+	  start: function () {
+	    // The pinned bundle's scheduler start() with no pattern set
+	    // REJECTS: model it as a throw of the bundle's own message, so the
+	    // test pins both halves of the ordering contract -- the boot start
+	    // is attempted against a pattern-less repl (and must stay silent),
+	    // then retried once the first commit lands (and must take effect).
+	    if (window.__liveHasPattern) { window.__liveStarts++; }
+	    else { throw new Error("Scheduler: no pattern set! call .setPattern first."); }
+	  },
+	  stop: function () { window.__liveStops++; },
+	  // NOTE: a harness thenable, not a real promise: the suite's apiStub
+	  // never assimilates under await, so the commit's await never drains
+	  // headless. Fire the recorded continuation by hand to model the real
+	  // browser, where setPattern resolves and the commit lands.
+	  setPattern: function () { window.__liveHasPattern = true; return { then: function (cb) { window.__commitCb = cb; return apiStub(); }, catch: function () { return apiStub(); } }; },
+	};`)
+	bootSettle(rt)
+	// Install the warn recorder AFTER bootSettle: boot() itself runs before
+	// this line, so recording here captures only the retry window, not the
+	// boot start. The silence assertion below therefore pins the retry path
+	// (mutation 222 removes the swallow and must trip it), while the fact
+	// that the boot start throws the bundle's own message is pinned by the
+	// starts==0 assertion above.
+	rt.run(`console.warn = function (m) { window.__warns.push(String(m)); };`)
+	// The boot start fired into a pattern-less repl and was ignored: no
+	// effective start happened, but the button already reads Mute.
+	if got := liveStarts(t, rt); got != 0 {
+		t.Fatalf("live repl starts after pattern-less boot = %d, want 0 (the boot start must be ineffective without a pattern)", got)
+	}
+	if got := muteLabel(t, rt); got != "Mute" {
+		t.Fatalf("button label after boot = %q, want %q", got, "Mute")
+	}
+	// The first code commit lands (snapshot frame carrying a document),
+	// which must retry the pending boot start now that audio is possible.
+	driveFrameTo(t, rt, `JSON.stringify({ kind: "snapshot", snapshot: { version: 1, code: 's(\\"bd\\")', anchor: null, playing: true } })`)
+	rt.run(`window.__commitCb && window.__commitCb(undefined)`)
+	rt.settle()
+	if got := liveStarts(t, rt); got < 1 {
+		t.Errorf("live repl starts after the first commit landed = %d, want >= 1: the pending boot start must be re-applied once a pattern exists", got)
+	}
+	if got := rt.eval(`window.strudelSession.getMutedState()`).String(); got != "false" {
+		t.Errorf("getMutedState() after boot retry = %s, want false: the retry must not touch the local mute gate", got)
+	}
+	// The audio retry itself must never touch the wire: the only fetches a
+	// code frame may produce are the eval verdict and the sync observation
+	// (the agent's feedback loop), never a transport POST.
+	for _, p := range strings.Split(fetchPaths(t, rt), ",") {
+		if p == "/api/hush" || p == "/api/play" {
+			t.Errorf("boot retry fetched %q: starting local audio must never POST to a transport endpoint", p)
+		}
+	}
+	// The missing-pattern rejection is the expected boot ordering, not a
+	// defect: refreshAudio must swallow it, not warn. A warn here would
+	// train operators to ignore the audio-failure signal. The recorder is
+	// installed after boot on purpose (see above), so this pins the swallow
+	// on every refreshAudio call in the retry window, including the commit's
+	// own re-apply.
+	if got := rt.eval(`window.__warns.join("\n")`).String(); strings.Contains(got, "playing state") {
+		t.Errorf("boot ordering produced an audio warning %q: the missing-pattern start must be swallowed, not warned", got)
+	}
+}
+
+// TestBootRetryRespectsMuteBeforeFirstCommit pins the other half of the
+// strudel-agent-3q0.6 contract: muting between boot and the first commit
+// cancels the pending start, so a user who mutes during load stays silent
+// when the pattern lands.
+func TestBootRetryRespectsMuteBeforeFirstCommit(t *testing.T) {
+	rt := newMuteRuntime(t)
+	rt.run(`window.__liveStarts = 0;
+	window.__liveStops = 0;
+	window.__liveHasPattern = false;
+	window.__liveStub = {
+	  start: function () {
+	    if (window.__liveHasPattern) { window.__liveStarts++; }
+	  },
+	  stop: function () { window.__liveStops++; },
+	  // NOTE: a harness thenable, not a real promise: the suite's apiStub
+	  // never assimilates under await, so the commit's await never drains
+	  // headless. Fire the recorded continuation by hand to model the real
+	  // browser, where setPattern resolves and the commit lands.
+	  setPattern: function () { window.__liveHasPattern = true; return { then: function (cb) { window.__commitCb = cb; return apiStub(); }, catch: function () { return apiStub(); } }; },
+	};`)
+	bootSettle(rt)
+	rt.run(`window.strudelSession.setMutedState(true)`)
+	driveFrameTo(t, rt, `JSON.stringify({ kind: "snapshot", snapshot: { version: 1, code: 's(\\"bd\\")', anchor: null, playing: true } })`)
+	rt.run(`window.__commitCb && window.__commitCb(undefined)`)
+	rt.settle()
+	if got := liveStarts(t, rt); got != 0 {
+		t.Errorf("live repl starts after muting before the first commit = %d, want 0: the pending boot start must honour the mute gate", got)
+	}
+	if got := muteLabel(t, rt); got != "Unmute" {
+		t.Errorf("button label = %q, want %q", got, "Unmute")
 	}
 }
 

@@ -56,12 +56,23 @@
   var localMuted = false;       // Per-browser mute gate (strudel-agent-3q0):
                                 // toggled only by the Mute button, never by
                                 // transport frames, never written to the wire.
+  // Boot audio is pending until the first pattern lands (strudel-agent-3q0.6):
+  // the boot start fires before any code commit, so the live repl has no
+  // pattern yet and the pinned bundle's scheduler start() with nothing ever
+  // committed throws "Scheduler: no pattern set!" -- the start is silently
+  // ineffective and the tab sits stopped behind a Mute label. True from boot
+  // until the first SUCCESSFUL commit lands; the landed commit re-applies
+  // effective audio once, then clears it. Validation failures never consume
+  // it. Never written, never read, by transport frames: only the first
+  // commit consumes it, and only the Mute button's gate decides whether it
+  // may sound.
   // Latest live Pattern committed via setPattern (for viz hooks).
   var currentPattern = null;
   // Handle for the commit scheduled at the next cycle boundary, so a NEWER
   // version can supersede a PENDING one (issue .3vo.8.2). Null when nothing is
   // pending.
   var pendingCommit = null;
+  var bootStartPending = true;
 
   // The id the server assigned THIS connection, or null before it has told us.
   // It arrives on the `listener` frame, which the server sends before the
@@ -674,7 +685,9 @@
       pendingCommit = null;
       // setPattern(pattern, false) hot-swaps audio without a gap; false
       // means "do not autostart", so a code commit never force-starts a
-      // locally-muted listener (a no-op for sounding ones).
+      // locally-muted listener (a no-op for sounding ones). The boot-start
+      // retry lives in commitNow, not here, so this closure keeps its one
+      // job: the hot-swap.
       return live.setPattern(pattern, false);
     }, anchor, version, stats, pattern);
 
@@ -794,9 +807,11 @@
   // fail now that it is deferred, and a failure must still reach the agent as
   // an eval-result for THIS version rather than being swallowed at the boundary.
   async function commitNow(commit, version, stats, pattern) {
+    var committedOk = true;
     try {
       await commit();
     } catch (err) {
+      committedOk = false;
       var commitMessage = String((err && err.message) || err);
       console.warn("[session] version " + version + " failed to commit:", commitMessage);
       showEvalError(commitMessage);
@@ -804,6 +819,23 @@
     }
     currentPattern = pattern;
     if (window.strudelViz && typeof window.strudelViz.setPattern === "function") { window.strudelViz.setPattern(pattern); }
+    // First landed commit retries the pending boot start
+    // (strudel-agent-3q0.6): boot fired start() before any pattern existed,
+    // so it was silently ineffective; now that audio is possible, re-apply
+    // effective audio exactly as the Mute button would. The gate still
+    // decides: muted stays stopped. The retry runs synchronously in the
+    // commit (not as a .then): the harness thenables the suite drives
+    // session.js with do not assimilate under Promise.resolve, so a chained
+    // retry would never fire headless while firing in the browser -- the
+    // test would prove the harness, not the behaviour. Only a successful
+    // commit consumes the flag: failures and validation rejects leave it
+    // set, so a later good version still starts without a click, while
+    // snapshot/code frames that carry no new version never reach here and
+    // can neither consume it nor drive audio.
+    if (committedOk && bootStartPending) {
+      bootStartPending = false;
+      refreshAudio();
+    }
     console.info("[session] version " + version + " live (" + stats.haps + " haps)");
     return undefined;
   }
@@ -1026,8 +1058,11 @@ function reportAudienceSamples(force) {
   // is shared intent AND NOT locally muted. The button label is a pure
   // function of the mute gate (Mute/Unmute), while the .playing class
   // tracks effective audibility. With no live repl yet there is nothing to
-  // drive and nothing is queued: boot applies the state directly once the
-  // repl is ready.
+  // drive; with a live repl but no committed pattern yet (fresh boot) the
+  // start is silently ineffective, so bootStartPending stays set and the
+  // first landed commit retries it (strudel-agent-3q0.6). A start that
+  // throws for lack of a pattern is that same ordering, not a defect, so it
+  // is swallowed while anything else still warns.
   function refreshAudio() {
     var sounding = desiredPlaying && !localMuted;
     if (liveRepl !== null) {
@@ -1038,7 +1073,9 @@ function reportAudienceSamples(force) {
           liveRepl.stop();
         }
       } catch (e) {
-        console.warn("[session] Error setting live repl playing state:", e);
+        if (!isMissingPattern(e)) {
+          console.warn("[session] Error setting live repl playing state:", e);
+        }
       }
     }
     // Update Mute button UI immediately
@@ -1062,6 +1099,14 @@ function reportAudienceSamples(force) {
 
   function getMutedState() {
     return localMuted;
+  }
+
+  // isMissingPattern recognises the pinned bundle's "start before any
+  // pattern" rejection, so the boot-ordering swallow cannot mask a real
+  // audio failure: only this exact ordering is silent, anything else warns.
+  function isMissingPattern(err) {
+    var message = String((err && err.message) || err);
+    return message.indexOf("no pattern set") !== -1;
   }
 
   function toggleMute() {

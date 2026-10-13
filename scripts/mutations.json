@@ -1492,5 +1492,26 @@
     "old": "var sounding = desiredPlaying && !localMuted;",
     "new": "var sounding = !localMuted; // deliberately: unmute starts audio even when shared intent is stopped",
     "run": "TestUnmuteIntoHushedServerStaysSilent"
+  },
+  {
+    "name": "220-boot-retry-never-fires",
+    "file": "srv/static/session.js",
+    "old": "    if (committedOk && bootStartPending) {",
+    "new": "    if (committedOk && false) { // deliberately: the first landed commit never retries the pending boot start, so a fresh tab sits stopped behind a Mute label",
+    "run": "TestBootRetriesStartUntilPatternLands"
+  },
+  {
+    "name": "221-boot-retry-ignores-mute",
+    "file": "srv/static/session.js",
+    "old": "    if (committedOk && bootStartPending) {\n      bootStartPending = false;\n      refreshAudio();\n    }",
+    "new": "    if (committedOk && bootStartPending) {\n      bootStartPending = false;\n      localMuted = false; // deliberately: the boot retry clears the mute gate, so muting during load cannot keep the tab silent\n      refreshAudio();\n    }",
+    "run": "TestBootRetryRespectsMuteBeforeFirstCommit"
+  },
+  {
+    "name": "222-boot-retry-stops-instead-of-starts",
+    "file": "srv/static/session.js",
+    "old": "    if (committedOk && bootStartPending) {\n      bootStartPending = false;\n      refreshAudio();\n    }",
+    "new": "    if (committedOk && bootStartPending) {\n      bootStartPending = false;\n      localMuted = true; // deliberately: the boot retry applies the wrong gate, so a fresh tab lands muted with label Unmute\n      refreshAudio();\n    }",
+    "run": "TestBootRetriesStartUntilPatternLands"
   }
 ]

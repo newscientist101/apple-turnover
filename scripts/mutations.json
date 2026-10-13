@@ -1562,5 +1562,12 @@
     "old": "        discoveryHaps = currentPattern.queryArc(0, LANE_DISCOVERY_CYCLES) || [];",
     "new": "        discoveryHaps = []; // deliberately: no discovery query, so the lane rows come from the 2-cycle window again and polymeter lanes vanish",
     "run": "TestVisualizationLaneRowsSpanTheWholePatternNotTheWindow"
+  },
+  {
+    "name": "230-viz-lane-discovery-range-collapsed",
+    "file": "srv/static/viz.js",
+    "old": "    var LANE_DISCOVERY_CYCLES = 64;",
+    "new": "    var LANE_DISCOVERY_CYCLES = 2; // deliberately: the discovery range collapses back to the window, so pattern-wide lane rows vanish",
+    "run": "TestVisualizationLaneRowsSpanTheWholePatternNotTheWindow"
   }
 ]

@@ -237,6 +237,128 @@ func TestVisualizationLaneRowsSpanTheWholePatternNotTheWindow(t *testing.T) {
 	}
 }
 
+// TestVisualizationLaneRowsStableAcrossTime (issue strudel-agent-voo.1.2) proves
+// the lane ROW SET is a property of the PATTERN, not of the clock.
+//
+// Same faithful polymeter stub as
+// TestVisualizationLaneRowsSpanTheWholePatternNotTheWindow (one hap per whole
+// cycle, c2/c3/g2/c4 over cycles 0-4, queryArc filters by intersection). One
+// frame is drawn at cycle ~0 and another at cycle ~2.5 (window [2.5,4.5)
+// covers the g2/c4 haps): both frames must label all four lanes in the same
+// sorted order, while only the window haps paint blocks.
+func TestVisualizationLaneRowsStableAcrossTime(t *testing.T) {
+	rt := newVizRuntime(t)
+
+	rt.run(`
+	  window.strudelViz.onSnapshot({ anchor: { epochMs: 0, cps: 0.5 } });
+	  window.strudelViz.setPattern({
+	    queryArc: function (begin, end) {
+	      var all = [
+	        { whole: { begin: 0, end: 1 }, part: { begin: 0, end: 1 }, value: { note: "c2" } },
+	        { whole: { begin: 1, end: 2 }, part: { begin: 1, end: 2 }, value: { note: "c3" } },
+	        { whole: { begin: 2, end: 3 }, part: { begin: 2, end: 3 }, value: { note: "g2" } },
+	        { whole: { begin: 3, end: 4 }, part: { begin: 3, end: 4 }, value: { note: "c4" } },
+	      ];
+	      return all.filter(function (h) { return h.whole.begin < end && h.whole.end > begin; });
+	    },
+	  });
+	  window.__runOneFrame();
+	`)
+
+	// laneKeys.sort() in the served bytes fixes the draw order, so the want
+	// slice names the exact sorted order, not just the set.
+	want := []string{"c2", "c3", "c4", "g2"}
+	first := vizLaneLabels(rt)
+	if len(first) != len(want) {
+		t.Fatalf("lane labels at cycle ~0 = %v, want %v: the lane set must describe the pattern", first, want)
+	}
+	for i := range want {
+		if first[i] != want[i] {
+			t.Fatalf("lane labels at cycle ~0 = %v, want %v in order: the row set must be sorted and stable", first, want)
+		}
+	}
+
+	// ((5000 - 0) / 1000) * 0.5 = 2.5: the window moves to [2.5,4.5) while
+	// the pattern does not. The recorded calls are cleared so the second
+	// frame's observables stand alone.
+	rt.run(`
+	  window.__ctxCalls.fillRect.length = 0;
+	  window.__ctxCalls.stroke.length = 0;
+	  window.__ctxCalls.fillText.length = 0;
+	  window.__ctxCalls.order.length = 0;
+	  window.__setNow(5000);
+	  window.__runOneFrame();
+	`)
+
+	second := vizLaneLabels(rt)
+	if len(second) != len(want) {
+		t.Fatalf("lane labels at cycle ~2.5 = %v, want %v: the row set is a property of the pattern, not of the clock", second, want)
+	}
+	for i := range want {
+		if second[i] != want[i] {
+			t.Fatalf("lane labels at cycle ~2.5 = %v, want %v in order: moving the clock must not reorder the rows", second, want)
+		}
+	}
+
+	// A lane with no hap in the current window keeps its row: c2's label is
+	// drawn but no block is painted for it. Only the window haps (g2, c4)
+	// paint blocks: 2, not 4.
+	styles := vizLaneBlockStyles(rt)
+	if len(styles["c2"]) != 0 {
+		t.Errorf("lane %q painted %d block(s) at cycle ~2.5, want 0: a row with no window hap keeps its label, never a block", "c2", len(styles["c2"]))
+	}
+	if len(styles["c3"]) != 0 {
+		t.Errorf("lane %q painted %d block(s) at cycle ~2.5, want 0: a row with no window hap keeps its label, never a block", "c3", len(styles["c3"]))
+	}
+	blocks := rt.eval(`(function () {
+	  var rect = __canvas.getBoundingClientRect();
+	  return window.__ctxCalls.fillRect.filter(function (r) { return r.w < rect.width && r.h < rect.height; }).length;
+	})()`).ToInteger()
+	if blocks != 2 {
+		t.Errorf("painted %d lane block(s) at cycle ~2.5, want 2 (the g2/c4 window haps): discovery adds rows, never timeline blocks", blocks)
+	}
+}
+
+// TestVisualizationLaneDiscoveryRangeOmitsDistantLanes (issue
+// strudel-agent-voo.1.2) pins the honest limitation BY BEHAVIOR, not by
+// number: lanes spread over more cycles than the discovery range can cover
+// show only the discovered rows.
+//
+// One hap per cycle at cycles 0-3 (notes n0..n3) plus one hap at cycle 70
+// (note "late"): the draw must label n0..n3 but never "late". The test
+// never names the constant and never reads the source: the constant is free
+// to change as long as this test is updated in the same commit.
+func TestVisualizationLaneDiscoveryRangeOmitsDistantLanes(t *testing.T) {
+	rt := newVizRuntime(t)
+
+	rt.run(`
+	  window.strudelViz.onSnapshot({ anchor: { epochMs: 0, cps: 0.5 } });
+	  window.strudelViz.setPattern({
+	    queryArc: function (begin, end) {
+	      var all = [
+	        { whole: { begin: 0, end: 1 }, part: { begin: 0, end: 1 }, value: { note: "n0" } },
+	        { whole: { begin: 1, end: 2 }, part: { begin: 1, end: 2 }, value: { note: "n1" } },
+	        { whole: { begin: 2, end: 3 }, part: { begin: 2, end: 3 }, value: { note: "n2" } },
+	        { whole: { begin: 3, end: 4 }, part: { begin: 3, end: 4 }, value: { note: "n3" } },
+	        { whole: { begin: 70, end: 71 }, part: { begin: 70, end: 71 }, value: { note: "late" } },
+	      ];
+	      return all.filter(function (h) { return h.whole.begin < end && h.whole.end > begin; });
+	    },
+	  });
+	  window.__runOneFrame();
+	`)
+
+	labels := vizLaneLabels(rt)
+	for _, want := range []string{"n0", "n1", "n2", "n3"} {
+		if !containsLabel(labels, want) {
+			t.Errorf("lane labels = %v, want a row for %q: lanes inside the discovery range must be drawn", labels, want)
+		}
+	}
+	if containsLabel(labels, "late") {
+		t.Errorf("lane labels = %v, want no row for %q: a lane beyond the discovery range stays honestly omitted", labels, "late")
+	}
+}
+
 // vizLaneLabels returns the lane labels the real renderer drew, in draw order.
 func vizLaneLabels(rt *syncRuntime) []string {
 	rt.t.Helper()

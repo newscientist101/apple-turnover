@@ -210,6 +210,11 @@
     var playhead = playheadX;
     var timelineWidth = Math.max(10, w - playheadX - 10);
     var windowCycles = 2;
+    // The lane ROW SET describes the PATTERN, not the window: a bounded
+    // discovery range anchored at cycle 0, so the rows never depend on WHEN
+    // you look. Bounded because a pattern can repeat forever; a pattern
+    // whose lanes spread over more than this still misses rows.
+    var LANE_DISCOVERY_CYCLES = 64;
 
     // Query upcoming haps for timeline window
     var haps = [];
@@ -223,10 +228,38 @@
       }
     }
 
-    // Group haps into lanes
+    // Group haps into lanes. The ROW SET (laneKeys/laneKinds) comes from a
+    // bounded pattern-wide discovery query anchored at cycle 0, while the
+    // 2-cycle window haps above are the ONLY thing filed into laneMap — and
+    // hence the only thing that paints timeline blocks. A lane with no
+    // window hap keeps its row (label + separator, no block).
     var laneMap = {};
     var laneKeys = [];
     var laneKinds = {};
+
+    var discoveryHaps = [];
+    if (currentPattern && typeof currentPattern.queryArc === 'function') {
+      try {
+        discoveryHaps = currentPattern.queryArc(0, LANE_DISCOVERY_CYCLES) || [];
+      } catch (e) {
+        discoveryHaps = [];
+      }
+    }
+
+    for (var d = 0; d < discoveryHaps.length; d++) {
+      var dhap = discoveryHaps[d];
+      if (!dhap) continue;
+      var dlane = laneFor(dhap.value);
+      var dkey = dlane.key;
+      if (!laneMap[dkey]) {
+        laneMap[dkey] = [];
+        laneKeys.push(dkey);
+      }
+      // A lane keeps the kind of the first hap filed under it. Every hap with
+      // the same key resolves to the same kind (the key IS derived from the
+      // kind), so this cannot drift.
+      laneKinds[dkey] = dlane.kind;
+    }
 
     for (var i = 0; i < haps.length; i++) {
       var hap = haps[i];

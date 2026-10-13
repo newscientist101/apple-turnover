@@ -278,7 +278,13 @@ wait for the answer.
   from `currentPattern.queryArc()`, with no audio-context dependency. A
   waveform branch was removed because the pinned bundle exposes no reachable,
   connected analyser path for it (strudel-agent-uvj.2), and an unwired scope
-  would have reported sound that was never observed.
+  would have reported sound that was never observed. The lane SET describes
+  the pattern, not the window: a bounded discovery query (`queryArc(0,
+  LANE_DISCOVERY_CYCLES)`, anchored at cycle 0 so rows never depend on when
+  you look) fixes the rows, while the 2-cycle window still decides what paints
+  where — a lane with no window hap keeps its row (label + separator, no
+  block). A pattern whose lanes spread over more than LANE_DISCOVERY_CYCLES
+  still misses rows (documented limitation, strudel-agent-voo.1).
 - Lane identity and lane colour come from **one** resolver (`laneFor`), so they
   cannot disagree. Precedence is **explicit**, not first-match: pitch
   (`note`, then `n` — one control with two spellings in the pinned bundle) wins,

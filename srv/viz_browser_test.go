@@ -188,6 +188,55 @@ func TestVisualizationRendersHapLanesFromTheServedJS(t *testing.T) {
 	}
 }
 
+// TestVisualizationLaneRowsSpanTheWholePatternNotTheWindow (issue
+// strudel-agent-voo.1) proves the lane ROW SET describes the PATTERN, not the
+// 2-cycle window.
+//
+// note("<c2 c3 g2 c4>") is POLYMETER: one hap per whole cycle (c2 on [0,1),
+// c3 on [1,2), g2 on [2,3), c4 on [3,4)). With the fake clock near 0 the
+// 2-cycle window is roughly [0,2), so only the c2/c3 haps are inside it — a
+// renderer deriving its rows from the window's haps can only ever paint 2-3
+// rows. All four lanes must still get rows, while only the 2 window haps
+// paint timeline blocks: the discovery query adds ROWS, never blocks.
+func TestVisualizationLaneRowsSpanTheWholePatternNotTheWindow(t *testing.T) {
+	rt := newVizRuntime(t)
+
+	rt.run(`
+	  window.strudelViz.onSnapshot({ anchor: { epochMs: 0, cps: 0.5 } });
+	  window.strudelViz.setPattern({
+	    queryArc: function (begin, end) {
+	      var all = [
+	        { whole: { begin: 0, end: 1 }, part: { begin: 0, end: 1 }, value: { note: "c2" } },
+	        { whole: { begin: 1, end: 2 }, part: { begin: 1, end: 2 }, value: { note: "c3" } },
+	        { whole: { begin: 2, end: 3 }, part: { begin: 2, end: 3 }, value: { note: "g2" } },
+	        { whole: { begin: 3, end: 4 }, part: { begin: 3, end: 4 }, value: { note: "c4" } },
+	      ];
+	      return all.filter(function (h) { return h.whole.begin < end && h.whole.end > begin; });
+	    },
+	  });
+	  window.__runOneFrame();
+	`)
+
+	// A row exists for every lane in the pattern, even the ones outside the window.
+	labels := vizLaneLabels(rt)
+	for _, want := range []string{"c2", "c3", "g2", "c4"} {
+		if !containsLabel(labels, want) {
+			t.Errorf("lane labels = %v, want a row for %q: the lane set must describe the pattern, not the 2-cycle window", labels, want)
+		}
+	}
+
+	// Only WINDOW haps paint blocks: the discovery query adds rows, never
+	// timeline blocks. With the window at roughly [0,2) that is the c2/c3
+	// haps — 2 blocks, not 4.
+	blocks := rt.eval(`(function () {
+	  var rect = __canvas.getBoundingClientRect();
+	  return window.__ctxCalls.fillRect.filter(function (r) { return r.w < rect.width && r.h < rect.height; }).length;
+	})()`).ToInteger()
+	if blocks != 2 {
+		t.Errorf("painted %d lane block(s), want 2 (the window haps): discovery must add rows, never timeline blocks", blocks)
+	}
+}
+
 // vizLaneLabels returns the lane labels the real renderer drew, in draw order.
 func vizLaneLabels(rt *syncRuntime) []string {
 	rt.t.Helper()

@@ -1555,5 +1555,12 @@
     "old": "      // evaluated, and the server rightly refuses a verdict for it with 400.\n      return undefined;",
     "new": "      // evaluated, and the server rightly refuses a verdict for it with 400.\n      return postEvalResult(version, true, \"\", { haps: 0 }); // deliberately: the empty document reports a verdict for a version that does not exist",
     "run": "TestEmptyDocumentReportsNoVerdict"
+  },
+  {
+    "name": "229-viz-lane-rows-from-window-not-discovery",
+    "file": "srv/static/viz.js",
+    "old": "        discoveryHaps = currentPattern.queryArc(0, LANE_DISCOVERY_CYCLES) || [];",
+    "new": "        discoveryHaps = []; // deliberately: no discovery query, so the lane rows come from the 2-cycle window again and polymeter lanes vanish",
+    "run": "TestVisualizationLaneRowsSpanTheWholePatternNotTheWindow"
   }
 ]

@@ -334,6 +334,11 @@
   // exactly the kind of self-contradictory report an agent cannot act on.
   function collectStats(pattern, out) {
     var stats = { haps: 0 };
+    // The autoplay probe rides every evaluated pattern's stats
+    // (strudel-agent-3q0.6): see autoplayProbe for why an agent must be
+    // able to read, from the server, the audio state a verdict's pattern
+    // would play through.
+    stats.autoplay = autoplayProbe();
     try {
       var haps = pattern.queryArc(0, 1);
       if (out) {
@@ -1069,40 +1074,29 @@ function reportAudienceSamples(force) {
   // throws for lack of a pattern is that same ordering, not a defect, so it
   // is swallowed while anything else still warns.
   //
-  // AudioContext resume (strudel-agent-3q0.6): browser autoplay policy
-  // keeps the AudioContext suspended until a user gesture. The Mute/Unmute
-  // button click is that gesture, but on fresh boot there is no click yet.
-  // When we start audio, we explicitly resume the AudioContext if it is
-  // suspended. The resume is async and best-effort: if it fails or the
-  // context is missing, we still call start() and let the browser decide
-  // whether to produce sound. This makes a fresh tab audible without a
-  // click when the browser's autoplay policy allows it, and no worse than
-  // before when it does not.
+  // Tier 1 resume (strudel-agent-3q0.6): a browser whose autoplay policy
+  // ALLOWS web audio never needs a gesture at all, so every start still
+  // attempts to resume a suspended context first. The resume is async and
+  // best-effort -- we do not await it, because the harness thenables the
+  // suite drives session.js with do not assimilate, and in the real browser
+  // the start() call will queue behind the resume anyway. In a browser that
+  // BLOCKS autoplay this promise pends until the first user gesture, which
+  // is exactly the gap armGestureUnlock exists to close. If the context is
+  // missing or resume fails, we still call start() and let the browser
+  // decide.
   function refreshAudio() {
     var sounding = desiredPlaying && !localMuted;
     if (liveRepl !== null) {
       try {
         if (sounding) {
-          // Resume the AudioContext if suspended (strudel-agent-3q0.6).
-          // The pinned bundle exposes the AudioContext via
-          // window.strudel.getAudioContext(); if it is suspended, resume it
-          // before starting. The resume is async and best-effort: we do not
-          // await it, because the harness thenables do not assimilate, and
-          // in the real browser the start() call will queue behind the
-          // resume anyway. If the context is missing or resume fails, we
-          // still call start() and let the browser decide.
-          var strudel = window.strudel || window.strudelScope || null;
-          var ctx = strudel && typeof strudel.getAudioContext === "function" ? strudel.getAudioContext() : null;
-          if (!ctx && liveRepl && liveRepl.audioContext) {
-            ctx = liveRepl.audioContext;
-          }
+          var ctx = audioContextOf();
           if (ctx && ctx.state === "suspended" && typeof ctx.resume === "function") {
             ctx.resume().catch(function (err) {
               // Best-effort: do not warn, because a suspended context that
               // refuses resume is the browser's autoplay policy, not a
               // defect. The start() call below will either produce sound
-              // (policy allows) or stay silent (policy blocks), and the
-              // user's next Mute/Unmute click will retry.
+              // (policy allows) or stay silent until the gesture unlock
+              // (armGestureUnlock) supplies the one thing policy demands.
             });
           }
           liveRepl.start();
@@ -1127,6 +1121,93 @@ function reportAudienceSamples(force) {
         btn.classList.remove('playing');
       }
     }
+  }
+
+  // audioContextOf is THE resolver for the page's AudioContext
+  // (strudel-agent-3q0.6): the pinned bundle exposes it through
+  // window.strudel.getAudioContext(), and the live repl may carry it as
+  // .audioContext. One resolver serves the Tier 1 resume in refreshAudio,
+  // the gesture unlock, and the autoplay probe, because two resolvers that
+  // could disagree would let one path resume a context the other still
+  // reports suspended -- the laneFor lesson, applied to audio.
+  function audioContextOf() {
+    var strudel = window.strudel || window.strudelScope || null;
+    var ctx = strudel && typeof strudel.getAudioContext === "function" ? strudel.getAudioContext() : null;
+    if (!ctx && liveRepl && liveRepl.audioContext) {
+      ctx = liveRepl.audioContext;
+    }
+    return ctx;
+  }
+
+  // The gesture unlock (strudel-agent-3q0.6) is what the Tier 1 resume
+  // cannot supply: in a browser that blocks autoplay, AudioContext.resume()
+  // called outside a user gesture pends until the FIRST gesture of ANY
+  // kind -- not specifically a Mute/Unmute click, which is exactly why the
+  // previous fix still left a fresh tab silent until the user cycled the
+  // Mute button. The standard web-audio unlock closes that gap: the page
+  // listens for its first pointerdown, keydown or touchend anywhere on the
+  // document and resumes the still-suspended context then.
+  //
+  // The unlock is CONTEXT-level and never TRANSPORT-level: it never calls
+  // start/stop, never touches desiredPlaying or localMuted, and never
+  // fetches a transport endpoint. By the time a gesture can arrive, the
+  // scheduler state is already right (started and sounding, or stopped
+  // behind the mute gate) -- the only thing missing in a blocked browser is
+  // the context itself. A muted listener stays muted across any gesture; a
+  // gesture that arrives BEFORE the first commit unlocks the context and
+  // the later commit still consumes the pending boot start, so both
+  // orders end audible with ONE gesture and no Mute/Unmute cycle.
+  //
+  // The listeners stay armed rather than removing themselves: the handler
+  // is a cheap no-op once the context runs, and a context the OS re-suspends
+  // (an audio device switch, a phone call on mobile) is unlocked again by
+  // the next interaction without re-arming.
+  function armGestureUnlock() {
+    if (!document.addEventListener) {
+      return;
+    }
+    var unlock = function () {
+      var ctx = audioContextOf();
+      if (ctx && ctx.state === "suspended" && typeof ctx.resume === "function") {
+        var p = ctx.resume();
+        if (p && typeof p.catch === "function") {
+          p.catch(function (err) {
+            // Best-effort, same swallow and for the same reason as the
+            // Tier 1 resume: a resume that fails on a real gesture is a
+            // browser the page cannot help, not a defect to train the
+            // operator to ignore.
+          });
+        }
+      }
+    };
+    ["pointerdown", "keydown", "touchend"].forEach(function (name) {
+      // capture so a target handler that stops propagation cannot eat the
+      // unlock; passive because the unlock never needs to prevent it.
+      document.addEventListener(name, unlock, { capture: true, passive: true });
+    });
+  }
+
+  // autoplayProbe reports, on the wire, the audio state a verdict's pattern
+  // would play through (strudel-agent-3q0.6): the AudioContext state and
+  // whether the document has EVER seen a user gesture. Without it, ok:true
+  // is indistinguishable from "ok:true but the browser holds the context
+  // suspended" -- a claim only a human listening to the tab could verify,
+  // which is the uvj.15 failure mode, applied to audio. It rides collectStats
+  // so the eval verdict and the dry-run verdict -- the two ways an agent
+  // asks the same question -- answer with the same probe, per the one
+  // resolver rule for samples.
+  function autoplayProbe() {
+    var ctx = audioContextOf();
+    var act = null;
+    try {
+      if (typeof navigator !== "undefined" && navigator.userActivation && typeof navigator.userActivation.hasBeenActive === "boolean") {
+        act = navigator.userActivation.hasBeenActive;
+      }
+    } catch (e) {
+      // Old browsers have no userActivation at all: null means "not
+      // measurable", which is a different fact from false.
+    }
+    return { ctx: ctx ? String(ctx.state) : "none", act: act };
   }
 
   function setMutedState(muted) {
@@ -1164,6 +1245,10 @@ function reportAudienceSamples(force) {
       var sandbox = buildSandbox(strudel);
       window.strudelSandbox = sandbox;
        liveRepl = live;
+       // Arm the gesture unlock before the boot start fires: a blocked
+       // browser resolves the boot resume only on a gesture, so the listener
+       // must already be in place by the time the user could provide one.
+       armGestureUnlock();
        // Boot into playing mode: with desiredPlaying=true and localMuted=false
        // the applicator starts the repl and labels the button Mute.
        setMutedState(false);

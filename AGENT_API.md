@@ -256,7 +256,9 @@ A browser reports the result of evaluating a published version in its sandbox RE
 
 `ok:true` means the pattern **parsed, evaluated and was committed**. It does not mean it will be audible, and the difference is not academic: `s("bd totally_not_a_real_sample_xyz")` evaluates perfectly, names a sample that exists in no pack, and is committed to the live document. Before `samplesResolved` existed that was reported to the agent as unqualified success — the system saying SUCCESS for work that provably cannot work.
 
-`samplesResolved` closes that gap. It is a **tri-state**, and all three states are distinct on the wire:
+There is a second way `ok:true` can be silent, and the served page reports it through the same opaque `stats`: a browser whose autoplay policy blocks web audio holds the `AudioContext` suspended until its **first user gesture of any kind** — a click or a keypress anywhere on the page, not a Mute/Unmute cycle. The page attempts the resume on every start and again on that first gesture, and every eval and dry-run verdict carries `stats.autoplay`, the audio state the pattern would play through: `{"ctx":"suspended","act":false}` means the reporting browser had not yet been given a gesture when it evaluated, so `ok:true` is expected to be silent until someone interacts with the tab once; `"ctx":"running"` means the audio path is open. Like every `stats` key it is browser-reported and opaque to the server; `"ctx":"none"`, or an absent probe, means the reporting browser has no AudioContext to describe (no bundle), which is its own answer. This is the drift-reporting lesson applied to audio: a browser-side state the agent cannot read from the server is a claim only a human watching the tab could verify.
+
+`samplesResolved` closes the sample half of that gap. It is a **tri-state**, and all three states are distinct on the wire:
 
 | Value | Meaning |
 |---|---|

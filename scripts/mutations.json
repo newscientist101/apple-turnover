@@ -802,7 +802,7 @@
   {
     "name": "109-never-seen-counts-as-active",
     "file": "srv/conductor.go",
-    "old": "\tif lastSeenMS == 0 {\n\t\t// Never seen. This branch is only reachable for a clock within AgentTTL\n\t\t// of the epoch \u2014 real time is ~1.7e12 ms, so without it the arithmetic\n\t\t// below would still yield inactive, and a mutation deleting this line\n\t\t// survives every other test. It is kept because the marker is RESERVED\n\t\t// (see AgentPresence) and a server whose clock is wrong must not report\n\t\t// an agent that has never existed as present.\n\t\treturn p\n\t}",
+    "old": "\tif lastSeenMS == 0 {\n\t\t// Never seen. This branch is only reachable for a clock within AgentTTL\n\t\t// of the epoch — real time is ~1.7e12 ms, so without it the arithmetic\n\t\t// below would still yield inactive, and a mutation deleting this line\n\t\t// survives every other test. It is kept because the marker is RESERVED\n\t\t// (see AgentPresence) and a server whose clock is wrong must not report\n\t\t// an agent that has never existed as present.\n\t\treturn p\n\t}",
     "new": "\t// deliberately: the never-seen marker is treated as an ordinary old heartbeat",
     "run": "TestAgentPresenceNeverSeenIsInactiveEvenOnAClockNearTheEpoch|TestAgentFrameDoesNotFireWithoutAnAgent"
   },
@@ -1517,8 +1517,36 @@
   {
     "name": "223-audiocontext-resume-removed",
     "file": "srv/static/session.js",
-    "old": "          var strudel = window.strudel || window.strudelScope || null;\n          var ctx = strudel && typeof strudel.getAudioContext === \"function\" ? strudel.getAudioContext() : null;\n          if (!ctx && liveRepl && liveRepl.audioContext) {\n            ctx = liveRepl.audioContext;\n          }\n          if (ctx && ctx.state === \"suspended\" && typeof ctx.resume === \"function\") {\n            ctx.resume().catch(function (err) {\n              // Best-effort: do not warn, because a suspended context that\n              // refuses resume is the browser's autoplay policy, not a\n              // defect. The start() call below will either produce sound\n              // (policy allows) or stay silent (policy blocks), and the\n              // user's next Mute/Unmute click will retry.\n            });\n          }\n          liveRepl.start();",
+    "old": "          var ctx = audioContextOf();\n          if (ctx && ctx.state === \"suspended\" && typeof ctx.resume === \"function\") {\n            ctx.resume().catch(function (err) {\n              // Best-effort: do not warn, because a suspended context that\n              // refuses resume is the browser's autoplay policy, not a\n              // defect. The start() call below will either produce sound\n              // (policy allows) or stay silent until the gesture unlock\n              // (armGestureUnlock) supplies the one thing policy demands.\n            });\n          }\n          liveRepl.start();",
     "new": "          liveRepl.start(); // deliberately: AudioContext resume removed, so autoplay policy keeps the tab silent",
     "run": "TestAudioContextResumesOnBootStart"
+  },
+  {
+    "name": "224-gesture-unlock-never-armed",
+    "file": "srv/static/session.js",
+    "old": "       // Arm the gesture unlock before the boot start fires: a blocked\n       // browser resolves the boot resume only on a gesture, so the listener\n       // must already be in place by the time the user could provide one.\n       armGestureUnlock();",
+    "new": "       // Arm the gesture unlock before the boot start fires: a blocked\n       // browser resolves the boot resume only on a gesture, so the listener\n       // must already be in place by the time the user could provide one.\n       // deliberately: the gesture unlock is never armed, so a blocked\n       // browser stays silent until a Mute/Unmute cycle",
+    "run": "TestFirstGestureUnlocksBlockedAudioContext"
+  },
+  {
+    "name": "225-gesture-unlock-unmutes",
+    "file": "srv/static/session.js",
+    "old": "    var unlock = function () {\n      var ctx = audioContextOf();",
+    "new": "    var unlock = function () {\n      localMuted = false; // deliberately: any gesture unmutes the listener\n      refreshAudio();\n      var ctx = audioContextOf();",
+    "run": "TestGestureUnlockNeverUnmutes"
+  },
+  {
+    "name": "226-autoplay-probe-removed",
+    "file": "srv/static/session.js",
+    "old": "    // The autoplay probe rides every evaluated pattern's stats\n    // (strudel-agent-3q0.6): see autoplayProbe for why an agent must be\n    // able to read, from the server, the audio state a verdict's pattern\n    // would play through.\n    stats.autoplay = autoplayProbe();",
+    "new": "    // The autoplay probe rides every evaluated pattern's stats\n    // (strudel-agent-3q0.6): see autoplayProbe for why an agent must be\n    // able to read, from the server, the audio state a verdict's pattern\n    // would play through.\n    // deliberately: the autoplay probe never reaches the wire, so ok:true\n    // cannot be told apart from ok:true-but-suspended",
+    "run": "TestEvalResultCarriesAutoplayProbeOnTheWire"
+  },
+  {
+    "name": "227-gesture-unlock-never-resumes",
+    "file": "srv/static/session.js",
+    "old": "    var unlock = function () {\n      var ctx = audioContextOf();\n      if (ctx && ctx.state === \"suspended\" && typeof ctx.resume === \"function\") {\n        var p = ctx.resume();",
+    "new": "    var unlock = function () {\n      return; // deliberately: the first gesture never resumes the blocked context\n      var ctx = audioContextOf();\n      if (ctx && ctx.state === \"suspended\" && typeof ctx.resume === \"function\") {\n        var p = ctx.resume();",
+    "run": "TestFirstGestureUnlocksBlockedAudioContext"
   }
 ]

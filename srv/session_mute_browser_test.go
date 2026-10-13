@@ -532,3 +532,131 @@ func TestPlayButtonClickCallsToggleMuteOnly(t *testing.T) {
 		t.Error("served inline click handler still references the intent-claiming API: the button must only toggle local mute")
 	}
 }
+
+// AudioContext resume tests for strudel-agent-3q0.6.
+// The previous fix made scheduler state correct, but the real browser's
+// AudioContext remains suspended due to autoplay policy. The Mute/Unmute
+// cycle works because the click is a user gesture that allows resume.
+// These tests prove the AudioContext resume path.
+
+// TestAudioContextResumesOnBootStart proves that when the live repl starts
+// audio, the underlying AudioContext is resumed if suspended. The stub models
+// the real browser: AudioContext starts suspended, and start() alone does not
+// resume it.
+func TestAudioContextResumesOnBootStart(t *testing.T) {
+	rt := newMuteRuntime(t)
+	rt.run(`
+	  window.__audioContextState = "suspended";
+	  window.__audioContextResumes = 0;
+	  window.__audioContext = {
+	    state: "suspended",
+	    resume: function () {
+	      window.__audioContextResumes++;
+	      window.__audioContextState = "running";
+	      this.state = "running";
+	      return Promise.resolve();
+	    },
+	  };
+	  window.__liveStarts = 0;
+	  window.__liveStops = 0;
+	  window.__liveStub = {
+	    start: function () { window.__liveStarts++; },
+	    stop: function () { window.__liveStops++; },
+	    setPattern: function () { return apiStub(); },
+	    audioContext: window.__audioContext,
+	  };
+	`)
+	bootSettle(rt)
+	// After boot, the AudioContext must have been resumed
+	if got := rt.eval(`window.__audioContextResumes`).ToInteger(); got != 1 {
+		t.Errorf("AudioContext resume calls after boot = %d, want 1: starting audio must resume a suspended context", got)
+	}
+	if got := rt.eval(`window.__audioContextState`).String(); got != "running" {
+		t.Errorf("AudioContext state after boot = %q, want %q", got, "running")
+	}
+}
+
+// TestAudioContextResumeOnUnmute proves that unmuting after a mute resumes
+// the AudioContext if it was suspended.
+func TestAudioContextResumeOnUnmute(t *testing.T) {
+	rt := newMuteRuntime(t)
+	rt.run(`
+	  window.__audioContextState = "suspended";
+	  window.__audioContextResumes = 0;
+	  window.__audioContext = {
+	    state: "suspended",
+	    resume: function () {
+	      window.__audioContextResumes++;
+	      window.__audioContextState = "running";
+	      this.state = "running";
+	      return Promise.resolve();
+	    },
+	  };
+	  window.__liveStarts = 0;
+	  window.__liveStops = 0;
+	  window.__liveStub = {
+	    start: function () { window.__liveStarts++; },
+	    stop: function () { window.__liveStops++; },
+	    setPattern: function () { return apiStub(); },
+	    audioContext: window.__audioContext,
+	  };
+	`)
+	bootSettle(rt)
+	// Simulate mute, then reset context to suspended (modeling browser behavior)
+	rt.run(`window.strudelSession.setMutedState(true); window.__audioContext.state = "suspended";`)
+	rt.run(`window.strudelSession.setMutedState(false)`)
+	// Unmute must resume the AudioContext
+	if got := rt.eval(`window.__audioContextResumes`).ToInteger(); got < 2 {
+		t.Errorf("AudioContext resume calls after unmute = %d, want >= 2: unmuting must resume a suspended context", got)
+	}
+}
+
+// TestAudioContextAlreadyRunningNoResume proves that if the AudioContext is
+// already running, we do not call resume() again.
+func TestAudioContextAlreadyRunningNoResume(t *testing.T) {
+	rt := newMuteRuntime(t)
+	rt.run(`
+	  window.__audioContextState = "running";
+	  window.__audioContextResumes = 0;
+	  window.__audioContext = {
+	    state: "running",
+	    resume: function () {
+	      window.__audioContextResumes++;
+	      return Promise.resolve();
+	    },
+	  };
+	  window.__liveStarts = 0;
+	  window.__liveStops = 0;
+	  window.__liveStub = {
+	    start: function () { window.__liveStarts++; },
+	    stop: function () { window.__liveStops++; },
+	    setPattern: function () { return apiStub(); },
+	    audioContext: window.__audioContext,
+	  };
+	`)
+	bootSettle(rt)
+	// Already running, so no resume should happen
+	if got := rt.eval(`window.__audioContextResumes`).ToInteger(); got != 0 {
+		t.Errorf("AudioContext resume calls when already running = %d, want 0: do not resume a running context", got)
+	}
+}
+
+// TestAudioContextMissingDoesNotCrash proves that if the repl has no
+// audioContext property, the code does not crash.
+func TestAudioContextMissingDoesNotCrash(t *testing.T) {
+	rt := newMuteRuntime(t)
+	rt.run(`
+	  window.__liveStarts = 0;
+	  window.__liveStops = 0;
+	  window.__liveStub = {
+	    start: function () { window.__liveStarts++; },
+	    stop: function () { window.__liveStops++; },
+	    setPattern: function () { return apiStub(); },
+	  };
+	`)
+	bootSettle(rt)
+	// Should not crash
+	if got := liveStarts(t, rt); got != 1 {
+		t.Errorf("live repl starts after boot without audioContext = %d, want 1", got)
+	}
+}

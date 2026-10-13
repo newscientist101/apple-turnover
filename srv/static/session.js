@@ -1059,15 +1059,48 @@ function reportAudienceSamples(force) {
   // function of the mute gate (Mute/Unmute), while the .playing class
   // tracks effective audibility. With no live repl yet there is nothing to
   // drive; with a live repl but no committed pattern yet (fresh boot) the
+  // refreshAudio is the single audio sink (strudel-agent-3q0). Effective
+  // audio is shared intent AND NOT locally muted. The button label is a pure
+  // function of the mute gate (Mute/Unmute), while the .playing class
+  // tracks effective audibility. With no live repl yet there is nothing to
+  // drive; with a live repl but no committed pattern yet (fresh boot) the
   // start is silently ineffective, so bootStartPending stays set and the
   // first landed commit retries it (strudel-agent-3q0.6). A start that
   // throws for lack of a pattern is that same ordering, not a defect, so it
   // is swallowed while anything else still warns.
+  //
+  // AudioContext resume (strudel-agent-3q0.6): browser autoplay policy
+  // keeps the AudioContext suspended until a user gesture. The Mute/Unmute
+  // button click is that gesture, but on fresh boot there is no click yet.
+  // When we start audio, we explicitly resume the AudioContext if it is
+  // suspended. The resume is async and best-effort: if it fails or the
+  // context is missing, we still call start() and let the browser decide
+  // whether to produce sound. This makes a fresh tab audible without a
+  // click when the browser's autoplay policy allows it, and no worse than
+  // before when it does not.
   function refreshAudio() {
     var sounding = desiredPlaying && !localMuted;
     if (liveRepl !== null) {
       try {
         if (sounding) {
+          // Resume the AudioContext if suspended (strudel-agent-3q0.6).
+          // The pinned bundle's repl exposes audioContext; if it is
+          // suspended, resume it before starting. The resume is async and
+          // best-effort: we do not await it, because the harness thenables
+          // do not assimilate, and in the real browser the start() call
+          // will queue behind the resume anyway. If the context is missing
+          // or resume fails, we still call start() and let the browser
+          // decide.
+          var ctx = liveRepl.audioContext;
+          if (ctx && ctx.state === "suspended" && typeof ctx.resume === "function") {
+            ctx.resume().catch(function (err) {
+              // Best-effort: do not warn, because a suspended context that
+              // refuses resume is the browser's autoplay policy, not a
+              // defect. The start() call below will either produce sound
+              // (policy allows) or stay silent (policy blocks), and the
+              // user's next Mute/Unmute click will retry.
+            });
+          }
           liveRepl.start();
         } else {
           liveRepl.stop();

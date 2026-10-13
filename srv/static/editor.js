@@ -27,6 +27,23 @@
   // state survives beyond this list.
   var activeMarks = [];
 
+  // Typewriter edit simulation (issue strudel-agent-3f2, design leaf
+  // strudel-agent-3f2.2). When a code frame changes the displayed document
+  // the change is SIMULATED as a human edit: the visible cursor moves to
+  // the edit site, old text is deleted and new text is inserted in bounded
+  // steps, ending with the displayed document EXACTLY equal to the new
+  // version's code. Normative constants (tests pin them):
+  // STEP_MS=30, DEL_CHUNK=8 chars/tick (delete phase first), INS_CHUNK=4
+  // chars/tick, TOTAL_BUDGET_MS=1500, MAX_STEPS=50 (=1500/30).
+  var TYPEWRITER_STEP_MS = 30;
+  var TYPEWRITER_DEL_CHUNK = 8;
+  var TYPEWRITER_INS_CHUNK = 4;
+  var TYPEWRITER_MAX_STEPS = 50;
+  // At most ONE animation script is pending: a newer setCode cancels the
+  // in-flight setTimeout and re-derives from the live buffer (churn
+  // RETARGET, single-flight). The handle is the only cross-tick state.
+  var typewriterTimer = null;
+
   function findTextarea() {
     if (textarea) {
       return textarea;
@@ -70,6 +87,139 @@
     return el ? el.value : '';
   }
 
+  // cancelTypewriter drops the in-flight animation tick, if any. Called
+  // by every setCode before deriving the new script, so a superseding
+  // version never replays stale steps and at most one timer is ever
+  // outstanding (the session.js:689-692 supersede-cancel discipline).
+  function cancelTypewriter() {
+    if (typewriterTimer !== null) {
+      clearTimeout(typewriterTimer);
+      typewriterTimer = null;
+    }
+  }
+
+  // typewriterCanAnimate reports whether the animated path is available:
+  // a CodeMirror instance with the programmatic edit surface the research
+  // leaf verified live (replaceRange + operation). Otherwise setCode takes
+  // the instant path (textarea fallback: documented no-op, zero timers).
+  function typewriterCanAnimate() {
+    return !!cm && typeof cm.replaceRange === 'function' &&
+        typeof cm.operation === 'function';
+  }
+
+  // typewriterDerive computes the single prefix/suffix edit region from
+  // the CURRENT DISPLAYED text O to the new version code N, in UTF-16 code
+  // units (matching the CM5 posFromIndex/indexFromPos round-trip). Multi-
+  // region diffs collapse into the one spanning region, never staged.
+  // Returns { start, delEnd, insert } where [start, delEnd) is deleted
+  // from O and insert is typed at start, or null when both are empty
+  // (synchronous no-op).
+  function typewriterDerive(oldText, newText) {
+    var oldLen = oldText.length;
+    var newLen = newText.length;
+    var p = 0;
+    while (p < oldLen && p < newLen && oldText.charAt(p) === newText.charAt(p)) {
+      p++;
+    }
+    var s = 0;
+    while (s < oldLen - p && s < newLen - p &&
+        oldText.charAt(oldLen - 1 - s) === newText.charAt(newLen - 1 - s)) {
+      s++;
+    }
+    var delLen = oldLen - s - p;
+    var insert = newText.slice(p, newLen - s);
+    if (delLen <= 0 && insert.length === 0) {
+      return null;
+    }
+    return { start: p, delEnd: oldLen - s, insert: insert };
+  }
+
+  // typewriterEstimate counts setTimeout ticks for one script: deletion
+  // ticks first, then insertion ticks.
+  function typewriterEstimate(delLen, insLen) {
+    return Math.ceil(delLen / TYPEWRITER_DEL_CHUNK) +
+        Math.ceil(insLen / TYPEWRITER_INS_CHUNK);
+  }
+
+  // typewriterFinish lands the script exactly and disarms. Every path
+  // through the animation — stepped convergence, instant clamp, supersede
+  // landing — funnels here so the end state is provably exact.
+  function typewriterFinish(target) {
+    typewriterTimer = null;
+    if (cm.getValue() !== target) {
+      cm.setValue(target);
+    }
+  }
+
+  // typewriterStep runs one tick of the in-flight script: delete phase
+  // first (shrink the delete region by up to DEL_CHUNK chars from its
+  // END, cursor parked at the frontier), then insertion phase (up to
+  // INS_CHUNK chars at the cursor). Each tick is wrapped in
+  // cm.operation() (one changes-event + one layout pass per tick) and
+  // followed by setCursor(frontier) + scrollIntoView(frontier).
+  function typewriterStep(script) {
+    typewriterTimer = null;
+    // Phase counters live on the script, never derived from the document
+    // length: after the delete phase the typed prefix would otherwise read
+    // as delete remainder and the animation would eat its own typing. The
+    // length invariant below is the drift guard — a superseding setCode
+    // cancels this script first, so a mismatch can only come from an
+    // outside edit, and landing exactly beats typing stale text.
+    var cur = cm.getValue();
+    if (cur.length !== script.start + script.delLeft + script.insAt + script.suffixLen ||
+        cur.slice(0, script.start) !== script.prefix) {
+      typewriterFinish(script.target);
+      return;
+    }
+    cm.operation(function () {
+      if (script.delLeft > 0) {
+        var take = Math.min(TYPEWRITER_DEL_CHUNK, script.delLeft);
+        var from = cm.posFromIndex(script.start + script.delLeft - take);
+        var to = cm.posFromIndex(script.start + script.delLeft);
+        script.delLeft -= take;
+        cm.replaceRange('', from, to);
+      } else if (script.insAt < script.insert.length) {
+        var chunk = script.insert.substr(script.insAt, TYPEWRITER_INS_CHUNK);
+        cm.replaceRange(chunk, cm.posFromIndex(script.start + script.insAt));
+        script.insAt += chunk.length;
+      }
+    });
+    // Cursor parks at the frontier: the shrinking delete edge during the
+    // delete phase, the growing typed edge during insertion.
+    var caret = script.delLeft > 0 ? script.start + script.delLeft : script.start + script.insAt;
+    if (typeof cm.setCursor === 'function') {
+      try {
+        cm.setCursor(cm.posFromIndex(caret));
+      } catch (err) {
+        // Caret placement is cosmetic best-effort, never load-bearing.
+      }
+    }
+    if (typeof cm.scrollIntoView === 'function') {
+      try {
+        cm.scrollIntoView(cm.posFromIndex(caret));
+      } catch (err) {
+        // Scrolling is cosmetic best-effort, never load-bearing.
+      }
+    }
+    if (cm.getValue() === script.target) {
+      typewriterFinish(script.target);
+      return;
+    }
+    typewriterTimer = setTimeout(function () { typewriterStep(script); }, TYPEWRITER_STEP_MS);
+  }
+
+  // typewriterAnimate arms the bounded animation for one script, or
+  // clamps to the instant path when the estimate exceeds MAX_STEPS.
+  // CLAMP (big changes jump): est > 50 -> instant cm.setValue(N) +
+  // flashUpdate exactly as today, zero animation timers.
+  function typewriterAnimate(script) {
+    if (typewriterEstimate(script.delLeft, script.insert.length) > TYPEWRITER_MAX_STEPS) {
+      typewriterFinish(script.target);
+      return;
+    }
+    typewriterTimer = setTimeout(function () { typewriterStep(script); }, TYPEWRITER_STEP_MS);
+  }
+
   // setCode replaces the whole document in place. Versions arrive wholesale
   // from the server (never merged), so the view does too. Skipped while the
   // element has focus so a future editable mode never clobbers typing; in the
@@ -84,13 +234,41 @@
     // equal-text and textarea paths never reach it, and a mid-frame
     // staleness must resolve to "dark, re-mark next frame").
     clearActiveMarks();
+    cancelTypewriter();
     if (cm) {
       if (cm.hasFocus && cm.hasFocus()) {
         return;
       }
-      if (cm.getValue() !== code) {
-        cm.setValue(code);
+      var current = cm.getValue();
+      if (current === code) {
+        return;
       }
+      // The animation is view-only, behind this synchronous return: it
+      // arms at most one fake-clock timer and never delays validation,
+      // the verdict POST, or the bar-aligned commit (feedback-loop
+      // immunity: setCode adds 0ms to time-to-verdict by construction).
+      if (typewriterCanAnimate()) {
+        var region = typewriterDerive(current, code);
+        if (region === null) {
+          return;
+        }
+        typewriterAnimate({
+          start: region.start,
+          delLeft: region.delEnd - region.start,
+          insert: region.insert,
+          insAt: 0,
+          // Script-fixed witnesses, captured once at derivation: the
+          // kept prefix proves the buffer still matches this script on
+          // every tick, and the kept suffix length bounds the delete
+          // phase. A superseding setCode cancels this script first, so
+          // these are guards, not versioning.
+          prefix: current.slice(0, region.start),
+          suffixLen: current.length - region.delEnd,
+          target: code,
+        });
+        return;
+      }
+      cm.setValue(code);
       return;
     }
     var el = findTextarea();

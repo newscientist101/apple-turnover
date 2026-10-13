@@ -1569,5 +1569,19 @@
     "old": "    var LANE_DISCOVERY_CYCLES = 64;",
     "new": "    var LANE_DISCOVERY_CYCLES = 2; // deliberately: the discovery range collapses back to the window, so pattern-wide lane rows vanish",
     "run": "TestVisualizationLaneRowsSpanTheWholePatternNotTheWindow"
+  },
+  {
+    "name": "231-typewriter-animation-removed",
+    "file": "srv/static/editor.js",
+    "old": "      if (typewriterCanAnimate()) {",
+    "new": "      if (false) { // deliberately: the edit flashes instantly again, no animation",
+    "run": "TestTypewriterBoundedAnimation"
+  },
+  {
+    "name": "232-typewriter-supersede-broken",
+    "file": "srv/static/editor.js",
+    "old": "    clearActiveMarks();\n    cancelTypewriter();",
+    "new": "    clearActiveMarks();\n    void typewriterTimer; // deliberately: the stale animation is never cancelled, so it wins",
+    "run": "TestTypewriterSupersede"
   }
 ]

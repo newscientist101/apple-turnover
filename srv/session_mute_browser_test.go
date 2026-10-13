@@ -85,6 +85,7 @@ window.strudel = {
       state: {},
     };
   },
+  getAudioContext: function () { return window.__audioContext || null; },
 };
 document.getElementById = function (id) {
   if (id === "play-btn") { return window.__playBtn; }

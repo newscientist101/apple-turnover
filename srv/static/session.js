@@ -1084,14 +1084,18 @@ function reportAudienceSamples(force) {
       try {
         if (sounding) {
           // Resume the AudioContext if suspended (strudel-agent-3q0.6).
-          // The pinned bundle's repl exposes audioContext; if it is
-          // suspended, resume it before starting. The resume is async and
-          // best-effort: we do not await it, because the harness thenables
-          // do not assimilate, and in the real browser the start() call
-          // will queue behind the resume anyway. If the context is missing
-          // or resume fails, we still call start() and let the browser
-          // decide.
-          var ctx = liveRepl.audioContext;
+          // The pinned bundle exposes the AudioContext via
+          // window.strudel.getAudioContext(); if it is suspended, resume it
+          // before starting. The resume is async and best-effort: we do not
+          // await it, because the harness thenables do not assimilate, and
+          // in the real browser the start() call will queue behind the
+          // resume anyway. If the context is missing or resume fails, we
+          // still call start() and let the browser decide.
+          var strudel = window.strudel || window.strudelScope || null;
+          var ctx = strudel && typeof strudel.getAudioContext === "function" ? strudel.getAudioContext() : null;
+          if (!ctx && liveRepl && liveRepl.audioContext) {
+            ctx = liveRepl.audioContext;
+          }
           if (ctx && ctx.state === "suspended" && typeof ctx.resume === "function") {
             ctx.resume().catch(function (err) {
               // Best-effort: do not warn, because a suspended context that

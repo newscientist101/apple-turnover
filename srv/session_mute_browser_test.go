@@ -173,6 +173,53 @@ func transportFrame(playing bool) string {
 	return `JSON.stringify({ kind: "transport", snapshot: { playing: false } })`
 }
 
+// rejectionLog records goja's promise-rejection-tracker events, so tests can
+// assert on the REAL async seam. The pinned bundle's scheduler start() is
+// async: with no pattern committed it returns a REJECTED promise, and a
+// try/catch-only swallow cannot see it. Headless, that escape is a Reject
+// event with no matching Handle -- the shape of the browser console's
+// "Uncaught (in promise)" on every fresh boot. A rejection the served code
+// swallows appears as a Reject+Handle pair; one it drops is a lone Reject.
+type rejectionLog struct {
+	rejects []string
+	handles int
+}
+
+func trackRejections(rt *syncRuntime) *rejectionLog {
+	log := &rejectionLog{}
+	rt.vm.SetPromiseRejectionTracker(func(p *goja.Promise, op goja.PromiseRejectionOperation) {
+		if op == goja.PromiseRejectionReject {
+			reason := ""
+			if r := p.Result(); r != nil {
+				reason = r.String()
+			}
+			log.rejects = append(log.rejects, reason)
+		} else {
+			log.handles++
+		}
+	})
+	return log
+}
+
+func (l *rejectionLog) hasRejectWith(substr string) bool {
+	for _, reason := range l.rejects {
+		if strings.Contains(reason, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// unhandled returns the recorded rejections no handler ever attached to.
+// Rejections are serial in these flows, so handles pair with the earliest
+// rejects in order; anything beyond the handle count escaped.
+func (l *rejectionLog) unhandled() []string {
+	if len(l.rejects) <= l.handles {
+		return nil
+	}
+	return l.rejects[l.handles:]
+}
+
 // TestBootStartsPlayingWithMuteLabel is the behaviour the feature exists
 // for: a fresh tab applies the boot intent without a click, so the stub
 // live repl is started exactly once and the button reads Mute.
@@ -376,17 +423,21 @@ func TestUnmuteIntoHushedServerStaysSilent(t *testing.T) {
 // re-applies effective audio (desiredPlaying && !localMuted).
 func TestBootRetriesStartUntilPatternLands(t *testing.T) {
 	rt := newMuteRuntime(t)
+	rejections := trackRejections(rt)
 	rt.run(`window.__warns = [];
 	window.__liveStarts = 0;
 	window.__liveStops = 0;
 	window.__liveHasPattern = false;
 	window.__liveStub = {
-	  start: function () {
-	    // The pinned bundle's scheduler start() with no pattern set
-	    // REJECTS: model it as a throw of the bundle's own message, so the
-	    // test pins both halves of the ordering contract -- the boot start
-	    // is attempted against a pattern-less repl (and must stay silent),
-	    // then retried once the first commit lands (and must take effect).
+	  start: async function () {
+	    // The pinned bundle's scheduler start is async: with no pattern set
+	    // it REJECTS with the bundle's own message rather than throwing
+	    // synchronously, so the test pins both halves of the ordering
+	    // contract on the real seam -- the boot start is attempted against
+	    // a pattern-less repl (and must stay silent), then retried once the
+	    // first commit lands (and must take effect). A synchronous throw
+	    // would model a seam the pinned bundle does not have
+	    // (strudel-agent-dbo.1.2).
 	    if (window.__liveHasPattern) { window.__liveStarts++; }
 	    else { throw new Error("Scheduler: no pattern set! call .setPattern first."); }
 	  },
@@ -409,6 +460,16 @@ func TestBootRetriesStartUntilPatternLands(t *testing.T) {
 	// effective start happened, but the button already reads Mute.
 	if got := liveStarts(t, rt); got != 0 {
 		t.Fatalf("live repl starts after pattern-less boot = %d, want 0 (the boot start must be ineffective without a pattern)", got)
+	}
+	// The boot ordering is a rejected PROMISE, not a sync throw, so only a
+	// rejection handler swallows it. A rejection with no handler is the
+	// headless shape of the console's Uncaught (in promise) on every fresh
+	// boot -- the defect this bead exists for.
+	if !rejections.hasRejectWith("no pattern set") {
+		t.Fatalf("no missing-pattern rejection observed at boot: the stub must reject async to model the pinned bundle seam")
+	}
+	if unhandled := rejections.unhandled(); len(unhandled) != 0 {
+		t.Fatalf("unhandled promise rejections after pattern-less boot: %q (the missing-pattern rejection must be swallowed, not escape)", unhandled)
 	}
 	if got := muteLabel(t, rt); got != "Mute" {
 		t.Fatalf("button label after boot = %q, want %q", got, "Mute")
@@ -440,6 +501,70 @@ func TestBootRetriesStartUntilPatternLands(t *testing.T) {
 	// own re-apply.
 	if got := rt.eval(`window.__warns.join("\n")`).String(); strings.Contains(got, "playing state") {
 		t.Errorf("boot ordering produced an audio warning %q: the missing-pattern start must be swallowed, not warned", got)
+	}
+}
+
+// TestStartRejectionWarnsUnlessMissingPattern pins the swallow's other half:
+// refreshAudio attaches a rejection handler to whatever start() returns, but
+// swallows ONLY the pinned bundle's missing-pattern ordering. Any other
+// async audio failure must still warn -- otherwise the boot fix would train
+// operators to ignore the audio-failure signal. Drives the SERVED
+// session.js with three async stubs on the real seam: the bundle-shaped
+// missing-pattern reject (swallowed), a foreign async failure (warns), and
+// a legacy SYNC throw (the try/catch half, still guarded).
+func TestStartRejectionWarnsUnlessMissingPattern(t *testing.T) {
+	cases := []struct {
+		name        string
+		startJS     string
+		wantStarts  int64
+		wantWarning bool
+	}{
+		{
+			name:        "missing-pattern reject is swallowed",
+			startJS:     `async function () { throw new Error("Scheduler: no pattern set! call .setPattern first."); }`,
+			wantStarts:  0,
+			wantWarning: false,
+		},
+		{
+			name:        "foreign async failure still warns",
+			startJS:     `async function () { throw new Error("boom: output device lost"); }`,
+			wantStarts:  0,
+			wantWarning: true,
+		},
+		{
+			name:        "legacy sync throw still guarded",
+			startJS:     `function () { throw new Error("old stub: audio unavailable"); }`,
+			wantStarts:  0,
+			wantWarning: true,
+		},
+		{
+			name:        "resolving async start warns nothing",
+			startJS:     `async function () { window.__liveStarts++; }`,
+			wantStarts:  1,
+			wantWarning: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := newMuteRuntime(t)
+			rejections := trackRejections(rt)
+			rt.run(`window.__warns = [];
+			console.warn = function (m) { window.__warns.push(String(m)); };
+			window.__liveStarts = 0;
+			window.__liveStub = { start: ` + tc.startJS + `, stop: function () {} };`)
+			bootSettle(rt)
+			rt.settle()
+			if got := liveStarts(t, rt); got != tc.wantStarts {
+				t.Errorf("live repl starts = %d, want %d", got, tc.wantStarts)
+			}
+			warns := rt.eval(`window.__warns.join("\\n")`).String()
+			if warned := strings.Contains(warns, "playing state"); warned != tc.wantWarning {
+				t.Errorf("audio warning present = %v, want %v (warns = %q)", warned, tc.wantWarning, warns)
+			}
+			if unhandled := rejections.unhandled(); len(unhandled) != 0 {
+				t.Errorf("unhandled promise rejections: %q (every start() rejection must be handled)", unhandled)
+			}
+		})
 	}
 }
 

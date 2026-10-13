@@ -1101,7 +1101,22 @@ function reportAudienceSamples(force) {
               // (armGestureUnlock) supplies the one thing policy demands.
             });
           }
-          liveRepl.start();
+          var started = liveRepl.start();
+          // The pinned bundle's start is ()=>S.start() where the cyclist's
+          // start is async: with no pattern committed it returns a REJECTED
+          // promise, which try/catch cannot see. Attach the same swallow to
+          // the rejection -- but only when start() returned something
+          // thenable (the goja stubs return plain values) -- so the expected
+          // boot ordering stays silent while any other audio failure still
+          // warns. The try/catch stays: it still guards stop() and older
+          // stubs that throw synchronously.
+          if (started && typeof started.then === "function") {
+            started.then(undefined, function (err) {
+              if (!isMissingPattern(err)) {
+                console.warn("[session] Error setting live repl playing state:", err);
+              }
+            });
+          }
         } else {
           liveRepl.stop();
         }

@@ -1517,8 +1517,8 @@
   {
     "name": "223-audiocontext-resume-removed",
     "file": "srv/static/session.js",
-    "old": "          var ctx = audioContextOf();\n          if (ctx && ctx.state === \"suspended\" && typeof ctx.resume === \"function\") {\n            ctx.resume().catch(function (err) {\n              // Best-effort: do not warn, because a suspended context that\n              // refuses resume is the browser's autoplay policy, not a\n              // defect. The start() call below will either produce sound\n              // (policy allows) or stay silent until the gesture unlock\n              // (armGestureUnlock) supplies the one thing policy demands.\n            });\n          }\n          liveRepl.start();",
-    "new": "          liveRepl.start(); // deliberately: AudioContext resume removed, so autoplay policy keeps the tab silent",
+    "old": "          var ctx = audioContextOf();\n          if (ctx && ctx.state === \"suspended\" && typeof ctx.resume === \"function\") {\n            ctx.resume().catch(function (err) {\n              // Best-effort: do not warn, because a suspended context that\n              // refuses resume is the browser's autoplay policy, not a\n              // defect. The start() call below will either produce sound\n              // (policy allows) or stay silent until the gesture unlock\n              // (armGestureUnlock) supplies the one thing policy demands.\n            });\n          }\n          var started = liveRepl.start();",
+    "new": "          var started = liveRepl.start(); // deliberately: AudioContext resume removed, so autoplay policy keeps the tab silent",
     "run": "TestAudioContextResumesOnBootStart"
   },
   {

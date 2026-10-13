@@ -59,13 +59,15 @@ window.__audioContext = {
 // patternGatedLiveJS installs the live stub whose start() is ineffective
 // before the first setPattern, mirroring the pinned bundle's scheduler
 // rejection, and whose commit continuation must be fired by hand because
-// harness thenables never assimilate under await.
+// harness thenables never assimilate under await. start() is async so the
+// rejection is a rejected PROMISE, the seam the pinned bundle has: a
+// synchronous throw would model one it does not (strudel-agent-dbo.1.2).
 const patternGatedLiveJS = `
 window.__liveStarts = 0;
 window.__liveStops = 0;
 window.__liveHasPattern = false;
 window.__liveStub = {
-  start: function () {
+  start: async function () {
     if (window.__liveHasPattern) { window.__liveStarts++; }
     else { throw new Error("Scheduler: no pattern set! call .setPattern first."); }
   },

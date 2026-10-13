@@ -1391,8 +1391,8 @@
   {
     "name": "205-highlight-never-clears-marks",
     "file": "srv/static/editor.js",
-    "old": "  function setActiveSpans(spans) {\n    clearActiveMarks();",
-    "new": "  function setActiveSpans(spans) {\n    void spans; activeMarks = activeMarks; // deliberately: append-only, stale outlines never clear",
+    "old": "    clearActiveMarks();\n    if (!cm) {\n      return;\n    }",
+    "new": "    void spans; activeMarks = activeMarks; // deliberately: append-only, stale outlines never clear\n    if (!cm) {\n      return;\n    }",
     "run": "TestHighlightMarkClearsWhenHapEnds|TestHighlightNoPatternClears|TestHighlightVersionChangeClears"
   },
   {
@@ -1583,5 +1583,12 @@
     "old": "    clearActiveMarks();\n    cancelTypewriter();",
     "new": "    clearActiveMarks();\n    void typewriterTimer; // deliberately: the stale animation is never cancelled, so it wins",
     "run": "TestTypewriterSupersede"
+  },
+  {
+    "name": "233-typewriter-highlight-suppression-removed",
+    "file": "srv/static/editor.js",
+    "old": "    if (typewriterAnimating) {\n      clearActiveMarks();\n      if (spans && typeof spans.length === 'number' && spans.length > 0) {",
+    "new": "    if (false) { // deliberately: marks are placed mid-animation again, onto text that does not exist yet\n      clearActiveMarks();\n      if (spans && typeof spans.length === 'number' && spans.length > 0) {",
+    "run": "TestTypewriterHighlightSuppressed"
   }
 ]

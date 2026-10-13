@@ -43,6 +43,15 @@
   // in-flight setTimeout and re-derives from the live buffer (churn
   // RETARGET, single-flight). The handle is the only cross-tick state.
   var typewriterTimer = null;
+  // Highlight suppression (issue strudel-agent-3f2.4, design D3 choice
+  // (a) SUPPRESS/FREEZE). While the displayed document is mid-edit it is
+  // NOT the committed document, so no span can be document-true yet.
+  // typewriterAnimating is true from animation start to convergence (at
+  // most the TOTAL_BUDGET 1500ms pacing window); pendingSpans holds at
+  // most ONE buffered span set (newer overwrites, never appends),
+  // re-applied document-true against the final document at convergence.
+  var typewriterAnimating = false;
+  var pendingSpans = null;
 
   function findTextarea() {
     if (textarea) {
@@ -143,11 +152,21 @@
 
   // typewriterFinish lands the script exactly and disarms. Every path
   // through the animation — stepped convergence, instant clamp, supersede
-  // landing — funnels here so the end state is provably exact.
+  // landing — funnels here so the end state is provably exact. Landing
+  // also ends highlight suppression: the buffered span set, if any, is
+  // re-applied via the real setActiveSpans against the final document,
+  // document-true by construction (marks never appear on text that does
+  // not exist yet).
   function typewriterFinish(target) {
     typewriterTimer = null;
     if (cm.getValue() !== target) {
       cm.setValue(target);
+    }
+    typewriterAnimating = false;
+    var buffered = pendingSpans;
+    pendingSpans = null;
+    if (buffered && buffered.length > 0) {
+      setActiveSpans(buffered);
     }
   }
 
@@ -217,6 +236,7 @@
       typewriterFinish(script.target);
       return;
     }
+    typewriterAnimating = true;
     typewriterTimer = setTimeout(function () { typewriterStep(script); }, TYPEWRITER_STEP_MS);
   }
 
@@ -235,6 +255,11 @@
     // staleness must resolve to "dark, re-mark next frame").
     clearActiveMarks();
     cancelTypewriter();
+    // The abandoned script's buffered spans describe a document that will
+    // never land; drop them with the script. The new animation (or the
+    // instant path, which converges synchronously below) starts clean.
+    typewriterAnimating = false;
+    pendingSpans = null;
     if (cm) {
       if (cm.hasFocus && cm.hasFocus()) {
         return;
@@ -303,6 +328,20 @@
   // handle. A no-op when CodeMirror is absent: the plain textarea shows no
   // highlight but keeps working.
   function setActiveSpans(spans) {
+    // While the typewriter animation is in flight the displayed document
+    // is mid-edit, so no span can be document-true: buffer the latest set
+    // (one slot, newer overwrites) and place nothing. An empty set still
+    // clears the buffer, preserving the clear contract. The buffer is
+    // re-applied at convergence via this same function.
+    if (typewriterAnimating) {
+      clearActiveMarks();
+      if (spans && typeof spans.length === 'number' && spans.length > 0) {
+        pendingSpans = spans;
+      } else {
+        pendingSpans = null;
+      }
+      return;
+    }
     clearActiveMarks();
     if (!cm) {
       return;

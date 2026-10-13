@@ -40,6 +40,14 @@ window.__cmChangeHandlers = [];
 window.__twCursorLog = [];
 window.__twScrollLog = [];
 window.__twSetValueCalls = 0;
+// Mark recording (issue strudel-agent-3f2.4): the same record shape as
+// highlightEditorPrelude, so liveHighlightMarks works on this harness too.
+// highlightEditorPrelude already defined window.__liveMarks; this fake only
+// feeds its window.__cmMarks backing store.
+window.__cmMarks = [];
+window.__liveMarks = function () {
+  return window.__cmMarks.filter(function (m) { return !m.cleared; });
+};
 window.CodeMirror = {
   version: "5.65.16",
   fromTextArea: function (el, opts) {
@@ -52,6 +60,9 @@ window.CodeMirror = {
       setValue: function (v) {
         window.__twSetValueCalls++;
         cm.__doc = String(v);
+        // Like the real CodeMirror, a document swap drops all marks.
+        window.__cmMarks.forEach(function (m) { m.cleared = true; });
+        window.__cmMarks.length = 0;
         cm.__noteChange();
       },
       __noteChange: function () {
@@ -85,7 +96,9 @@ window.CodeMirror = {
         }
       },
       markText: function (from, to, options) {
-        return { clear: function () {} };
+        var rec = { from: from, to: to, options: options || {}, cleared: false };
+        window.__cmMarks.push(rec);
+        return { clear: function () { rec.cleared = true; } };
       },
       scrollIntoView: function (pos) { window.__twScrollLog.push(cm.__idx(pos)); },
       getCursor: function () { return { line: cm.__cursor.line, ch: cm.__cursor.ch }; },
@@ -417,6 +430,68 @@ window.strudelSession.handleFrame(JSON.stringify({
 	}
 }
 
+// TestTypewriterHighlightSuppressed proves the choice-(a) highlight
+// interplay (issue strudel-agent-3f2.4, design D3): while the typewriter
+// animation is in flight the displayed document is NOT the committed
+// document, so setActiveSpans must SUPPRESS marks — it buffers the latest
+// span set (one slot, newer overwrites) and places zero live marks — and
+// re-apply them document-true against the FINAL document at convergence.
+// The pnn.5 invariant survives: marks never appear on text that does not
+// exist yet, and once the animation lands they are the FINAL document's
+// [3,5). An empty active set still clears, preserving the clear contract.
+func TestTypewriterHighlightSuppressed(t *testing.T) {
+	rt := newTypewriterRuntime(t)
+	twSetDoc(rt, `s("bd")`)
+	target := `s("bd cp")`
+	b, _ := json.Marshal(target)
+	rt.run("window.strudelEditor.setCode(" + string(b) + ");")
+	if got := twDoc(rt); got == target {
+		t.Fatalf("setCode landed instantly: the animation never started, so suppression races nothing")
+	}
+	if n := twPendingTimers(rt); n != 1 {
+		t.Fatalf("__pendingTimers() = %d mid-animation, want exactly 1", n)
+	}
+	// Mid-animation marks must be suppressed, not placed: the live
+	// document is mid-edit, so any [3,5) mark would sit on text that
+	// does not exist yet.
+	rt.run(`window.strudelEditor.setActiveSpans([{ start: 3, end: 5 }]);`)
+	if marks := liveHighlightMarks(rt); len(marks) != 0 {
+		t.Fatalf("live marks mid-animation = %+v, want none: marks must be suppressed while the document is mid-edit", marks)
+	}
+	// A newer span set overwrites the buffered one: the buffer holds at
+	// most one span set, never appends.
+	rt.run(`window.strudelEditor.setActiveSpans([{ start: 6, end: 8 }]); window.strudelEditor.setActiveSpans([{ start: 3, end: 5 }]);`)
+	if marks := liveHighlightMarks(rt); len(marks) != 0 {
+		t.Fatalf("live marks after re-buffering = %+v, want none: the buffer must hold, not place", marks)
+	}
+	// Convergence re-applies the LATEST buffered set document-true
+	// against the final document: exactly the [3,5) the spanframe tests
+	// pin, never the overwritten [6,8).
+	twConverge(rt, 60)
+	if got := twDoc(rt); got != target {
+		t.Fatalf("final document = %q, want %q: the animation must land before marks are asserted", got, target)
+	}
+	marks := liveHighlightMarks(rt)
+	if len(marks) != 1 {
+		t.Fatalf("live marks after convergence = %+v, want exactly 1: the buffered spans must re-apply document-true", marks)
+	}
+	if marks[0].From.Ch != 3 || marks[0].To.Ch != 5 {
+		t.Errorf("marked range after convergence = %d..%d, want 3..5: re-applied marks must sit on the FINAL document's token", marks[0].From.Ch, marks[0].To.Ch)
+	}
+	// An empty active set still clears: the clear contract survives the
+	// suppression path.
+	rt.run(`window.strudelEditor.setActiveSpans([]);`)
+	if marks := liveHighlightMarks(rt); len(marks) != 0 {
+		t.Errorf("live marks after empty setActiveSpans = %+v, want none: an empty active set must clear all marks", marks)
+	}
+	// A span set arriving after convergence applies immediately: the
+	// window only lasts while animating (<=1500ms by the pacing budget).
+	rt.run(`window.strudelEditor.setActiveSpans([{ start: 3, end: 5 }]);`)
+	if marks := liveHighlightMarks(rt); len(marks) != 1 {
+		t.Errorf("live marks after post-convergence setActiveSpans = %+v, want exactly 1: suppression must end at convergence", marks)
+	}
+}
+
 // TestTypewriterTextareaFallback proves the no-CM path is a documented
 // no-op: setCode swaps instantly, arms zero timers, and leaves the exact
 // value in the textarea.
@@ -442,5 +517,21 @@ document.getElementById = function (id) {
 	}
 	if n := rt.eval("window.__pendingTimers()").ToInteger(); n != 0 {
 		t.Errorf("__pendingTimers() = %d on the textarea path, want 0: the fallback armed a timer", n)
+	}
+	// Combined highlight + fallback (issue strudel-agent-3f2.4): the
+	// textarea path is a documented no-op for highlighting too — the
+	// actuator stays silent and leaves the value alone, before and after
+	// the swap.
+	before := rt.eval("JSON.stringify(window.__plainTextarea.value)").String()
+	rt.run(`window.strudelEditor.setActiveSpans([{ start: 3, end: 5 }]);`)
+	if got := rt.eval("JSON.stringify(window.__plainTextarea.value)").String(); got != before {
+		t.Errorf("textarea value after setActiveSpans = %s, want %s: the highlight must not touch the fallback document", got, before)
+	}
+	if n := rt.eval("window.__pendingTimers()").ToInteger(); n != 0 {
+		t.Errorf("__pendingTimers() = %d after fallback setActiveSpans, want 0: highlighting must arm no timers", n)
+	}
+	rt.run(`window.strudelEditor.setCode('s("hh")'); window.strudelEditor.setActiveSpans([]);`)
+	if got := rt.eval("JSON.stringify(window.__plainTextarea.value)").String(); got != `"s(\"hh\")"` {
+		t.Errorf("textarea value = %s, want the swapped code: an empty highlight set must not disturb the fallback document", got)
 	}
 }

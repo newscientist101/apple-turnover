@@ -1517,7 +1517,7 @@
   {
     "name": "223-audiocontext-resume-removed",
     "file": "srv/static/session.js",
-    "old": "          var ctx = liveRepl.audioContext;\n          if (ctx && ctx.state === \"suspended\" && typeof ctx.resume === \"function\") {\n            ctx.resume().catch(function (err) {\n              // Best-effort: do not warn, because a suspended context that\n              // refuses resume is the browser's autoplay policy, not a\n              // defect. The start() call below will either produce sound\n              // (policy allows) or stay silent (policy blocks), and the\n              // user's next Mute/Unmute click will retry.\n            });\n          }\n          liveRepl.start();",
+    "old": "          var strudel = window.strudel || window.strudelScope || null;\n          var ctx = strudel && typeof strudel.getAudioContext === \"function\" ? strudel.getAudioContext() : null;\n          if (!ctx && liveRepl && liveRepl.audioContext) {\n            ctx = liveRepl.audioContext;\n          }\n          if (ctx && ctx.state === \"suspended\" && typeof ctx.resume === \"function\") {\n            ctx.resume().catch(function (err) {\n              // Best-effort: do not warn, because a suspended context that\n              // refuses resume is the browser's autoplay policy, not a\n              // defect. The start() call below will either produce sound\n              // (policy allows) or stay silent (policy blocks), and the\n              // user's next Mute/Unmute click will retry.\n            });\n          }\n          liveRepl.start();",
     "new": "          liveRepl.start(); // deliberately: AudioContext resume removed, so autoplay policy keeps the tab silent",
     "run": "TestAudioContextResumesOnBootStart"
   }

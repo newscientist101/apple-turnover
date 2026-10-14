@@ -1026,3 +1026,391 @@ func TestVisualizationServedBytesCarryNoAudioLookup(t *testing.T) {
 		}
 	}
 }
+
+// TestVisualizationLaneDiscoveryRunsOncePerPattern (issue strudel-agent-wnm.2)
+// proves the lane-discovery query is a property of the PATTERN, not of the
+// frame.
+//
+// A spy on queryArc classifies each call by its begin: the discovery query is
+// anchored at cycle 0, and the clock is parked at cycle 2 (__now=4000 with
+// cps 0.5) so the per-frame 2-cycle window query is (2,4) and can never be
+// mistaken for it. The discovery query must run exactly ONCE per setPattern and
+// ZERO times per subsequent frame, while the window query must run once per
+// frame — the two claims are asserted together, because "fewer queries" on its
+// own would pass just as loudly on a renderer that stopped drawing the pattern.
+func TestVisualizationLaneDiscoveryRunsOncePerPattern(t *testing.T) {
+	rt := newVizRuntime(t)
+
+	rt.run(`
+	  window.__queries = [];
+	  var __haps = [
+	    { whole: { begin: 0, end: 1 }, part: { begin: 0, end: 1 }, value: { note: "c2" } },
+	    { whole: { begin: 1, end: 2 }, part: { begin: 1, end: 2 }, value: { note: "c3" } },
+	    { whole: { begin: 2, end: 3 }, part: { begin: 2, end: 3 }, value: { note: "g2" } },
+	    { whole: { begin: 3, end: 4 }, part: { begin: 3, end: 4 }, value: { note: "c4" } },
+	  ];
+	  window.__pattern = {
+	    queryArc: function (begin, end) {
+	      window.__queries.push({ begin: begin, end: end });
+	      return __haps.filter(function (h) { return h.whole.begin < end && h.whole.end > begin; });
+	    },
+	  };
+	  window.__discoveryQueries = function () {
+	    return window.__queries.filter(function (q) { return q.begin === 0; }).length;
+	  };
+	  window.__windowQueries = function () {
+	    return window.__queries.filter(function (q) { return q.begin !== 0; }).length;
+	  };
+	  window.strudelViz.onSnapshot({ anchor: { epochMs: 0, cps: 0.5 } });
+	  window.strudelViz.setPattern(window.__pattern);
+	`)
+
+	// setPattern is where the rows are discovered: once, and before any frame.
+	if got := rt.eval("window.__discoveryQueries()").ToInteger(); got != 1 {
+		t.Fatalf("discovery queries after one setPattern = %d, want 1: the lane rows must be computed when the pattern lands", got)
+	}
+	if got := rt.eval("window.__windowQueries()").ToInteger(); got != 0 {
+		t.Fatalf("window queries before the first frame = %d, want 0: setPattern must not draw", got)
+	}
+
+	// Three frames at cycle 2: no further discovery, one window query each.
+	rt.run(`
+	  window.__setNow(4000);
+	  window.__ctxCalls.fillText.length = 0;
+	  window.__runOneFrame();
+	  window.__runOneFrame();
+	  window.__runOneFrame();
+	`)
+	if got := rt.eval("window.__discoveryQueries()").ToInteger(); got != 1 {
+		t.Errorf("discovery queries after 3 frames = %d, want 1: the discovery query is being recomputed every frame", got)
+	}
+	if got := rt.eval("window.__windowQueries()").ToInteger(); got != 3 {
+		t.Errorf("window queries after 3 frames = %d, want 3: the 2-cycle window query must still run every frame", got)
+	}
+
+	// The cached rows must still be the ones drawn: all four polymeter lanes
+	// get rows even though the window [2,4) holds only two of them.
+	labels := vizLaneLabels(rt)
+	for _, want := range []string{"c2", "c3", "g2", "c4"} {
+		if !containsLabel(labels, want) {
+			t.Errorf("lane labels = %v, want a row for %q: caching the discovery must not lose the pattern-wide row set", labels, want)
+		}
+	}
+
+	// A SECOND pattern re-discovers exactly once: the cache is keyed to the
+	// pattern, not computed once per page load.
+	rt.run(`window.__queries.length = 0; window.strudelViz.setPattern(window.__pattern);`)
+	if got := rt.eval("window.__discoveryQueries()").ToInteger(); got != 1 {
+		t.Errorf("discovery queries after a second setPattern = %d, want 1: a new pattern must re-discover its rows", got)
+	}
+
+	// A null pattern clears the cache: no rows survive, and with no pattern
+	// there is nothing to query at all.
+	rt.run(`
+	  window.__queries.length = 0;
+	  window.__ctxCalls.fillText.length = 0;
+	  window.strudelViz.setPattern(null);
+	  window.__runOneFrame();
+	`)
+	if got := rt.eval("window.__queries.length").ToInteger(); got != 0 {
+		t.Errorf("queryArc calls after setPattern(null) plus a frame = %d, want 0: a null pattern must clear the cache, not keep querying the old one", got)
+	}
+	if labels := vizLaneLabels(rt); len(labels) != 1 || labels[0] != "other" {
+		t.Errorf("lane labels with a null pattern = %v, want exactly [other]: the previous pattern's rows are still on screen", labels)
+	}
+}
+
+// TestVisualizationCachesTheCanvasRectAcrossFrames (issue strudel-agent-wnm.1)
+// proves the layout read is not repeated per frame.
+//
+// getBoundingClientRect() is the frame's only layout read, and the editor's
+// markText write (setActiveSpans) dirties layout — so a per-frame read forced
+// the browser to reflow synchronously between the two, every frame. The count
+// is asserted directly (one read across four frames), then invalidated by a
+// resize and re-measured, so the cache cannot be "fixed" by never reading at
+// all: a canvas that grew must be picked up.
+func TestVisualizationCachesTheCanvasRectAcrossFrames(t *testing.T) {
+	rt := newVizRuntime(t)
+
+	rt.run(`
+	  window.__rectReads = 0;
+	  window.__rectWidth = 400;
+	  __canvas.getBoundingClientRect = function () {
+	    window.__rectReads += 1;
+	    return { width: window.__rectWidth, height: 160, top: 0, left: 0 };
+	  };
+	  window.strudelViz.onSnapshot({ anchor: { epochMs: 0, cps: 0.5 } });
+	  window.strudelViz.setPattern({
+	    queryArc: function (begin, end) {
+	      return [{ whole: { begin: begin, end: begin + 0.5 }, part: { begin: begin, end: begin + 0.5 }, value: { s: "bd" } }];
+	    },
+	  });
+	  window.__runOneFrame();
+	  window.__runOneFrame();
+	  window.__runOneFrame();
+	  window.__runOneFrame();
+	`)
+
+	if got := rt.eval("window.__rectReads").ToInteger(); got != 1 {
+		t.Errorf("canvas rect reads across 4 frames = %d, want 1: a stable rect is being re-measured every frame, forcing a reflow after the editor write", got)
+	}
+	if got := rt.eval("__canvas.width").ToInteger(); got != 400 {
+		t.Errorf("canvas.width = %d, want 400: the cached rect must still size the backing store", got)
+	}
+
+	// A resize invalidates the cache: the next frame re-measures and resizes.
+	rt.run(`
+	  window.__rectWidth = 800;
+	  window.__fireEvent('resize');
+	  window.__runOneFrame();
+	`)
+	if got := rt.eval("window.__rectReads").ToInteger(); got != 2 {
+		t.Errorf("canvas rect reads after a resize = %d, want 2: the resize must invalidate the cached rect", got)
+	}
+	if got := rt.eval("__canvas.width").ToInteger(); got != 800 {
+		t.Errorf("canvas.width after the resize = %d, want 800: the re-measured rect must reach the backing store", got)
+	}
+
+	// Frames after that read nothing new: the invalidation is per resize, not
+	// a fallback to reading every frame.
+	rt.run(`window.__runOneFrame();`)
+	if got := rt.eval("window.__rectReads").ToInteger(); got != 2 {
+		t.Errorf("canvas rect reads after one more frame = %d, want 2: the rect is being read every frame again", got)
+	}
+}
+
+// TestVisualizationResizeObserverInvalidatesTheCachedRect (issue
+// strudel-agent-wnm.1) proves the observer path, for a canvas that changes size
+// without the window resizing.
+//
+// The observer is constructed lazily by the first frame, so the fake can be
+// installed after load. Both facts are asserted: it observes the canvas the
+// frame measured (an observer on some other element would never fire), and its
+// callback is what re-measures.
+func TestVisualizationResizeObserverInvalidatesTheCachedRect(t *testing.T) {
+	rt := newVizRuntime(t)
+
+	rt.run(`
+	  window.__rectReads = 0;
+	  window.__rectWidth = 400;
+	  __canvas.getBoundingClientRect = function () {
+	    window.__rectReads += 1;
+	    return { width: window.__rectWidth, height: 160, top: 0, left: 0 };
+	  };
+	  window.__observed = [];
+	  window.ResizeObserver = function (cb) {
+	    window.__roCallback = cb;
+	    this.observe = function (el) { window.__observed.push(el); };
+	    this.disconnect = function () {};
+	  };
+	  window.strudelViz.onSnapshot({ anchor: { epochMs: 0, cps: 0.5 } });
+	  window.strudelViz.setPattern({ queryArc: function (begin, end) { return []; } });
+	  window.__runOneFrame();
+	`)
+
+	if got := rt.eval("window.__observed.length").ToInteger(); got != 1 {
+		t.Fatalf("ResizeObserver observed %d element(s), want 1: the observer must be attached", got)
+	}
+	if got := rt.eval("window.__observed[0] === __canvas").ToBoolean(); !got {
+		t.Error("ResizeObserver is not observing the canvas the frame measured: its callback could never fire for a canvas resize")
+	}
+	if got := rt.eval("window.__rectReads").ToInteger(); got != 1 {
+		t.Fatalf("canvas rect reads after 1 frame = %d, want 1", got)
+	}
+
+	// The canvas grows with no window resize event at all — the observer is
+	// the only thing that can notice.
+	rt.run(`
+	  window.__rectWidth = 640;
+	  window.__roCallback([{ target: __canvas }]);
+	  window.__runOneFrame();
+	`)
+	if got := rt.eval("window.__rectReads").ToInteger(); got != 2 {
+		t.Errorf("canvas rect reads after a ResizeObserver callback = %d, want 2: the callback must invalidate the cached rect", got)
+	}
+	if got := rt.eval("__canvas.width").ToInteger(); got != 640 {
+		t.Errorf("canvas.width after the ResizeObserver callback = %d, want 640", got)
+	}
+}
+
+// TestVisualizationHighlightStillUpdatesEveryFrame (issue strudel-agent-wnm.1)
+// proves the reflow fix changed the READ cadence and nothing else: the
+// sounding-token highlight is still recomputed from the anchor-derived cycle on
+// every frame, so marks stay document-true and follow the clock, while the
+// canvas rect is still measured only once.
+func TestVisualizationHighlightStillUpdatesEveryFrame(t *testing.T) {
+	rt := newHighlightRuntime(t)
+	requireHighlightActuator(rt)
+
+	rt.run(`
+	  window.__rectReads = 0;
+	  __canvas.getBoundingClientRect = function () {
+	    window.__rectReads += 1;
+	    return { width: 400, height: 160, top: 0, left: 0 };
+	  };
+	`)
+	installTwoHapPattern(rt)
+
+	// Cycle 0.1: hap A sounds, so its token [3,5) is outlined.
+	rt.run(`window.__setNow(200); window.__runOneFrame();`)
+	marks := liveHighlightMarks(rt)
+	if len(marks) != 1 || marks[0].From.Ch != 3 || marks[0].To.Ch != 5 {
+		t.Fatalf("live marks at cycle 0.1 = %+v, want hap A's 3..5", marks)
+	}
+
+	// Cycle 0.5: hap B sounds, so the mark must MOVE to [6,8). A cached
+	// highlight (or a cached anything the highlight depends on) would leave
+	// hap A outlined.
+	rt.run(`window.__setNow(1000); window.__runOneFrame();`)
+	marks = liveHighlightMarks(rt)
+	if len(marks) != 1 || marks[0].From.Ch != 6 || marks[0].To.Ch != 8 {
+		t.Errorf("live marks at cycle 0.5 = %+v, want hap B's 6..8: the highlight must still be recomputed every frame", marks)
+	}
+
+	if got := rt.eval("window.__rectReads").ToInteger(); got != 1 {
+		t.Errorf("canvas rect reads across 2 frames = %d, want 1: the highlight update must not reintroduce a per-frame layout read", got)
+	}
+}
+
+// TestVisualizationReadsTheCanvasRectBeforeTheEditorWrite (issue
+// strudel-agent-wnm.1) pins the ORDERING, which is the other half of the reflow
+// fix and is not implied by the read COUNT.
+//
+// A reflow is forced by reading layout after a write has dirtied it. Caching
+// the rect removes the read entirely, but any read that does happen must still
+// precede the editor's markText write rather than follow it — otherwise the
+// first frame after every resize pays the full reflow the fix exists to
+// remove. The two calls are traced in order through the served modules; a
+// mutation that moves the highlight call above the measurement fails here even
+// though the frame still draws.
+func TestVisualizationReadsTheCanvasRectBeforeTheEditorWrite(t *testing.T) {
+	rt := newHighlightRuntime(t)
+	requireHighlightActuator(rt)
+
+	rt.run(`
+	  window.__order = [];
+	  var __realRect = __canvas.getBoundingClientRect;
+	  __canvas.getBoundingClientRect = function () {
+	    window.__order.push('read');
+	    return __realRect();
+	  };
+	  var __realSetSpans = window.strudelEditor.setActiveSpans;
+	  window.strudelEditor.setActiveSpans = function (spans) {
+	    window.__order.push('write');
+	    return __realSetSpans(spans);
+	  };
+	`)
+	installTwoHapPattern(rt)
+
+	// One frame on a stable rect (cached read), then one after a resize (the
+	// read runs again): in both, every measurement precedes every write.
+	rt.run(`window.__setNow(200); window.__runOneFrame();`)
+	first := vizRectAndWriteOrder(rt)
+	if len(first) == 0 {
+		t.Fatalf("traced call order = %v, want at least one layout read and one editor write per frame", first)
+	}
+	assertReadsBeforeWrites(t, first)
+
+	rt.run(`
+	  window.__order.length = 0;
+	  window.__fireEvent('resize');
+	  window.__setNow(1000);
+	  window.__runOneFrame();
+	`)
+	second := vizRectAndWriteOrder(rt)
+	if len(second) == 0 {
+		t.Fatalf("traced call order after a resize = %v, want the rect re-measured and the highlight rewritten", second)
+	}
+	assertReadsBeforeWrites(t, second)
+
+	// And the marks are still right, so the reordering was not "fixed" by
+	// dropping the highlight: at cycle 0.5 hap B sounds.
+	marks := liveHighlightMarks(rt)
+	if len(marks) != 1 || marks[0].From.Ch != 6 || marks[0].To.Ch != 8 {
+		t.Errorf("live marks = %+v, want hap B's 6..8", marks)
+	}
+}
+
+// vizRectAndWriteOrder returns the traced "read"/"write" sequence of the last
+// frame.
+func vizRectAndWriteOrder(rt *syncRuntime) []string {
+	rt.t.Helper()
+	raw := rt.eval("JSON.stringify(window.__order)").String()
+	var order []string
+	if err := json.Unmarshal([]byte(raw), &order); err != nil {
+		rt.t.Fatalf("decoding the traced call order %s: %v", raw, err)
+	}
+	return order
+}
+
+// assertReadsBeforeWrites fails if any layout read follows a write in the
+// traced sequence, which is exactly the interleaving that forces a reflow.
+func assertReadsBeforeWrites(t *testing.T, order []string) {
+	t.Helper()
+	seenWrite := false
+	for i, op := range order {
+		switch op {
+		case "write":
+			seenWrite = true
+		case "read":
+			if seenWrite {
+				t.Errorf("traced call order = %v: a layout read at index %d follows an editor write, which forces a synchronous reflow", order, i)
+				return
+			}
+		}
+	}
+}
+
+// TestVisualizationDoesNotCacheAZeroSizedCanvas (issue strudel-agent-wnm.1)
+// pins the edge the rect cache must not get wrong.
+//
+// A canvas that has not been laid out yet measures 0x0, and that is not a
+// STABLE rect — it is a missing one. Caching it would strand the renderer on a
+// size that never changes, so the frame that finds it must keep measuring until
+// it gets a real size (and draw nothing in the meantime, as it always has).
+func TestVisualizationDoesNotCacheAZeroSizedCanvas(t *testing.T) {
+	rt := newVizRuntime(t)
+
+	rt.run(`
+	  window.__rectReads = 0;
+	  window.__rectWidth = 0;
+	  __canvas.getBoundingClientRect = function () {
+	    window.__rectReads += 1;
+	    return { width: window.__rectWidth, height: window.__rectWidth === 0 ? 0 : 160, top: 0, left: 0 };
+	  };
+	  window.strudelViz.onSnapshot({ anchor: { epochMs: 0, cps: 0.5 } });
+	  window.strudelViz.setPattern({
+	    queryArc: function (begin, end) {
+	      return [{ whole: { begin: begin, end: begin + 0.5 }, part: { begin: begin, end: begin + 0.5 }, value: { s: "bd" } }];
+	    },
+	  });
+	  window.__runOneFrame();
+	  window.__runOneFrame();
+	`)
+
+	// Two zero-sized frames: both measured, neither cached, and neither drew
+	// anything (the pre-existing w<=0 early return).
+	if got := rt.eval("window.__rectReads").ToInteger(); got != 2 {
+		t.Errorf("canvas rect reads across 2 zero-sized frames = %d, want 2: a 0x0 rect must not be cached", got)
+	}
+	if got := rt.eval("window.__ctxCalls.fillRect.length").ToInteger(); got != 0 {
+		t.Errorf("painted %d rect(s) on a 0x0 canvas, want 0", got)
+	}
+
+	// The canvas is laid out: the frame measures it once, caches it, and now
+	// actually paints.
+	rt.run(`
+	  window.__rectWidth = 400;
+	  window.__runOneFrame();
+	  window.__runOneFrame();
+	`)
+	if got := rt.eval("window.__rectReads").ToInteger(); got != 3 {
+		t.Errorf("canvas rect reads after the canvas was laid out = %d, want 3 (one more, then cached)", got)
+	}
+	if got := rt.eval("__canvas.width").ToInteger(); got != 400 {
+		t.Errorf("canvas.width = %d, want 400: the renderer never recovered from the 0x0 rect", got)
+	}
+	if labels := vizLaneLabels(rt); !containsLabel(labels, "bd") {
+		t.Errorf("lane labels = %v, want a row for %q: nothing is drawn once the canvas has a size", labels, "bd")
+	}
+}

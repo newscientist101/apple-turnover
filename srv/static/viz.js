@@ -5,8 +5,125 @@
   var latestSnapshot = null;
   var fallbackEpochMs = null;
 
+  // The lane ROW SET describes the PATTERN, not the 2-cycle window: a bounded
+  // discovery range anchored at cycle 0, so the rows never depend on WHEN you
+  // look. Bounded because a pattern can repeat forever; a pattern whose lanes
+  // spread over more than this still misses rows (documented limitation,
+  // strudel-agent-voo.1).
+  //
+  // It is also a property of the pattern, so it CANNOT change between two
+  // frames of the same pattern: re-running a discovery query on every
+  // animation frame was the most expensive thing the renderer did for an answer
+  // that was already known (strudel-agent-wnm.2). The rows are therefore
+  // computed ONCE per pattern, in setPattern(), and cached here. draw() only
+  // reuses them; the one query it still performs per frame is the 2-cycle
+  // window, which changes every frame by definition.
+  var LANE_DISCOVERY_CYCLES = 64;
+  var discoveryLaneKeys = [];
+  var discoveryLaneKinds = {};
+
+  // The canvas layout rect is the only layout READ in draw(), and the editor's
+  // markText write (setActiveSpans below) dirties layout — so reading the rect
+  // per frame forced a synchronous reflow between the two, every frame
+  // (strudel-agent-wnm.1). The rect is cached instead and re-read only when the
+  // canvas can actually have changed size: a window resize, or a
+  // ResizeObserver callback when the host provides one.
+  var cachedCanvasRect = null;
+  var canvasRectDirty = true;
+  var canvasResizeHooked = false;
+
+  function markCanvasRectDirty() {
+    canvasRectDirty = true;
+  }
+
+  // Install the invalidators once, against the canvas the first frame finds.
+  // Both are feature-detected and individually guarded: a host with neither
+  // keeps the first measured rect (exactly the pre-cache behaviour), and a
+  // listener registry or observer that throws must not take the render loop
+  // with it.
+  function hookCanvasResize(canvas) {
+    if (canvasResizeHooked) {
+      return;
+    }
+    canvasResizeHooked = true;
+    if (typeof window === 'undefined') {
+      return;
+    }
+    if (typeof window.addEventListener === 'function') {
+      try {
+        window.addEventListener('resize', markCanvasRectDirty);
+      } catch (e) {
+        // A host whose listener registry refuses must still draw.
+      }
+    }
+    if (typeof window.ResizeObserver === 'function') {
+      try {
+        new window.ResizeObserver(markCanvasRectDirty).observe(canvas);
+      } catch (e) {
+        // An observer that cannot attach leaves the resize listener above.
+      }
+    }
+  }
+
+  function canvasRectFor(canvas) {
+    if (!canvasRectDirty && cachedCanvasRect) {
+      return cachedCanvasRect;
+    }
+    hookCanvasResize(canvas);
+    var rect = canvas.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) {
+      // A zero-sized canvas is not a stable rect, it is a canvas that has not
+      // been laid out yet (hidden tab, first paint). Caching it would strand
+      // the renderer forever on a rect that never changes, so it is left
+      // un-cached and the next frame measures again.
+      cachedCanvasRect = null;
+      canvasRectDirty = true;
+      return { width: rect.width, height: rect.height };
+    }
+    cachedCanvasRect = { width: rect.width, height: rect.height };
+    canvasRectDirty = false;
+    return cachedCanvasRect;
+  }
+
+  // Group the discovery haps into the lane ROW SET for one pattern. Anchored at
+  // cycle 0 so the rows never depend on when you look. A lane keeps the kind of
+  // the first hap filed under it: every hap with the same key resolves to the
+  // same kind (the key IS derived from the kind), so this cannot drift.
+  function discoverLaneRows(pattern) {
+    var laneKeys = [];
+    var laneKinds = {};
+    var seen = {};
+    var discoveryHaps = [];
+    if (pattern && typeof pattern.queryArc === 'function') {
+      try {
+        discoveryHaps = pattern.queryArc(0, LANE_DISCOVERY_CYCLES) || [];
+      } catch (e) {
+        discoveryHaps = [];
+      }
+    }
+    for (var d = 0; d < discoveryHaps.length; d++) {
+      var dhap = discoveryHaps[d];
+      if (!dhap) continue;
+      var dlane = laneFor(dhap.value);
+      var dkey = dlane.key;
+      if (!Object.prototype.hasOwnProperty.call(seen, dkey)) {
+        seen[dkey] = true;
+        laneKeys.push(dkey);
+      }
+      laneKinds[dkey] = dlane.kind;
+    }
+    return { keys: laneKeys, kinds: laneKinds };
+  }
+
   function setPattern(pattern) {
     currentPattern = pattern;
+    // Recompute for the NEW pattern and clear for null: the cache is keyed to
+    // the pattern it came from, so a pattern swap can never leave the previous
+    // pattern's rows on screen (and a null pattern leaves no rows at all,
+    // which draw() reports as the single 'other' row).
+    var discovered = discoverLaneRows(pattern);
+    discoveryLaneKeys = discovered.keys;
+    discoveryLaneKinds = discovered.kinds;
   }
 
   function onSnapshot(snapshot) {
@@ -163,7 +280,12 @@
       return;
     }
 
-    var rect = canvas.getBoundingClientRect();
+    // The ONLY layout read in the frame, and it comes first: the editor's
+    // markText write below (setActiveSpans) dirties layout, so a rect read
+    // after it would force the browser to reflow synchronously. It is also
+    // CACHED (canvasRectFor) and only re-measured after a resize, because a
+    // stable rect does not need re-measuring at 60Hz — strudel-agent-wnm.1.
+    var rect = canvasRectFor(canvas);
     var dpr = window.devicePixelRatio || 1;
     var w = rect.width;
     var h = rect.height;
@@ -210,13 +332,9 @@
     var playhead = playheadX;
     var timelineWidth = Math.max(10, w - playheadX - 10);
     var windowCycles = 2;
-    // The lane ROW SET describes the PATTERN, not the window: a bounded
-    // discovery range anchored at cycle 0, so the rows never depend on WHEN
-    // you look. Bounded because a pattern can repeat forever; a pattern
-    // whose lanes spread over more than this still misses rows.
-    var LANE_DISCOVERY_CYCLES = 64;
 
-    // Query upcoming haps for timeline window
+    // Query upcoming haps for timeline window. This is the one query that MUST
+    // run per frame: the window moves with the clock.
     var haps = [];
     if (currentPattern && typeof currentPattern.queryArc === 'function') {
       try {
@@ -228,37 +346,26 @@
       }
     }
 
-    // Group haps into lanes. The ROW SET (laneKeys/laneKinds) comes from a
-    // bounded pattern-wide discovery query anchored at cycle 0, while the
+    // Group haps into lanes. The ROW SET (laneKeys/laneKinds) is the cached
+    // discovery result setPattern() computed ONCE for this pattern, while the
     // 2-cycle window haps above are the ONLY thing filed into laneMap — and
-    // hence the only thing that paints timeline blocks. A lane with no
-    // window hap keeps its row (label + separator, no block).
+    // hence the only thing that paints timeline blocks. A lane with no window
+    // hap keeps its row (label + separator, no block).
+    //
+    // draw() copies the cached rows rather than mutating them, so a frame can
+    // never corrupt the cache the next frame reads; the discovery query itself
+    // (anchored at cycle 0) is never issued here (strudel-agent-wnm.2).
     var laneMap = {};
     var laneKeys = [];
     var laneKinds = {};
 
-    var discoveryHaps = [];
-    if (currentPattern && typeof currentPattern.queryArc === 'function') {
-      try {
-        discoveryHaps = currentPattern.queryArc(0, LANE_DISCOVERY_CYCLES) || [];
-      } catch (e) {
-        discoveryHaps = [];
+    for (var r = 0; r < discoveryLaneKeys.length; r++) {
+      var rKey = discoveryLaneKeys[r];
+      if (!laneMap[rKey]) {
+        laneMap[rKey] = [];
+        laneKeys.push(rKey);
       }
-    }
-
-    for (var d = 0; d < discoveryHaps.length; d++) {
-      var dhap = discoveryHaps[d];
-      if (!dhap) continue;
-      var dlane = laneFor(dhap.value);
-      var dkey = dlane.key;
-      if (!laneMap[dkey]) {
-        laneMap[dkey] = [];
-        laneKeys.push(dkey);
-      }
-      // A lane keeps the kind of the first hap filed under it. Every hap with
-      // the same key resolves to the same kind (the key IS derived from the
-      // kind), so this cannot drift.
-      laneKinds[dkey] = dlane.kind;
+      laneKinds[rKey] = discoveryLaneKinds[rKey];
     }
 
     for (var i = 0; i < haps.length; i++) {

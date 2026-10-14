@@ -1559,15 +1559,15 @@
   {
     "name": "229-viz-lane-rows-from-window-not-discovery",
     "file": "srv/static/viz.js",
-    "old": "        discoveryHaps = currentPattern.queryArc(0, LANE_DISCOVERY_CYCLES) || [];",
+    "old": "        discoveryHaps = pattern.queryArc(0, LANE_DISCOVERY_CYCLES) || [];",
     "new": "        discoveryHaps = []; // deliberately: no discovery query, so the lane rows come from the 2-cycle window again and polymeter lanes vanish",
     "run": "TestVisualizationLaneRowsSpanTheWholePatternNotTheWindow"
   },
   {
     "name": "230-viz-lane-discovery-range-collapsed",
     "file": "srv/static/viz.js",
-    "old": "    var LANE_DISCOVERY_CYCLES = 64;",
-    "new": "    var LANE_DISCOVERY_CYCLES = 2; // deliberately: the discovery range collapses back to the window, so pattern-wide lane rows vanish",
+    "old": "  var LANE_DISCOVERY_CYCLES = 64;",
+    "new": "  var LANE_DISCOVERY_CYCLES = 2; // deliberately: the discovery range collapses back to the window, so pattern-wide lane rows vanish",
     "run": "TestVisualizationLaneRowsSpanTheWholePatternNotTheWindow"
   },
   {
@@ -1604,5 +1604,40 @@
     "old": "      if (on) {\n        root.classList.add('strudel-animating');\n      } else {",
     "new": "      if (on) {\n        void root; // deliberately: the animating marker class is never added, so the caret stays hidden\n      } else {",
     "run": "TestTypewriterCursorVisible"
+  },
+  {
+    "name": "236-viz-lane-discovery-recomputed-per-frame",
+    "file": "srv/static/viz.js",
+    "old": "    for (var r = 0; r < discoveryLaneKeys.length; r++) {\n      var rKey = discoveryLaneKeys[r];",
+    "new": "    var rediscovered = discoverLaneRows(currentPattern);\n    discoveryLaneKeys = rediscovered.keys;\n    discoveryLaneKinds = rediscovered.kinds; // deliberately: the discovery query is re-issued every frame, so the cached rows cost nothing\n    for (var r = 0; r < discoveryLaneKeys.length; r++) {\n      var rKey = discoveryLaneKeys[r];",
+    "run": "TestVisualizationLaneDiscoveryRunsOncePerPattern"
+  },
+  {
+    "name": "237-viz-lane-discovery-cache-not-cleared-for-null",
+    "file": "srv/static/viz.js",
+    "old": "    var discovered = discoverLaneRows(pattern);",
+    "new": "    var discovered = pattern ? discoverLaneRows(pattern) : { keys: discoveryLaneKeys, kinds: discoveryLaneKinds }; // deliberately: a null pattern keeps the previous pattern's rows",
+    "run": "TestVisualizationLaneDiscoveryRunsOncePerPattern"
+  },
+  {
+    "name": "238-viz-canvas-rect-reread-every-frame",
+    "file": "srv/static/viz.js",
+    "old": "    if (!canvasRectDirty && cachedCanvasRect) {\n      return cachedCanvasRect;\n    }",
+    "new": "    if (false) { // deliberately: the cached rect is never used, so the layout read forces a reflow every frame\n      return cachedCanvasRect;\n    }",
+    "run": "TestVisualizationCachesTheCanvasRectAcrossFrames|TestVisualizationResizeObserverInvalidatesTheCachedRect|TestVisualizationHighlightStillUpdatesEveryFrame"
+  },
+  {
+    "name": "239-viz-canvas-rect-never-invalidated",
+    "file": "srv/static/viz.js",
+    "old": "        window.addEventListener('resize', markCanvasRectDirty);",
+    "new": "        // deliberately: no resize listener, so a resized canvas keeps the stale rect forever",
+    "run": "TestVisualizationCachesTheCanvasRectAcrossFrames"
+  },
+  {
+    "name": "240-viz-layout-read-after-the-editor-write",
+    "file": "srv/static/viz.js",
+    "old": "    var ed = (typeof window !== 'undefined' && window.strudelEditor) || null;\n    if (ed && typeof ed.setActiveSpans === 'function') {\n      ed.setActiveSpans(activeSpans(haps, currentCycle));\n    }",
+    "new": "    var ed = (typeof window !== 'undefined' && window.strudelEditor) || null;\n    if (ed && typeof ed.setActiveSpans === 'function') {\n      ed.setActiveSpans(activeSpans(haps, currentCycle));\n    }\n    canvas.getBoundingClientRect(); // deliberately: a layout read placed after the editor's markText write, so the next read forces a synchronous reflow",
+    "run": "TestVisualizationReadsTheCanvasRectBeforeTheEditorWrite"
   }
 ]

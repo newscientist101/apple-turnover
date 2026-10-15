@@ -148,6 +148,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = cmdEvalResult(ctx, c, cmdArgs, stdout, stderr)
 	case "wait":
 		err = cmdWait(ctx, c, cmdArgs, stdout, stderr)
+	case "heartbeat":
+		err = cmdHeartbeat(ctx, c, cmdArgs, stdout, stderr)
+
 	case "anchor":
 		err = cmdAnchor(ctx, c, cmdArgs, stdout, stderr)
 	case "help", "-h", "--help":

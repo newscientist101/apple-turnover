@@ -117,6 +117,40 @@ func newCountingTestServer(t *testing.T) (base string, stateReads *int32) {
 	return "http://" + addr, &reads
 }
 
+func newCountingTestServerWithCodeAndHeartbeat(t *testing.T) (base string, codePosts *int32, heartbeatPosts *int32) {
+	t.Helper()
+	var codePostsVar int32
+	var heartbeatPostsVar int32
+	inner := srv.New().Handler()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code":
+			atomic.AddInt32(&codePostsVar, 1)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/heartbeat":
+			atomic.AddInt32(&heartbeatPostsVar, 1)
+		}
+		inner.ServeHTTP(w, r)
+	}))
+	t.Cleanup(func() {
+		done := make(chan struct{})
+		go func() {
+			ts.Close()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Errorf("httptest.Server.Close did not return within 5s; a handler is wedged")
+		}
+	})
+
+	addr := ts.Listener.Addr().String()
+	if strings.HasSuffix(addr, ":8000") {
+		t.Fatalf("test server bound %s, the production port; tests must not collide with it", addr)
+	}
+	return "http://" + addr, &codePostsVar, &heartbeatPostsVar
+}
+
 // idleListener connects a listener that never answers anything.
 //
 // Several `wait` cases need listenerCount > 0 for the RIGHT reason — a browser is
@@ -2919,5 +2953,21 @@ func TestStateNamesAnUnknownListener(t *testing.T) {
 	if strings.Contains(got.stdout, "NONE of the") {
 		t.Errorf("stdout reports an UNKNOWN listener as a missing-sample finding; "+
 			"it did not check, and saying so would invent a defect:\n%s", got.stdout)
+	}
+}
+func TestPushEmitsHeartbeatAfterPublish(t *testing.T) {
+	base, codePosts, heartbeatPosts := newCountingTestServerWithCodeAndHeartbeat(t)
+	got := runCLI(t, base, `s(\"bd\")`, "push")
+	if got.code != exitOK {
+		t.Fatalf("push: exit %d, stderr %q", got.code, got.stderr)
+	}
+	if !strings.Contains(got.stdout, "pushed version 1") {
+		t.Errorf("push = %q, want it to report version 1", got.stdout)
+	}
+	if got := atomic.LoadInt32(codePosts); got != 1 {
+		t.Errorf("push made %d POST /api/code calls, want 1", got)
+	}
+	if got := atomic.LoadInt32(heartbeatPosts); got != 1 {
+		t.Errorf("push made %d POST /api/heartbeat calls, want 1", got)
 	}
 }

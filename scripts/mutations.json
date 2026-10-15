@@ -1639,5 +1639,12 @@
     "old": "    var ed = (typeof window !== 'undefined' && window.strudelEditor) || null;\n    if (ed && typeof ed.setActiveSpans === 'function') {\n      ed.setActiveSpans(activeSpans(haps, currentCycle));\n    }",
     "new": "    var ed = (typeof window !== 'undefined' && window.strudelEditor) || null;\n    if (ed && typeof ed.setActiveSpans === 'function') {\n      ed.setActiveSpans(activeSpans(haps, currentCycle));\n    }\n    canvas.getBoundingClientRect(); // deliberately: a layout read placed after the editor's markText write, so the next read forces a synchronous reflow",
     "run": "TestVisualizationReadsTheCanvasRectBeforeTheEditorWrite"
+  },
+  {
+    "name": "241-push-heartbeat-removed",
+    "file": "cmd/agentcli/commands.go",
+    "old": "if !*dryRun {",
+    "new": "if false {",
+    "run": "TestPushEmitsHeartbeatAfterPublish"
   }
 ]

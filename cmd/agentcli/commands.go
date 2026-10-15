@@ -433,6 +433,10 @@ func cmdPush(ctx context.Context, c *client, args []string, stdin io.Reader, out
 	// whether a listener is connected and says so with a 409, and a pre-read
 	// would only be an observation of a condition that can change before the
 	// request lands.
+	// EXCEPTION: push (without --dry-run) is allowed a secondary POST /api/heartbeat
+	// after its primary POST /api/code to renew the agent presence lease. This
+	// heartbeat is best-effort and orthogonal: failure does not affect push's
+	// success, output, or exit code.
 	if *dryRun {
 		return pushDryRun(ctx, c, doc, out)
 	}
@@ -448,6 +452,15 @@ func cmdPush(ctx context.Context, c *client, args []string, stdin io.Reader, out
 	} else {
 		fmt.Fprintf(out, "pushed version %d\n", snap.Version)
 	}
+
+	// Best-effort heartbeat: orthogonal to the push success.
+	if !*dryRun {
+		// Ignore the result; a failure is merely a warning.
+		if err := c.post(ctx, "/api/heartbeat", nil, &snapshot{}); err != nil {
+			fmt.Fprintf(stderr, "agentcli: warning: heartbeat failed: %v\n", err)
+		}
+	}
+
 	if !*wait {
 		return nil
 	}
@@ -946,6 +959,26 @@ func reportWaited(c *client, snap snapshot, want int64, out io.Writer) error {
 	if haps, ok := statsHaps(v.Stats); ok {
 		fmt.Fprintf(out, "wait: %d haps\n", haps)
 	}
+	return nil
+}
+
+// cmdHeartbeat implements the heartbeat command.
+func cmdHeartbeat(ctx context.Context, c *client, args []string, out, stderr io.Writer) error {
+	if wantsFlaglessHelp(args) {
+		printFlaglessUsage(stderr, "heartbeat", "renew the agent's presence lease")
+		return errHelpRequested
+	}
+	if len(args) > 0 {
+		return usagef("heartbeat takes no arguments, got %q", strings.Join(args, " "))
+	}
+	var snap snapshot
+	if err := c.post(ctx, "/api/heartbeat", nil, &snap); err != nil {
+		return err
+	}
+	if c.jsonOutput {
+		return writeJSONLine(out, snap)
+	}
+	fmt.Fprintf(out, "heartbeat: agent presence renewed at %d (version %d)\\n", snap.Agent.LastSeenMS, snap.Version)
 	return nil
 }
 

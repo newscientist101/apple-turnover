@@ -70,18 +70,25 @@ func (e *serverError) Error() string {
 
 func (e *serverError) Unwrap() error { return e.Err }
 
+// AgentPresence mirrors the server's AgentPresence.
+type AgentPresence struct {
+	Active     bool  `json:"active"`
+	LastSeenMS int64 `json:"lastSeenMs"`
+}
+
 // snapshot mirrors the server's Snapshot. It is declared field-by-field rather
 // than reused so that a json tag renamed in srv/conductor.go shows up here as a
 // zero value, which the tests assert on rather than silently tolerating.
 type snapshot struct {
-	Version          int64       `json:"version"`
-	Code             string      `json:"code"`
-	LastAgentMessage string      `json:"lastAgentMessage"`
-	Anchor           anchor      `json:"anchor"`
-	History          []version   `json:"history"`
-	Playing          bool        `json:"playing"`
-	ListenerCount    int         `json:"listenerCount"`
-	LastEvalResult   *evalResult `json:"lastEvalResult"`
+	Version          int64         `json:"version"`
+	Code             string        `json:"code"`
+	LastAgentMessage string        `json:"lastAgentMessage"`
+	Anchor           anchor        `json:"anchor"`
+	History          []version     `json:"history"`
+	Playing          bool          `json:"playing"`
+	ListenerCount    int           `json:"listenerCount"`
+	LastEvalResult   *evalResult   `json:"lastEvalResult"`
+	Agent            AgentPresence `json:"agent"`
 
 	// LastSync is the newest drift observation a listener reported, or nil when
 	// none ever has. The POINTER is the whole point, exactly as SamplesResolved

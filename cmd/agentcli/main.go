@@ -99,6 +99,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "  play                      resume the performance\n")
 		fmt.Fprintf(stderr, "  eval-result [flags]       report how the last version evaluated\n")
 		fmt.Fprintf(stderr, "  wait [-version N]          block until a browser reports a verdict for that version\n")
+		// insert test
 		fmt.Fprintf(stderr, "  anchor [flags]            re-anchor the shared timeline (-epoch-ms, -cps)\n")
 		fmt.Fprintf(stderr, "\nflags:\n")
 		fs.PrintDefaults()
@@ -198,3 +199,5 @@ func envOr(name, fallback string) string {
 	}
 	return fallback
 }
+
+// test

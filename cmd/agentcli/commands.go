@@ -434,9 +434,10 @@ func cmdPush(ctx context.Context, c *client, args []string, stdin io.Reader, out
 	// would only be an observation of a condition that can change before the
 	// request lands.
 	// EXCEPTION: push (without --dry-run) is allowed a secondary POST /api/heartbeat
-	// after its primary POST /api/code to renew the agent presence lease. This
-	// heartbeat is best-effort and orthogonal: failure does not affect push's
-	// success, output, or exit code.
+	// after its primary POST /api/code to renew the agent presence lease; message
+	// is allowed a secondary POST /api/heartbeat after its primary POST /api/message.
+	// These heartbeats are best-effort and orthogonal: failure does not affect the
+	// command's success, output, or exit code.
 	if *dryRun {
 		return pushDryRun(ctx, c, doc, out)
 	}
@@ -455,9 +456,8 @@ func cmdPush(ctx context.Context, c *client, args []string, stdin io.Reader, out
 
 	// Best-effort heartbeat: orthogonal to the push success.
 	if !*dryRun {
-		// Ignore the result; a failure is merely a warning.
-		if err := c.post(ctx, "/api/heartbeat", nil, &snapshot{}); err != nil {
-			fmt.Fprintf(stderr, "agentcli: warning: heartbeat failed: %v\n", err)
+		if err := doHeartbeat(ctx, c); err != nil {
+			fmt.Fprintf(stderr, "agentcli: warning: heartbeat failed: %v\\n", err)
 		}
 	}
 
@@ -473,7 +473,7 @@ func cmdPush(ctx context.Context, c *client, args []string, stdin io.Reader, out
 	// There is no fresh budget here. The single deadline run() established covers
 	// the push AND the wait, so `-timeout 10s push --wait` is ten seconds in total
 	// rather than ten of push followed by another ten of waiting.
-	return waitForVerdict(ctx, c, snap.Version, *interval, out)
+	return waitForVerdict(ctx, c, snap.Version, *interval, out, stderr)
 }
 
 // dryRunRequest is the documented POST /api/dry-run body. It is `code` alone:
@@ -578,6 +578,11 @@ func cmdMessage(ctx context.Context, c *client, args []string, out, stderr io.Wr
 	// The version is echoed deliberately: narration must NOT bump it, so the
 	// unchanged version is the confirmation that only the words moved.
 	fmt.Fprintf(out, "message set at version %d (version unchanged)\n", snap.Version)
+
+	// Best-effort heartbeat: orthogonal to the message success.
+	if err := doHeartbeat(ctx, c); err != nil {
+		fmt.Fprintf(stderr, "agentcli: warning: heartbeat failed: %v\\n", err)
+	}
 	return nil
 }
 
@@ -846,7 +851,7 @@ func cmdWait(ctx context.Context, c *client, args []string, out, stderr io.Write
 	}
 
 	want := *ver
-	return waitForVerdict(ctx, c, want, *interval, out)
+	return waitForVerdict(ctx, c, want, *interval, out, stderr)
 }
 
 // waitForVerdict is the poll loop, separated from flag parsing so `push --wait`
@@ -856,7 +861,7 @@ func cmdWait(ctx context.Context, c *client, args []string, out, stderr io.Write
 // invariant of this command — an older verdict never satisfies it — and a second
 // copy is a second place for that invariant to be got wrong, with only one of them
 // covered by the tests written against the first.
-func waitForVerdict(ctx context.Context, c *client, want int64, interval time.Duration, out io.Writer) error {
+func waitForVerdict(ctx context.Context, c *client, want int64, interval time.Duration, out, stderr io.Writer) error {
 	for {
 		snap, err := c.get(ctx, "/api/state")
 		if err != nil {
@@ -902,6 +907,10 @@ func waitForVerdict(ctx context.Context, c *client, want int64, interval time.Du
 		if snap.ListenerCount == 0 {
 			return fmt.Errorf("no listeners are connected, so no browser will ever report a verdict "+
 				"for version %d; open the page in a browser first", want)
+		}
+		// Heartbeat: best-effort renewal of the agent presence lease.
+		if err := doHeartbeat(ctx, c); err != nil {
+			fmt.Fprintf(stderr, "agentcli: warning: heartbeat failed: %v\\n", err)
 		}
 
 		// The sleep is interruptible, so -timeout is a real bound on the WAIT and
@@ -961,6 +970,16 @@ func reportWaited(c *client, snap snapshot, want int64, out io.Writer) error {
 	}
 	return nil
 }
+
+// doHeartbeat posts to /api/heartbeat with an empty body and returns the error.
+// It is best-effort: the caller should not treat a non-nil error as a failure
+// of the surrounding operation.
+func doHeartbeat(ctx context.Context, c *client) error {
+	var snap snapshot
+	return c.post(ctx, "/api/heartbeat", nil, &snap)
+}
+
+// cmdHeartbeat implements the heartbeat command.
 
 // cmdHeartbeat implements the heartbeat command.
 func cmdHeartbeat(ctx context.Context, c *client, args []string, out, stderr io.Writer) error {
